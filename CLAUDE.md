@@ -281,6 +281,48 @@ class LLMBackend(Protocol):
 - **实现完成后归档**：把 `openspec/changes/` 下的提案推进到 `openspec/specs/`
 - **proposal 必须有「非目标」**，防止范围蔓延
 
+### 5.1 Git 分支与 PR 工作流（强制）
+
+`main` 分支已设 **branch protection**，**禁止直接 push**。任何代码 / 文档 / 配置改动必须走：
+
+1. **从最新 main 切 feature branch**：
+   ```bash
+   git checkout main && git pull origin main
+   git checkout -b <type>/<short-kebab-name>
+   ```
+   分支命名约定（与 OpenSpec change name 对齐）：
+   - `feat/<change-name>` —— 新功能 / 新提案实施（如 `feat/add-tool-registry-capability-layer`）
+   - `fix/<change-name>` —— bug 修复
+   - `docs/<short-name>` —— 仅文档
+   - `chore/<short-name>` —— 工具配置 / dependabot 等
+   - `refactor/<short-name>` —— 重构无行为变更
+
+2. **commit + push branch**：
+   ```bash
+   git add <explicit files>     # 禁用 git add -A 避免误带本地配置/secrets
+   git commit -m "<conventional commit msg>"
+   git push -u origin <branch>
+   ```
+
+3. **开 PR 到 main**：用 `\gh pr create --base main --title "..." --body "..."`；PR 描述含 spec 引用（`openspec/changes/<change-name>/`）与 Demo Path
+
+4. **等 CI 全绿 + review**（如适用）后 **squash merge 到 main**：
+   ```bash
+   \gh pr merge <num> --squash --delete-branch
+   ```
+
+5. **每个 OpenSpec change 一个 feature branch**：M0 之后所有 OpenSpec 提案（add-tool-registry-capability-layer / add-llm-backend-protocol / add-agent-loop-skeleton 等）都按此走；**不允许**多个提案合到同一 branch 混淆 PR scope
+
+**反模式**：
+
+- ❌ 在 main 上直接 commit（被 branch protection 拒，触发 fatal error）
+- ❌ 一个 branch 同时改两个不相关提案（拆分 PR）
+- ❌ commit message 与 branch 名 / OpenSpec change name 不对齐（让 PR 历史可追溯）
+- ❌ PR 不写 spec 引用 / Demo Path（reviewer 无法快速验证）
+- ❌ merge commit 而非 squash（保持 main history 线性，每个 PR 一个 commit 易于回滚 / cherry-pick）
+
+**例外**：dependabot 自动开 PR（`@dependabot rebase` / `squash and merge`）由 dependabot 管理 branch，人类只需 review + 合并。
+
 ---
 
 ## 6. 代码风格
