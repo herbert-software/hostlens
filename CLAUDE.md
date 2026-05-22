@@ -315,7 +315,7 @@ class LLMBackend(Protocol):
 
 **反模式**：
 
-- ❌ 在 main 上直接 commit（被 branch protection 拒，触发 fatal error）
+- ❌ **直接 push 到 main**（branch protection 在 push 阶段拒绝，触发 fatal error；注意 git 分布式，本地 commit 永远不会被拒，但 `git push origin main` 必失败 —— 必须走 feature branch + PR）
 - ❌ 一个 branch 同时改两个不相关提案（拆分 PR）
 - ❌ commit message 与 branch 名 / OpenSpec change name 不对齐（让 PR 历史可追溯）
 - ❌ PR 不写 spec 引用 / Demo Path（reviewer 无法快速验证）

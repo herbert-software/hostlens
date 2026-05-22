@@ -44,7 +44,7 @@ rules:
   proposal:
     - 用中文撰写；核心术语保留英文（Inspector / ExecutionTarget / Notifier / MCP / Planner Agent 等）
     - 必须有"非目标（Non-Goals）"小节，防止范围蔓延
-    - 每个提案对应一个 feature branch（命名 `feat/<change-name>`，与 OpenSpec change name 严格对齐），实施完成后通过 PR squash-merge 到 main；禁止在 main 上直接 commit（main 已设 branch protection）；详见 CLAUDE.md §5.1 Git 分支与 PR 工作流
+    - 每个提案对应一个 feature branch（命名 `feat/<change-name>`，与 OpenSpec change name 严格对齐），实施完成后通过 PR squash-merge 到 main；**禁止直接 push 到 main**（main 已设 branch protection；branch protection 在 push 阶段拒绝，本地 commit 不受影响 —— 必须走 feature branch + PR）；详见 CLAUDE.md §5.1 Git 分支与 PR 工作流
     - 必须显式列出"对外契约影响"（Inspector schema / Agent tool schema / MCP tool schema / Notifier Protocol / Schedule manifest / CLI 命令）
     - 涉及新 Inspector 时，至少给出 1 个完整 YAML manifest 示例
     - 涉及 Agent 行为变更时，必须说明 prompt caching 策略与 token 影响
