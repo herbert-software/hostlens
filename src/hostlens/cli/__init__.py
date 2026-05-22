@@ -7,9 +7,12 @@ command. M0 ships a single subcommand, `doctor`.
 
 from __future__ import annotations
 
+import sys
+
 import typer
 
 from hostlens.cli.doctor import run_doctor
+from hostlens.core.exceptions import ConfigError
 
 __all__ = ["app"]
 
@@ -43,6 +46,19 @@ def doctor_cmd(
 ) -> None:
     """Check local environment health (Python version, env vars, config dir)."""
 
-    exit_code = run_doctor(json_output=json_output)
+    try:
+        exit_code = run_doctor(json_output=json_output)
+    except ConfigError as exc:
+        # `run_doctor()` calls `load_settings()` which raises ConfigError on
+        # invalid user config (e.g. `HOSTLENS_LOG_MODE=invalid`). core/config
+        # has already redacted sensitive field values to "***", so printing
+        # str(exc) is safe. Show a friendly one-liner instead of a Python
+        # traceback at the CLI boundary.
+        typer.echo(f"hostlens: configuration error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+
+def main() -> None:  # pragma: no cover - convenience for `python -m hostlens.cli`
+    sys.exit(app())
