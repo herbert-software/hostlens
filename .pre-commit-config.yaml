@@ -23,6 +23,6 @@ repos:
         files: ^src/
         additional_dependencies:
           - pydantic>=2.13.4
-          - pydantic-settings>=2.2
+          - pydantic-settings>=2.14.1
           - structlog>=25.5.0
           - typer>=0.25.1
