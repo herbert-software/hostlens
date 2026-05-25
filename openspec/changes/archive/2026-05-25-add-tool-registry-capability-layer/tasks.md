@@ -113,5 +113,5 @@
 
 - [x] 17.1 完成所有上述任务后 commit 到 feature branch `feat/add-tool-registry-capability-layer`；commit message 含 OpenSpec change name 引用
 - [x] 17.2 push branch + 开 PR 到 main；PR 描述含 spec 引用（`openspec/changes/add-tool-registry-capability-layer/`）与 Demo Path
-- [ ] 17.3 等 CI 全绿 + review 通过后 squash merge：`\gh pr merge <num> --squash --delete-branch`
+- [x] 17.3 等 CI 全绿 + review 通过后 squash merge：`\gh pr merge <num> --squash --delete-branch`
 - [x] 17.4 准备归档：跑 `openspec-cn validate add-tool-registry-capability-layer`（位置参数，不是 `--change`）确认变更可归档；后续运行 `/opsx:archive` 推进到 `openspec/specs/tool-registry-capability-layer/` 与 `openspec/specs/agent-tool-adapter/`
