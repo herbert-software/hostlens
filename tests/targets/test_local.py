@@ -11,7 +11,7 @@ spec explicitly mandates "测试用真实 fixture" (CLAUDE.md §6) and the
 ``LocalTarget`` value lives in actually exercising
 ``create_subprocess_shell`` + ``killpg`` semantics, which a mock would
 trivialise away. The only mocked path is the lazy-probe counting test
-(task 3.3), where the call count IS the assertion.
+where the call count IS the assertion.
 """
 
 from __future__ import annotations

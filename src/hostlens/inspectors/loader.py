@@ -208,7 +208,7 @@ def _validate_property(path: str, schema: dict[str, Any]) -> None:
         # Array items with no `type` / oneOf / etc. — that's a problem for the
         # command-template walker (it cannot decide whether elements need
         # `| map('sh') | join`), but not for the constraint walker; the
-        # template walker (task 4.3) will reject such manifests anyway.
+        # template walker rejects such manifests downstream.
         return
 
     if schema_type == "object":

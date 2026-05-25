@@ -1,15 +1,13 @@
-"""Tests for the M1 builtin Inspector manifests (Group 6 — Tasks 9.1 + 9.2).
+"""Tests for the builtin Inspector manifests.
 
-The end-to-end ``runner.run(...)`` exercise lives in Group 7 / 8b once
-the runner + ToolRegistry dispatch are wired; here we pin the static
-contract:
+The end-to-end ``runner.run(...)`` exercise lives alongside the
+runner + ToolRegistry dispatch tests; here we pin the static contract:
 
   * Each builtin yaml passes ``load_manifest`` cleanly (so the loader's
     Jinja2 AST walker / parameter-schema walker / ReDoS detector are all
-    happy with the M1 fixtures we ship).
+    happy with the fixtures we ship).
   * ``build_registry_from_search_paths([], settings=Settings())``
-    surfaces both manifests with ``errors == []`` — the integration
-    point Group 7 / 8b will build on.
+    surfaces both manifests with ``errors == []``.
 """
 
 from __future__ import annotations
@@ -90,7 +88,7 @@ class TestSystemUptime:
         # All three named groups must round-trip via the regex; columns
         # length must match (the ParseSpec model_validator enforces this
         # but pinning the literal column set here documents the contract
-        # the runner will rely on once Group 7 wires `_parse_raw`).
+        # the runner relies on through `_parse_raw`).
         assert manifest.parse.raw_extract_regex is not None
         assert "(?P<load1>" in manifest.parse.raw_extract_regex
         assert "(?P<load5>" in manifest.parse.raw_extract_regex

@@ -1,12 +1,12 @@
 """Tests for ``hostlens.targets.config`` — schema + yaml loader.
 
-Spec: ``openspec/changes/add-execution-target-abstraction/specs/execution-target/spec.md``
-§需求:`TargetsConfig` 必须从 yaml 加载且环境变量占位展开.
+Spec: ``openspec/specs/execution-target/spec.md`` §需求:`TargetsConfig`
+必须从 yaml 加载且环境变量占位展开.
 
-Group D task 4.2 covers the Pydantic schema; task 4.3 covers
-``load_targets_config`` (env-placeholder expansion, missing-file
-behaviour, error mapping). Task 4.5 (secret scrub) is in the registry
-test module since it requires a registry round-trip.
+Covers the Pydantic schema and ``load_targets_config`` behaviour
+(env-placeholder expansion, missing-file fallback, error mapping). The
+registry-side secret-scrub round-trip lives in the registry test
+module since it requires registry build.
 """
 
 from __future__ import annotations

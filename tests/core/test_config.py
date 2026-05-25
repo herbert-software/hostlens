@@ -160,10 +160,10 @@ def test_inspectors_search_paths_drops_empty_segments(
 ) -> None:
     """Empty segments (`":/a"`, `"/a::/b"`, `"/a:"`) must not inject CWD.
 
-    Copilot review on PR #15: `Path("")` silently resolves to the current
-    working directory; a stray colon in the env value could let a hostile
-    `$PWD` shadow trusted inspector locations. The parser drops empty
-    parts so only explicit paths are scanned.
+    ``Path("")`` silently resolves to the current working directory; a
+    stray colon in the env value could let a hostile ``$PWD`` shadow
+    trusted inspector locations. The parser drops empty parts so only
+    explicit paths are scanned.
     """
     monkeypatch.setenv(
         "HOSTLENS_INSPECTORS_SEARCH_PATHS",

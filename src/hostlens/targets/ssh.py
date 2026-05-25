@@ -181,11 +181,11 @@ class SSHTarget:
         # tests that mock asyncssh.
         self._entry: TargetEntry | None = None
 
-        # Settings injection — task 4.4 mandates ``Settings`` flow
-        # through ``build_registry_from_config`` to here; lazy
-        # ``Settings()`` is only the fallback for standalone unit
-        # construction. Stored as opaque so this module does not
-        # depend on the Settings concrete class at import time.
+        # Settings injection — ``build_registry_from_config`` threads
+        # ``Settings`` through to here; lazy ``Settings()`` is only the
+        # fallback for standalone unit construction. Stored as opaque
+        # so this module does not depend on the Settings concrete class
+        # at import time.
         self._settings: object | None = _settings
 
         # Host-key verification policy. Default (False) lets asyncssh
@@ -220,9 +220,9 @@ class SSHTarget:
         """Effective ``idle_timeout_seconds`` for this target.
 
         Prefers ``self._settings.ssh.idle_timeout_seconds`` (injected
-        by ``build_registry_from_config`` per task 4.4). Falls back to
-        a lazy ``Settings()`` instance only when no settings was
-        injected (standalone unit construction). Lazy fallback uses
+        by ``build_registry_from_config``). Falls back to a lazy
+        ``Settings()`` instance only when no settings was injected
+        (standalone unit construction). Lazy fallback uses
         ``Settings()`` so env-var overrides
         (``HOSTLENS_SSH__IDLE_TIMEOUT_SECONDS``) still propagate in
         that path.

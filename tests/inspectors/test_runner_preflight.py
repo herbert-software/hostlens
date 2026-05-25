@@ -1,4 +1,4 @@
-"""Tests for `InspectorRunner._preflight` (task 8.2).
+"""Tests for `InspectorRunner._preflight`.
 
 The 6 preflight steps run in fixed order. For each `requires_unmet` cause
 we verify: (a) the correct `missing` list is returned, (b) the order

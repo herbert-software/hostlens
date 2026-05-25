@@ -1,4 +1,4 @@
-"""Tests for runner log redaction (task 8.7).
+"""Tests for runner log redaction.
 
 The contract: `inspector_started` / `inspector_finished` events must
 contain ONLY a fixed set of non-sensitive fields (name, version, target,

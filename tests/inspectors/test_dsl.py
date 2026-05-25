@@ -8,8 +8,8 @@ Per spec §需求:Finding DSL 引擎 必须用 simpleeval 且禁用危险节点:
   * lambda / list comprehension / dunder access / classic `().__class__`
     escape all raise `FeatureNotAvailable`
   * `now()` returns a tz-aware UTC `datetime`
-  * `float` / `int` are registered (per task 6.1 requirement and
-    `system.uptime` builtin manifest dependency)
+  * `float` / `int` are registered (the `system.uptime` builtin manifest
+    depends on `float(load1)` evaluating in `when:` expressions)
   * the `asyncio.wait_for` timeout path raises `asyncio.TimeoutError` on a
     slow callable (verifies the timeout mechanism, not a real ReDoS payload)
 

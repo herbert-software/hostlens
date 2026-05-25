@@ -264,8 +264,7 @@ def _check_targets(settings: Settings) -> list[TargetHealth]:
     # TargetsConfig") which the PrintLogger routes to **stdout** — that
     # would corrupt our strict-JSON output stream. Skipping the call
     # entirely on the absent-file path keeps the JSON contract intact
-    # for M0's snapshot tests (task 7.4: "M0 doctor tests must pass
-    # without modification").
+    # for the snapshot tests that pin the base doctor output schema.
     if not settings.targets_config_path.exists():
         return []
 

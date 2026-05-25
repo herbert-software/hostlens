@@ -348,7 +348,6 @@ class TestParseSpecCrossFieldRules:
         """Empty delimiter would crash `str.split("", maxsplit=1)` inside
         ``parse_kv``, escaping ``InspectorRunner.run()``'s "always return
         InspectorResult" contract. Reject at the schema layer instead.
-        Copilot review on PR #15.
         """
         with pytest.raises(ValidationError):
             ParseSpec(format="kv", delimiter="")

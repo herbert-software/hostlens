@@ -1,20 +1,18 @@
 """Tests for ``hostlens.targets.registry`` — TargetRegistry + factory.
 
-Spec: ``openspec/changes/add-execution-target-abstraction/specs/execution-target/spec.md``
-§需求:`TargetRegistry` 必须按 name 索引且同时持有 target 实例与配置元数据.
+Spec: ``openspec/specs/execution-target/spec.md`` §需求:`TargetRegistry`
+必须按 name 索引且同时持有 target 实例与配置元数据.
 
-Group D tasks covered here:
+Areas covered:
 
-- 4.1   ``TargetRegistry`` API (register / get / get_entry / names /
-        list / list_entries; name mismatch + illegal name + duplicate
-        raise).
-- 4.1b  Disabled-target behaviour — ``exec`` / ``read_file`` on a
-        disabled target raise ``target_disabled`` and never touch the
-        underlying transport (subprocess / asyncssh).
-- 4.4   ``build_registry_from_config`` round trip from
-        ``TargetsConfig``.
-- 4.5   Secret scrubbing — ``repr(SSHEntry)`` does not leak
-        ``password`` / ``passphrase``.
+- ``TargetRegistry`` API (register / get / get_entry / names / list /
+  list_entries; name mismatch + illegal name + duplicate raise).
+- Disabled-target behaviour — ``exec`` / ``read_file`` on a disabled
+  target raise ``target_disabled`` and never touch the underlying
+  transport (subprocess / asyncssh).
+- ``build_registry_from_config`` round trip from ``TargetsConfig``.
+- Secret scrubbing — ``repr(SSHEntry)`` does not leak ``password`` /
+  ``passphrase``.
 """
 
 from __future__ import annotations

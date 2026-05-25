@@ -1,7 +1,7 @@
 """`config_dir` permission tests for `hostlens doctor`.
 
-Covers cli-foundation spec §"配置目录不可读时退出 1" and the missing-dir
-status case from task 7.8.
+Covers cli-foundation spec §"配置目录不可读时退出 1" plus the
+missing-config-dir status branch.
 
 Implementation notes:
 - We redirect the doctor's view of the config dir by monkeypatching the

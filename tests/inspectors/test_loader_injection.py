@@ -15,7 +15,7 @@ literal text from the shell's POV: every dangerous character is either
 absent (e.g. unbalanced quotes that would have opened a string get
 escaped) or wrapped inside single quotes that shell can't interpret.
 
-This is the M1 task 4.6 acceptance test and the CI gate referenced in
+This is the shell-injection acceptance test + CI gate referenced in
 spec §需求:shell 注入 payload 矩阵 CI gate.
 """
 
@@ -34,10 +34,10 @@ import pytest
 def _sh_filter(value: object) -> str:
     """Mirror of the runner's `sh` filter — `shlex.quote(str(value))`.
 
-    The runner-side implementation (task 8.3) MUST stay identical to this;
-    if it ever diverges, the loader's static rejection of unquoted
-    parameters is meaningless. The injection matrix asserts this filter
-    produces safe-by-shell-eval text for the 10 payload classes below.
+    The runner-side ``_sh_filter`` MUST stay identical to this; if it
+    ever diverges, the loader's static rejection of unquoted parameters
+    is meaningless. The injection matrix asserts this filter produces
+    safe-by-shell-eval text for the 10 payload classes below.
     """
 
     return shlex.quote(str(value))

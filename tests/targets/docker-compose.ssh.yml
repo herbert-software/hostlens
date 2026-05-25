@@ -14,7 +14,7 @@
 #
 # Port 2222 is exposed so the host-side pytest fixture can address the
 # container directly. Each test uses an ephemeral username via
-# `useradd` to keep test isolation per spec task 5.11.
+# `useradd` to keep tests isolated from each other.
 
 services:
   sshd:

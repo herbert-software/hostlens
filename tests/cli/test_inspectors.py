@@ -394,7 +394,7 @@ def test_stderr_carries_load_errors_stdout_carries_table(
     runner: CliRunner,
     user_inspectors_dir: Path,
 ) -> None:
-    """Task 10.3: data on stdout, diagnostics on stderr.
+    """Data on stdout, diagnostics on stderr.
 
     The bad-yaml scenario already exercises the dual-stream split; this
     test pins it down explicitly so the contract can't regress quietly

@@ -1,4 +1,4 @@
-"""Tests for `InspectorRunner._evaluate_findings` (task 8.5).
+"""Tests for `InspectorRunner._evaluate_findings`.
 
 Two evaluation modes — iterative (`for_each`) and aggregate — each with
 their own context shape. The precise-except contract (design.md

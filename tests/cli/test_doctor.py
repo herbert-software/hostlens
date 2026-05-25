@@ -1,28 +1,24 @@
-"""Tests for `hostlens doctor` M1 targets extension.
+"""Tests for ``hostlens doctor`` — base checks + targets + inspectors.
 
-Covers tasks 7.1-7.4 of ``add-execution-target-abstraction``:
+Areas covered:
 
-- 7.1 ``_check_targets`` output structure (connectivity / credential /
-      capabilities) per target.
-- 7.2 ``doctor --json`` carries a ``targets`` key with stable schema.
-- 7.3 inline_plaintext warns but doctor stays exit 0; failed target
-      flips overall exit to 1; empty registry hints + exit 0.
-- 7.4 M0 checks (python_version / anthropic_key / config_dir) remain
-      under the same keys so the existing snapshot / redaction tests
-      continue to pass.
-
-M1.4 additions (``add-inspector-plugin-system`` Group 8a) extend the
-file with tasks 11.1-11.4:
-
-- 11.1 ``_check_inspectors`` returns the three documented statuses
-       (``ok`` / ``warn`` / ``fail``) and surfaces fatal
-       ``duplicate_inspector`` errors uniformly.
-- 11.2 ``doctor --json`` carries an ``inspectors`` key alongside the
-       existing M0 / M1.1 sections.
-- 11.3 ``inspectors.status == "fail"`` flips the overall exit code to 1
-       even when targets are healthy.
-- 11.4 The pre-existing M0 + M1.1 keys remain present after the M1.4
-       additive change.
+- ``_check_targets`` output structure (connectivity / credential /
+  capabilities) per target.
+- ``doctor --json`` carries a ``targets`` key with stable schema.
+- inline_plaintext credentials warn but doctor stays exit 0; a failed
+  target flips overall exit to 1; empty registry hints + exit 0.
+- The base checks (python_version / anthropic_key / config_dir) remain
+  under their original keys so the existing snapshot / redaction tests
+  continue to pass.
+- ``_check_inspectors`` returns the three documented statuses
+  (``ok`` / ``warn`` / ``fail``) and surfaces fatal
+  ``duplicate_inspector`` errors uniformly.
+- ``doctor --json`` carries an ``inspectors`` key alongside the
+  base + targets sections.
+- ``inspectors.status == "fail"`` flips the overall exit code to 1
+  even when targets are healthy.
+- The pre-existing base + targets keys remain present after the
+  additive ``inspectors`` section landed.
 """
 
 from __future__ import annotations
@@ -45,9 +41,9 @@ from hostlens.targets.registry import TargetRegistry
 def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
     """Persist a manifest dict as yaml under ``path``.
 
-    Local helper for the M1.4 inspectors tests; matches the same shape
-    used by ``tests/cli/test_inspectors.py`` so a future shared fixture
-    file can absorb both without churn.
+    Local helper for the inspectors tests; matches the same shape used
+    by ``tests/cli/test_inspectors.py`` so a future shared fixture file
+    can absorb both without churn.
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -125,11 +121,11 @@ def test_doctor_json_keeps_m0_checks(
     targets_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M0 checks remain under the same keys regardless of M1 additions.
+    """Base checks remain under the same keys after additive extensions.
 
-    Spec task 7.4 explicitly requires the python_version /
-    anthropic_key / config_dir entries to keep working without
-    test changes after the M1 doctor extension lands.
+    The python_version / anthropic_key / config_dir entries must keep
+    rendering with the same JSON shape even after targets / inspectors
+    sections were added.
     """
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-placeholder")
@@ -572,8 +568,7 @@ def test_doctor_duplicate_inspector_reports_builtin_loaded_count(
     When a user manifest shares a name with a builtin, the builder raises
     ``duplicate_inspector`` AFTER the builtins are already registered.
     ``_check_inspectors`` re-derives the builtin count from disk so the
-    JSON contract doesn't under-report what's actually available — the
-    Cursor Bugbot finding on PR #15 (commit 1a4d621).
+    JSON contract doesn't under-report what's actually available.
     """
 
     # User-path manifest with the same name as a builtin → fatal duplicate.
@@ -601,7 +596,6 @@ def test_doctor_builtin_failure_reports_loaded_zero(
     When ``build_registry_from_search_paths`` raises while scanning builtins
     (e.g. broken builtin manifest), the registry state is incomplete; the
     JSON contract must NOT show a "healthy loaded count" while build failed.
-    Cursor Bugbot review on PR #15 commit b8fcf60.
     """
 
     # Simulate a builtin-path failure by patching the builder to raise a
@@ -634,7 +628,7 @@ def test_doctor_inspectors_fail_with_healthy_targets_still_exits_1(
     user_inspectors_dir: Path,
     targets_yaml: Path,
 ) -> None:
-    """Task 11.3: ``inspectors=fail`` joins the fail set even when targets ok.
+    """``inspectors=fail`` joins the overall fail set even when targets ok.
 
     Verifies the readiness predicate ANDs the inspector status into the
     existing target / check criteria — a healthy target registry is no
@@ -664,14 +658,13 @@ def test_doctor_json_keeps_all_pre_existing_keys(
     targets_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Task 11.4: every previously-defined top-level key remains.
+    """Every previously-defined top-level key remains present.
 
-    Locks the additive guarantee — ``checks`` retains all three M0
-    entries, ``targets`` from M1.1 stays under its own key, and the
-    new ``inspectors`` block sits alongside without displacing anything.
-    Snapshot tests in ``test_doctor_schema_snapshot.py`` use the same
-    keyset; failing this here surfaces the regression closer to the
-    affected wiring.
+    Locks the additive guarantee — ``checks`` retains its base
+    entries, ``targets`` stays under its own key, and ``inspectors``
+    sits alongside without displacing anything. Snapshot tests in
+    ``test_doctor_schema_snapshot.py`` use the same keyset; failing
+    this here surfaces the regression closer to the affected wiring.
     """
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-placeholder")

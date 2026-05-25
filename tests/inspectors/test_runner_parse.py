@@ -1,4 +1,4 @@
-"""Tests for `InspectorRunner._parse_and_validate` (task 8.4).
+"""Tests for `InspectorRunner._parse_and_validate`.
 
 We verify dispatch on the four `parse_spec.format` values and the
 exception-propagation contract:

@@ -1,7 +1,7 @@
 """Schema stability snapshot for `hostlens doctor --json`.
 
-This file implements task 9.4 of the bootstrap-project-skeleton change and
-encodes the **schema evolution policy** from `design.md` D-9:
+This file encodes the **schema evolution policy** (project-skeleton spec
+§schema 演进 / `design.md` D-9):
 
 - Required fields are *locked*. Any change to the required surface is a
   breaking contract change and MUST be accompanied by a bump of

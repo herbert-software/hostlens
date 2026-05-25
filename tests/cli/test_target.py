@@ -214,7 +214,7 @@ def test_target_add_name_conflict_exits_2(
 
     assert result.exit_code == 2, result.stdout + result.stderr
     assert "already exists" in result.stderr
-    # Data on stdout, error on stderr (task 6.5 contract).
+    # Data on stdout, errors on stderr.
     assert "already exists" not in result.stdout
 
 
@@ -479,7 +479,7 @@ def test_stderr_carries_errors_stdout_only_data(
     targets_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Errors go to stderr; data goes to stdout (task 6.5)."""
+    """Errors go to stderr; data goes to stdout."""
 
     monkeypatch.setattr("hostlens.cli.target.os.geteuid", lambda: 0)
     result = runner.invoke(app, ["target", "add", "x", "--type", "local"])

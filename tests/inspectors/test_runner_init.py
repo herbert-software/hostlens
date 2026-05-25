@@ -1,4 +1,4 @@
-"""Tests for `InspectorRunner.__init__` (task 8.1).
+"""Tests for `InspectorRunner.__init__`.
 
 Pure construction contract: __init__ must NOT trigger IO / subprocess /
 yaml parsing. We verify by passing a target with a mock `exec` that

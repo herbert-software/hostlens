@@ -1,4 +1,4 @@
-"""Tests for `InspectorRunner._render_command` (task 8.3).
+"""Tests for `InspectorRunner._render_command`.
 
 Three contracts:
 

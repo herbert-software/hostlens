@@ -1,4 +1,4 @@
-"""Tests for `InspectorRunner.run` (task 8.6).
+"""Tests for `InspectorRunner.run`.
 
 Every one of the five `InspectorStatus` values must be reachable from
 this entry point without `run()` raising business exceptions. Plus the

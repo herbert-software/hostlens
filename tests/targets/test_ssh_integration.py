@@ -183,7 +183,7 @@ def sshd_endpoint(docker_ip: str, docker_services: Any) -> tuple[str, int]:
 
 @pytest.fixture
 def unique_username() -> str:
-    """Return a fresh username per test (spec task 5.11 isolation rule)."""
+    """Return a fresh username per test (test-isolation invariant)."""
 
     return f"test_{uuid.uuid4().hex[:8]}"
 
@@ -276,7 +276,7 @@ async def test_exec_non_zero_exit(sshd_endpoint: tuple[str, int]) -> None:
 async def test_exec_signal_killed_returns_128_plus_signum(
     sshd_endpoint: tuple[str, int],
 ) -> None:
-    """Spec §需求 task 5.10: signal-killed exit (128+signum).
+    """signal-killed exit (128+signum).
 
     We use ``exec kill -KILL $$`` so the remote shell replaces itself
     with the kill command before the signal lands — that way asyncssh

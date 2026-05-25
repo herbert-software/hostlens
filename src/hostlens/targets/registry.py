@@ -15,8 +15,7 @@ consumers (``list_targets_handler``, ``hostlens target list``,
 ``TargetsConfig`` plus runtime ``Settings`` it instantiates the concrete
 ``LocalTarget`` / ``SSHTarget`` objects and registers them. Settings is
 passed explicitly (not pulled from a module-level singleton) so test
-fixtures can drive registry assembly with custom Settings — see
-execution-target spec task 4.4.
+fixtures can drive registry assembly with custom Settings.
 """
 
 from __future__ import annotations
@@ -152,11 +151,11 @@ def build_registry_from_config(
 
     ``settings`` is threaded through explicitly (instead of letting the
     targets reach into a module-level singleton) so test fixtures can
-    drive registry assembly with a custom ``Settings`` instance — see
-    spec task 4.4. M1 SSHTarget reads ``ssh.idle_timeout_seconds`` from
-    the ambient ``Settings()`` lazily on first ``exec``; passing
-    ``settings`` here keeps that wiring honest and lets future SSH
-    settings (keepalive, channel limits) land without re-plumbing the
+    drive registry assembly with a custom ``Settings`` instance.
+    ``SSHTarget`` reads ``ssh.idle_timeout_seconds`` from the ambient
+    ``Settings()`` lazily on first ``exec``; passing ``settings`` here
+    keeps that wiring honest and lets future SSH settings (keepalive,
+    channel limits) land without re-plumbing the
     factory signature.
     """
 

@@ -517,21 +517,21 @@ def test_inspector_error_rejects_invalid_kind() -> None:
 def test_inspector_error_rejects_positional_call() -> None:
     """Spec §场景:positional 调用被拒绝.
 
-    The M1 signature uses ``*`` to make every parameter keyword-only,
-    forcing every caller through the structured form. Legacy M0
-    free-text positional construction must now raise ``TypeError``; the
+    The current signature uses ``*`` to make every parameter
+    keyword-only, forcing every caller through the structured form.
+    Free-text positional construction must raise ``TypeError``; the
     rejection-fixture below is the **only** intentional positional
     invocation in the repository (its sole purpose is to verify the
     rejection contract; the inline ``noqa`` keeps the repository-wide
-    grep gate `grep -rn 'InspectorError\\("` clean — see task 2.2).
+    grep gate `grep -rn 'InspectorError\\("` clean).
     """
 
     with pytest.raises(TypeError):
         # Positional construction is the rejection fixture — splitting
         # the open paren and the literal across two lines keeps the
         # repository-wide grep gate `grep -rn 'InspectorError\\("' clean
-        # (task 2.2) without sacrificing the negative-test coverage that
-        # task 2.1 requires.
+        # without sacrificing negative-test coverage of the keyword-only
+        # contract.
         InspectorError(
             "manifest_parse_error",  # type: ignore[misc]
         )
