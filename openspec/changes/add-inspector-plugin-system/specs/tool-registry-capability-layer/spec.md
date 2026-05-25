@@ -61,8 +61,8 @@
   3. handler 实现保持 "`raw_summaries = ctx.inspector_registry.list_summaries()` → 按 `tag` / `target_kind` 参数过滤 → 返回 `ListInspectorsOutput(inspectors=...)`" 不变；但内部数据来源从 stub 切到真实 manifest（`hello.echo` / `system.uptime` 等）
   4. **禁止**保留 stub fallback —— 测试 fixture 必须用 `build_registry_from_search_paths(...)` 装配真实 `InspectorRegistry`
 - `run_inspector_handler`：M2 stub 阶段返回 placeholder `RunInspectorOutput(findings=[])`；**本变更落地后**：
-  1. 从 `ctx.target_registry.get(args.target_name)` 拿 `ExecutionTarget`；未找到 raise `ToolError(kind="target_not_found")`
-  2. 从 `ctx.inspector_registry.get(args.inspector_name)` 拿 `InspectorManifest`；未找到 raise `ToolError(kind="inspector_not_found")`
+  1. 从 `ctx.target_registry.get(args.target_name)` 拿 `ExecutionTarget`；未找到 raise `ToolError("target_not_found: <detail>")`（M1.3 范围 `ToolError` 不带结构化 `kind` 字段——message 前缀 `target_not_found:` 是 stable 契约；测试断言 `"target_not_found" in str(exc)`）
+  2. 从 `ctx.inspector_registry.get(args.inspector_name)` 拿 `InspectorManifest`；未找到 raise `ToolError("inspector_not_found: <detail>")`（同上 message-prefix 风格）
   3. 构造 `InspectorRunner(target_registry=ctx.target_registry, settings=ctx.config, logger=ctx.logger)`
   4. `result = await runner.run(manifest, target, parameters=args.parameters, cancel=ctx.cancel)` —— **注意**：`allow_privileged` 在 M2 agent surface 强制 `False`（Agent 不能 opt-in privilege；只有 CLI / human approval 才能）
   5. 投影 `InspectorResult → RunInspectorOutput`：`target_name` ← `result.target_name`；`inspector_name` ← `result.name`；`findings` ← `[FindingSummary(severity=f.severity, message=f.message, evidence=_str_only(f.evidence)) for f in result.findings]`
@@ -138,12 +138,12 @@
 #### 场景:run_inspector handler target 不存在 raise ToolError
 
 - **当** `await registry_tool.dispatch("run_inspector", RunInspectorInput(target_name="not-exist", inspector_name="hello.echo"), ctx)`
-- **那么** 必须 raise `ToolError(kind="target_not_found")`（这是调用方传错参数的情况，应该抛而非吞掉）
+- **那么** 必须 raise `ToolError`，且 `"target_not_found" in str(exc)`（M1.3 范围 `ToolError` 不带结构化 kind 字段；message-prefix `"target_not_found: ..."` 是 stable 契约——这是调用方传错参数的情况，应该抛而非吞掉）
 
 #### 场景:run_inspector handler inspector 不存在 raise ToolError
 
 - **当** `await registry_tool.dispatch("run_inspector", RunInspectorInput(target_name="local-host", inspector_name="does.not.exist"), ctx)`
-- **那么** 必须 raise `ToolError(kind="inspector_not_found")`
+- **那么** 必须 raise `ToolError`，且 `"inspector_not_found" in str(exc)`（同上 message-prefix 风格）
 
 #### 场景:run_inspector handler 在 agent surface 强制 allow_privileged=False
 
