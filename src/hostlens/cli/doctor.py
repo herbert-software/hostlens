@@ -366,6 +366,22 @@ async def _probe_enabled_targets(
 # ---------------------------------------------------------------------------
 
 
+def _count_builtin_manifests() -> int:
+    """Count YAML manifests under the hardcoded builtin directory.
+
+    Used by the duplicate_inspector failure path in ``_check_inspectors``
+    where the builder raises **after** builtins are already registered —
+    so the doctor row should still reflect the (partially) loaded count
+    instead of reporting 0.
+    """
+    import hostlens.inspectors as _inspectors_pkg
+
+    builtin_dir = Path(_inspectors_pkg.__file__).parent / "builtin"
+    if not builtin_dir.is_dir():
+        return 0
+    return sum(1 for _ in builtin_dir.rglob("*.yaml"))
+
+
 def _check_inspectors(settings: Settings) -> InspectorsHealth:
     """Inspector registry health probe for ``hostlens doctor``.
 
@@ -410,9 +426,14 @@ def _check_inspectors(settings: Settings) -> InspectorsHealth:
                 detail=str(exc),
             )
         )
+        # The builder scans builtins before user paths, so a fatal
+        # duplicate_inspector raised on the user-path leg leaves the
+        # builtins already-registered. Re-derive that count from disk so
+        # the JSON doesn't under-report the number of inspectors the
+        # operator can actually invoke once the duplicate is resolved.
         return InspectorsHealth(
             status="fail",
-            loaded=0,
+            loaded=_count_builtin_manifests(),
             errors=errors,
             missing_secrets=[],
         )

@@ -561,6 +561,36 @@ def test_doctor_json_inspectors_status_fail_on_bad_yaml(
     assert "bad.yaml" in err_row["path"]
 
 
+def test_doctor_duplicate_inspector_reports_builtin_loaded_count(
+    runner: CliRunner,
+    user_inspectors_dir: Path,
+    targets_yaml: Path,
+) -> None:
+    """``loaded`` reflects already-registered builtins on fatal duplicate.
+
+    ``build_registry_from_search_paths`` scans builtins before user paths.
+    When a user manifest shares a name with a builtin, the builder raises
+    ``duplicate_inspector`` AFTER the builtins are already registered.
+    ``_check_inspectors`` re-derives the builtin count from disk so the
+    JSON contract doesn't under-report what's actually available — the
+    Cursor Bugbot finding on PR #15 (commit 1a4d621).
+    """
+
+    # User-path manifest with the same name as a builtin → fatal duplicate.
+    _write_manifest(
+        user_inspectors_dir / "hello-clone.yaml",
+        _valid_manifest_payload(name="hello.echo"),
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 1, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["inspectors"]["status"] == "fail"
+    assert payload["inspectors"]["errors"][0]["kind"] == "duplicate_inspector"
+    # Must reflect the actual builtin count (currently 2: hello.echo + system.uptime).
+    assert payload["inspectors"]["loaded"] >= 2, payload["inspectors"]
+
+
 def test_doctor_inspectors_fail_with_healthy_targets_still_exits_1(
     runner: CliRunner,
     user_inspectors_dir: Path,
