@@ -166,7 +166,9 @@ CLAUDE.md §4.3 与 docs/ARCHITECTURE.md §5 已经把 Protocol 形状钉死（`
    import asyncssh
    from hostlens.targets.config import load_targets_config, build_registry_from_config
    cfg = load_targets_config(Path("~/.config/hostlens/targets.yaml").expanduser())
-   reg = build_registry_from_config(cfg)
+   from hostlens.core.config import Settings
+   settings = Settings()
+   reg = build_registry_from_config(cfg, settings)
    target = reg.get("my-ssh")
    with patch.object(asyncssh, "connect", wraps=asyncssh.connect) as m:
        async def go():
@@ -188,14 +190,15 @@ CLAUDE.md §4.3 与 docs/ARCHITECTURE.md §5 已经把 Protocol 形状钉死（`
     from hostlens.core.config import Settings
     import structlog, asyncio as _a
 
+    settings = Settings()
     cfg = load_targets_config(Path("~/.config/hostlens/targets.yaml").expanduser())
-    target_reg = build_registry_from_config(cfg)
+    target_reg = build_registry_from_config(cfg, settings)
     tool_reg = ToolRegistry()
     register_default_tools(tool_reg)
     ctx = ToolContext(
         target_registry=target_reg,
         inspector_registry=...,                       # M1 下一提案落地前可用 stub
-        config=Settings(),
+        config=settings,
         logger=structlog.get_logger(),
         approval_service=NoopApprovalService(),
         cancel=_a.Event(),

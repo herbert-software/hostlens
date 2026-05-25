@@ -210,7 +210,7 @@ Registry **不**持有连接状态 —— 它只是 (name → target 实例 + na
     - `hostlens target test <name>` 对 disabled target 必须 exit 1 + stderr 含 `"target 'xxx' is disabled in targets.yaml"`，**不**触发连接
     - 任何 `ExecutionTarget.exec(...)` / `read_file(...)` 调用前必须检查 entry.enabled；disabled 时 raise `TargetError(kind="target_disabled", target=self.name)`，**不**触发底层连接
     - `hostlens doctor` 对 disabled target 标 `connectivity: "skipped"`（已在 doctor 需求里规定）
-    - `list_targets` ToolSpec handler **不**过滤 disabled target；返回的 `TargetSummary.enabled` 必须为 `False`（让 Agent 知道存在但 disabled，由 Agent 决定是否在 inspector dispatch 时跳过）
+    - `list_targets` ToolSpec handler 行为对齐 M2 锁定的 `ListTargetsInput.include_disabled: bool = False` 字段语义：默认 `include_disabled=False` 时 handler **必须过滤掉** `enabled=False` 的 target（输出**只含** enabled）；`include_disabled=True` 时输出**所有** target（含 `enabled=False`），每条 `TargetSummary.enabled` 如实反映；这保持字段名与行为一致，避免"字段叫 include_disabled 但默认仍返回 disabled"的语义混乱
   - `display_name: str | None = None`（人类友好名，可选；缺省时 list_targets 投影用 `name`）
   - `description: str | None = None`（可选说明）
   - `tags: list[str] = Field(default_factory=list)`（默认空 list；Pydantic v2 必须用 `default_factory` 而不是可变默认值 `[]` 避免实例间共享；list_targets 投影直接透传）
