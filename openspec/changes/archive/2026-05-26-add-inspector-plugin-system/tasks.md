@@ -266,5 +266,5 @@
 - [x] 16.2 完成所有上述任务后 commit 到 feature branch（**禁止**直接 push 到 main，main 已设 branch protection；按 CLAUDE.md §5.1 全部走 PR 流程）
 - [x] 16.3 **commit 后、push 前**：跑 `/review-loop-codex` 对代码变更做对抗性 review（理由：本提案含 shell 注入静态校验 + simpleeval sandbox + 跨 spec MODIFIED 块——属于"安全相关 + 跨模块"必须走 review 的范畴；按 CLAUDE.md §5.3 判断标准）；结论 APPROVE/CLEAR 才进入 16.4
 - [x] 16.4 push branch + 开 PR 到 main（描述含 spec 引用 `openspec/changes/add-inspector-plugin-system/` 与 proposal.md Demo Path 链接）
-- [ ] 16.5 等 CI 全绿 + 人类 review 通过后 squash merge：`\gh pr merge <num> --squash --delete-branch`
-- [ ] 16.6 准备归档：跑 `openspec-cn validate add-inspector-plugin-system` 确认变更可归档；后续运行 `/opsx:archive` 推进到 `openspec/specs/{inspector-plugin-system}/spec.md` 并同步 `openspec/specs/tool-registry-capability-layer/spec.md` 的 2 个 MODIFIED 需求块（ToolContext 字段类型 + M2 首批 ToolSpec handler 契约）
+- [x] 16.5 等 CI 全绿 + 人类 review 通过后 squash merge：`\gh pr merge 15 --squash --delete-branch`（合并为 main commit `2741b94`）
+- [x] 16.6 准备归档：跑 `openspec-cn validate add-inspector-plugin-system` 确认变更可归档；后续运行 `/opsx:archive` 推进到 `openspec/specs/{inspector-plugin-system}/spec.md` 并同步 `openspec/specs/tool-registry-capability-layer/spec.md` 的 2 个 MODIFIED 需求块（ToolContext 字段类型 + M2 首批 ToolSpec handler 契约）
