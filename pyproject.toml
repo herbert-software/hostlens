@@ -103,5 +103,4 @@ pythonpath = ["src"]
 addopts = "-ra --strict-markers --strict-config"
 markers = [
     "slow: long-running tests",
-    "flaky_ssh_integration: SSH integration tests allowed 1 retry due to container cold-start jitter",
 ]

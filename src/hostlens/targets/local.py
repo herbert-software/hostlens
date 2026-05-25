@@ -197,8 +197,13 @@ class LocalTarget:
             # because of ``start_new_session=True``. ``ProcessLookupError``
             # means the process tree died on its own between the
             # ``TimeoutError`` and the ``killpg`` call — benign.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            try:
+                pgid = os.getpgid(proc.pid)
+            except ProcessLookupError:
+                pgid = None
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pgid, signal.SIGKILL)
             # Drain whatever the subprocess wrote before being killed so
             # callers still see partial output. ``communicate`` is
             # idempotent here and also reaps the zombie.

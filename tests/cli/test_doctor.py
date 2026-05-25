@@ -14,15 +14,19 @@ Covers tasks 7.1-7.4 of ``add-execution-target-abstraction``:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 from typer.testing import CliRunner
 
 from hostlens.cli import app
+from hostlens.targets.base import Capability
+from hostlens.targets.registry import TargetRegistry
 
 
 @pytest.fixture
@@ -277,3 +281,130 @@ def test_doctor_credential_source_key_only(
     payload = json.loads(result.stdout)
     [row] = payload["targets"]
     assert row["credential_source"] == "key_only"
+
+
+# ---------------------------------------------------------------------------
+# Event-loop unification + aclose plumbing
+# ---------------------------------------------------------------------------
+
+
+class _FakeTarget:
+    """Minimal ``ExecutionTarget`` stand-in for doctor-flow tests.
+
+    Records the running-loop id of each ``exec`` call so the test can
+    assert all probes share one loop. Exposes ``aclose`` as an
+    ``AsyncMock`` so the test can assert doctor releases per-target
+    resources after the probe batch finishes.
+    """
+
+    def __init__(self, name: str, *, enabled: bool = True) -> None:
+        self.name = name
+        self.type = "local"
+        self.capabilities = {Capability.SHELL, Capability.FILE_READ}
+        self.loop_ids_seen: list[int] = []
+        self.aclose = AsyncMock()
+        from hostlens.targets.config import LocalEntry
+
+        self._entry = LocalEntry(name=name, type="local", enabled=enabled)
+
+    async def exec(self, cmd: str, *, timeout: int) -> Any:
+        from hostlens.targets.base import ExecResult
+
+        self.loop_ids_seen.append(id(asyncio.get_running_loop()))
+        return ExecResult(
+            exit_code=0,
+            stdout="hostlens-doctor-probe",
+            stderr="",
+            duration_seconds=0.001,
+            timed_out=False,
+        )
+
+    async def read_file(self, path: str) -> bytes:
+        return b""
+
+
+def _install_fake_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    targets: list[_FakeTarget],
+) -> None:
+    """Replace doctor's ``build_registry_from_config`` with a fixed registry.
+
+    A real registry is used so ``list_entries`` ordering / ``get`` lookups
+    keep matching what doctor already expects from the production wiring.
+    """
+
+    def _factory(config: Any, settings: Any) -> TargetRegistry:
+        registry = TargetRegistry()
+        for t in targets:
+            registry.register(t, t._entry)  # type: ignore[arg-type]
+        return registry
+
+    monkeypatch.setattr("hostlens.cli.doctor.build_registry_from_config", _factory)
+
+
+def test_doctor_uses_single_event_loop_for_target_probes(
+    runner: CliRunner,
+    targets_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-target probes must share one ``asyncio.run`` event loop.
+
+    A new loop per target invalidates any async resource (SSH control
+    connection, async lock) the target may cache between calls; doctor
+    must gather all probes under a single loop.
+    """
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-placeholder")
+    _write_yaml(
+        targets_yaml,
+        {
+            "version": "1",
+            "targets": [
+                {"name": "alpha", "type": "local"},
+                {"name": "bravo", "type": "local"},
+                {"name": "charlie", "type": "local"},
+            ],
+        },
+    )
+    fakes = [_FakeTarget("alpha"), _FakeTarget("bravo"), _FakeTarget("charlie")]
+    _install_fake_registry(monkeypatch, fakes)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    observed_loop_ids = {lid for t in fakes for lid in t.loop_ids_seen}
+    assert len(observed_loop_ids) == 1
+    for t in fakes:
+        assert len(t.loop_ids_seen) == 1
+
+
+def test_doctor_calls_aclose_on_targets_with_aclose(
+    runner: CliRunner,
+    targets_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Doctor must release each target's async resources after probing.
+
+    ``SSHTarget`` opens a control connection on the first probe; without
+    an explicit ``aclose`` the connection lingers until ``__del__`` and
+    surfaces a ResourceWarning under pytest's strict mode.
+    """
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-placeholder")
+    _write_yaml(
+        targets_yaml,
+        {
+            "version": "1",
+            "targets": [
+                {"name": "alpha", "type": "local"},
+                {"name": "bravo", "type": "local"},
+            ],
+        },
+    )
+    fakes = [_FakeTarget("alpha"), _FakeTarget("bravo")]
+    _install_fake_registry(monkeypatch, fakes)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    for t in fakes:
+        assert t.aclose.await_count >= 1

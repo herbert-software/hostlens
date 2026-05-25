@@ -306,6 +306,44 @@ async def test_reconnect_exhausts_full_backoff_schedule() -> None:
     assert sleeps == [1.0, 4.0, 16.0]
 
 
+async def test_reconnect_retry_failure_raises_target_error() -> None:
+    """Second ``_run_on_channel`` dropping must surface as ``TargetError``.
+
+    Race window: reconnect succeeds but the brand-new connection drops
+    before the retried exec completes. The raw asyncssh exception must
+    be wrapped so callers get the documented ``ssh_connect_failed``
+    contract instead of a vendor exception type.
+    """
+
+    target = SSHTarget("ssh-host")
+    _attach_entry(target, FakeEntry())
+    conn_a = _make_fake_conn(
+        run_side_effect=[asyncssh.ConnectionLost("initial drop")],
+    )
+    conn_b = _make_fake_conn(
+        run_side_effect=[asyncssh.ConnectionLost("retry drop")],
+    )
+
+    async def _instant_sleep(_delay: float) -> None:
+        return None
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=[conn_a, conn_b]),
+        ) as mock_connect,
+        patch("hostlens.targets.ssh.asyncio.sleep", new=_instant_sleep),
+        pytest.raises(TargetError) as exc_info,
+    ):
+        await target.exec("echo hi", timeout=5)
+
+    assert exc_info.value.kind == "ssh_connect_failed"
+    assert exc_info.value.target == "ssh-host"
+    # 1 initial connect + 1 reconnect = 2 dials; we never re-enter
+    # ``_reconnect`` once the retry-on-new-conn fails.
+    assert mock_connect.call_count == 2
+
+
 async def test_first_connect_failure_does_not_enter_reconnect_loop() -> None:
     """First-connect OSError → ssh_connect_timeout; no backoff sleeps."""
 

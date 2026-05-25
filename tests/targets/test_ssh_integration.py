@@ -499,7 +499,6 @@ async def test_read_file_over_10mb_raises(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.flaky_ssh_integration
 async def test_password_not_in_error_message_on_auth_failure(
     sshd_endpoint: tuple[str, int],
 ) -> None:

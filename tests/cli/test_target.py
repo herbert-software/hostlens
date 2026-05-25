@@ -131,6 +131,73 @@ def test_target_add_ssh_writes_placeholder_for_env_vars(
     assert entry["key_path"] == "/tmp/id_rsa"
 
 
+def test_target_add_rejects_lowercase_password_env_name(
+    runner: CliRunner,
+    targets_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--password-env my_pwd`` would write a placeholder the loader never expands.
+
+    The loader's ``_PLACEHOLDER_PATTERN`` is ``^[A-Z_][A-Z0-9_]*$`` —
+    accepting anything else here silently surfaces the literal
+    ``${my_pwd}`` string as the credential at connect time.
+    """
+
+    monkeypatch.setattr("hostlens.cli.target.os.geteuid", lambda: 1000)
+    result = runner.invoke(
+        app,
+        [
+            "target",
+            "add",
+            "my-ssh",
+            "--type",
+            "ssh",
+            "--host",
+            "10.0.0.5",
+            "--user",
+            "alice",
+            "--password-env",
+            "my_pwd",
+        ],
+    )
+
+    assert result.exit_code == 2, result.stdout + result.stderr
+    assert "^[A-Z_][A-Z0-9_]*$" in result.stderr
+    assert not targets_yaml.exists()
+
+
+def test_target_add_rejects_lowercase_passphrase_env_name(
+    runner: CliRunner,
+    targets_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule for ``--passphrase-env``."""
+
+    monkeypatch.setattr("hostlens.cli.target.os.geteuid", lambda: 1000)
+    result = runner.invoke(
+        app,
+        [
+            "target",
+            "add",
+            "my-ssh",
+            "--type",
+            "ssh",
+            "--host",
+            "10.0.0.5",
+            "--user",
+            "alice",
+            "--key-path",
+            "/tmp/id_rsa",
+            "--passphrase-env",
+            "myPass",
+        ],
+    )
+
+    assert result.exit_code == 2, result.stdout + result.stderr
+    assert "^[A-Z_][A-Z0-9_]*$" in result.stderr
+    assert not targets_yaml.exists()
+
+
 def test_target_add_name_conflict_exits_2(
     runner: CliRunner,
     targets_yaml: Path,

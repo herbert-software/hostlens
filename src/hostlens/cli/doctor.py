@@ -35,6 +35,7 @@ Do NOT regress these invariants without an explicit spec update:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import sys
@@ -289,9 +290,9 @@ def _check_targets(settings: Settings) -> list[TargetHealth]:
     raw_entries = _read_raw_entries(settings.targets_config_path)
 
     rows: list[TargetHealth] = []
+    enabled_entries: list[tuple[Any, Any, TargetCredentialSource]] = []
     for entry in registry.list_entries():
         target = registry.get(entry.name)
-        caps = sorted(c.value for c in target.capabilities)
         credential_source = _detect_credential_source(
             entry.type,
             raw_entries.get(entry.name),
@@ -304,28 +305,55 @@ def _check_targets(settings: Settings) -> list[TargetHealth]:
                     enabled=False,
                     connectivity="skipped",
                     credential_source=credential_source,
-                    capabilities=caps,
+                    capabilities=sorted(c.value for c in target.capabilities),
                     error_kind=None,
                 )
             )
             continue
-        connectivity, error_kind = asyncio.run(_probe_target(target))
-        # Re-read capabilities AFTER the probe so the lazy ``which``
-        # probe inside LocalTarget / SSHTarget has populated SYSTEMD /
-        # DOCKER_CLI extras.
-        caps = sorted(c.value for c in target.capabilities)
-        rows.append(
-            TargetHealth(
-                name=entry.name,
-                type=entry.type,
-                enabled=entry.enabled,
-                connectivity=connectivity,
-                credential_source=credential_source,
-                capabilities=caps,
-                error_kind=error_kind,
+        enabled_entries.append((entry, target, credential_source))
+
+    if enabled_entries:
+        targets_only = [t for (_, t, _) in enabled_entries]
+        probe_results = asyncio.run(_probe_enabled_targets(targets_only))
+        for (entry, target, credential_source), (connectivity, error_kind) in zip(
+            enabled_entries, probe_results, strict=True
+        ):
+            # Re-read capabilities AFTER the probe so the lazy ``which``
+            # probe inside LocalTarget / SSHTarget has populated SYSTEMD
+            # / DOCKER_CLI extras.
+            rows.append(
+                TargetHealth(
+                    name=entry.name,
+                    type=entry.type,
+                    enabled=entry.enabled,
+                    connectivity=connectivity,
+                    credential_source=credential_source,
+                    capabilities=sorted(c.value for c in target.capabilities),
+                    error_kind=error_kind,
+                )
             )
-        )
     return rows
+
+
+async def _probe_enabled_targets(
+    targets: list[Any],
+) -> list[tuple[TargetConnectivity, str | None]]:
+    """Probe a batch of enabled targets on one event loop.
+
+    ``aclose`` runs in a ``finally`` so a probe raising still releases the
+    underlying SSH control connection — ``SSHTarget.__del__`` would
+    otherwise surface a ResourceWarning. Doctor is best-effort so close
+    failures are suppressed (they must not pollute the strict-JSON output).
+    """
+
+    try:
+        return await asyncio.gather(*[_probe_target(t) for t in targets])
+    finally:
+        for t in targets:
+            aclose = getattr(t, "aclose", None)
+            if aclose is not None:
+                with contextlib.suppress(Exception):
+                    await aclose()
 
 
 # Readiness semantics per spec cli-foundation (M0) + execution-target (M1):

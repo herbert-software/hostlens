@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,23 @@ def _refuse_root_for_write(verb: str) -> None:
             err=True,
         )
         raise typer.Exit(code=1)
+
+
+# Mirrors ``hostlens.targets.config._PLACEHOLDER_PATTERN``: the loader
+# only expands ``${VAR}`` when ``VAR`` matches ``^[A-Z_][A-Z0-9_]*$``.
+# Accepting anything else here writes a placeholder that will never be
+# expanded, silently surfacing the literal ``${var}`` as the credential.
+_ENV_VAR_NAME_PATTERN: re.Pattern[str] = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
+def _validate_env_var_name(verb: str, flag: str, value: str) -> None:
+    if _ENV_VAR_NAME_PATTERN.fullmatch(value) is None:
+        typer.echo(
+            f"hostlens target {verb}: {flag} value {value!r} is not a valid "
+            f"env var name (must match ^[A-Z_][A-Z0-9_]*$)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
 
 def _emit_target_error(verb: str, exc: TargetError) -> None:
@@ -216,6 +234,11 @@ def add_cmd(
     # §场景:target add EUID==0 直接 exit 1 asserts targets.yaml is not
     # created in this branch).
     _refuse_root_for_write("add")
+
+    if password_env is not None:
+        _validate_env_var_name("add", "--password-env", password_env)
+    if passphrase_env is not None:
+        _validate_env_var_name("add", "--passphrase-env", passphrase_env)
 
     try:
         settings = load_settings()

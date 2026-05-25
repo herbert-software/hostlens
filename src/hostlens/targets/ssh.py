@@ -608,7 +608,14 @@ class SSHTarget:
             async with self._get_lock():
                 await self._close_conn_locked()
                 await self._reconnect()
-            result = await self._run_on_channel(cmd, timeout=timeout, env=env)
+            try:
+                result = await self._run_on_channel(cmd, timeout=timeout, env=env)
+            except (asyncssh.ConnectionLost, asyncssh.ChannelOpenError) as exc:
+                raise TargetError(
+                    kind="ssh_connect_failed",
+                    target=self.name,
+                    original=exc,
+                ) from exc
 
         self._last_used_at = time.monotonic()
         # Lazy capability probe on first successful exec. Spec requires
