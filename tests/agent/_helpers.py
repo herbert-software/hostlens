@@ -16,11 +16,16 @@ import structlog
 from pydantic import BaseModel
 
 from hostlens.core.config import Settings
+from hostlens.targets.registry import TargetRegistry
 from hostlens.tools.base import NoopApprovalService, ToolContext, ToolSpec
 
 
-class StubRegistry:
-    """Minimal stub satisfying both TargetRegistry and InspectorRegistry."""
+class StubInspectorRegistry:
+    """Minimal stub satisfying InspectorRegistry until the inspector
+    plugin proposal lands the real registry. `TargetRegistry` is the
+    real M1 class — instantiated empty for adapter tests that never
+    actually exercise list_targets.
+    """
 
     def list_summaries(self) -> list[object]:
         return []
@@ -53,8 +58,8 @@ async def typed_ok_handler(args: BaseModel, ctx: ToolContext) -> BaseModel:
 
 def make_ctx() -> ToolContext:
     return ToolContext(
-        target_registry=StubRegistry(),
-        inspector_registry=StubRegistry(),
+        target_registry=TargetRegistry(),
+        inspector_registry=StubInspectorRegistry(),
         config=Settings(),
         logger=cast(structlog.stdlib.BoundLogger, structlog.get_logger("test")),
         approval_service=NoopApprovalService(),

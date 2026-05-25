@@ -188,8 +188,17 @@ Hostlens 模型层走 `LLMBackend` 抽象，支持多种认证方式。详见 [d
 pip install hostlens
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# 注册一个目标主机
-hostlens target add prod-web-01 --host 1.2.3.4 --user deploy --key ~/.ssh/id_ed25519
+# 注册一个目标主机（M1 已落地，详见 docs/operations/targets.md）
+export HOSTLENS_PROD_PASSWORD=...
+hostlens target add prod-web-01 \
+  --type ssh \
+  --host 1.2.3.4 \
+  --user deploy \
+  --key-path ~/.ssh/id_ed25519 \
+  --password-env HOSTLENS_PROD_PASSWORD
+
+# 验证连通性 + capability 探测
+hostlens target test prod-web-01
 
 # 自检环境（参考全局 CLI 范式：doctor 子命令）
 hostlens doctor

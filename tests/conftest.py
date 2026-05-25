@@ -3,6 +3,13 @@
 `tool_registry` and `tool_context_factory` are the M2 fixtures used by
 multiple test modules — each test that depends on them receives an
 independent instance (function scope, no module-level state).
+
+M1 migration: `tool_context_factory` now allocates a real
+`hostlens.targets.registry.TargetRegistry` (empty by default; callers
+can override via `target_registry=`) — the M2 stub `_StubTargetRegistry`
+is gone (the real registry's API replaces `list_summaries()` with
+`list()` + `get_entry()`). The `InspectorRegistry` stub remains until
+the next proposal lands the real one.
 """
 
 from __future__ import annotations
@@ -15,40 +22,16 @@ import pytest
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.targets.config import LocalEntry, TargetsConfig
+from hostlens.targets.registry import TargetRegistry, build_registry_from_config
 from hostlens.tools.base import NoopApprovalService, ToolContext
 from hostlens.tools.default_tools import register_default_tools
 from hostlens.tools.registry import ToolRegistry
 
 
-class _StubTargetSummary:
-    """Minimal stub matching the structural shape `list_targets_handler`
-    expects (name / kind / display_name / description / capabilities /
-    tags / enabled). Tests can override via fixture parameterization.
-    """
-
-    def __init__(
-        self,
-        *,
-        name: str = "stub-target",
-        kind: str = "local",
-        display_name: str | None = None,
-        description: str | None = None,
-        capabilities: list[str] | None = None,
-        tags: list[str] | None = None,
-        enabled: bool = True,
-    ) -> None:
-        self.name = name
-        self.kind = kind
-        self.display_name = display_name
-        self.description = description
-        self.capabilities = capabilities or []
-        self.tags = tags or []
-        self.enabled = enabled
-
-
 class _StubInspectorSummary:
     """Minimal stub matching `list_inspectors_handler`'s expected
-    attribute shape.
+    attribute shape — kept until the inspector plugin proposal lands.
     """
 
     def __init__(
@@ -67,18 +50,6 @@ class _StubInspectorSummary:
         self.compatible_target_kinds = compatible_target_kinds or []
 
 
-class _StubTargetRegistry:
-    """Default stub: one safe target so `list_targets_handler` returns
-    a non-empty list under the fixture.
-    """
-
-    def __init__(self, targets: list[Any] | None = None) -> None:
-        self._targets = targets if targets is not None else [_StubTargetSummary()]
-
-    def list_summaries(self) -> list[Any]:
-        return list(self._targets)
-
-
 class _StubInspectorRegistry:
     """Default stub: one safe inspector so `list_inspectors_handler`
     returns a non-empty list under the fixture.
@@ -89,6 +60,19 @@ class _StubInspectorRegistry:
 
     def list_summaries(self) -> list[Any]:
         return list(self._inspectors)
+
+
+def _default_target_registry() -> TargetRegistry:
+    """Build a registry with a single safe LocalTarget so the default
+    `list_targets_handler` path returns a non-empty list under the
+    fixture. Callers needing custom topology pass their own registry
+    via `target_registry=`.
+    """
+    config = TargetsConfig(
+        version="1",
+        targets=[LocalEntry(name="stub-target", type="local", enabled=True)],
+    )
+    return build_registry_from_config(config, Settings())
 
 
 @pytest.fixture
@@ -106,19 +90,20 @@ def tool_registry() -> ToolRegistry:
 def tool_context_factory() -> Callable[..., ToolContext]:
     """Return a callable that produces a fresh `ToolContext` per call.
 
-    Each invocation allocates new stub registries, a new
-    `asyncio.Event`, and a new `NoopApprovalService`. Callers can pass
-    `target_registry=` / `inspector_registry=` to override the defaults
+    Each invocation allocates a fresh real `TargetRegistry` (with one
+    `stub-target` LocalTarget by default), a stub `InspectorRegistry`, a
+    new `asyncio.Event`, and a new `NoopApprovalService`. Callers can
+    pass `target_registry=` / `inspector_registry=` to override either
     while keeping the other dependencies stub-provided.
     """
 
     def _make(
         *,
-        target_registry: Any | None = None,
+        target_registry: TargetRegistry | None = None,
         inspector_registry: Any | None = None,
     ) -> ToolContext:
         return ToolContext(
-            target_registry=target_registry or _StubTargetRegistry(),
+            target_registry=target_registry or _default_target_registry(),
             inspector_registry=inspector_registry or _StubInspectorRegistry(),
             config=Settings(),
             logger=structlog.get_logger("tool_context_factory"),

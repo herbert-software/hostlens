@@ -27,6 +27,8 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from hostlens.targets.base import Capability
+
 __all__ = [
     "CAPABILITY_ALLOWLIST",
     "ListTargetsInput",
@@ -37,26 +39,22 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Capability allowlist
+# Capability allowlist (M1: derived from Capability enum — single source of truth)
 # ---------------------------------------------------------------------------
 
-CAPABILITY_ALLOWLIST: Final[frozenset[str]] = frozenset(
-    {
-        "shell",
-        "file_read",
-        "file_write",
-        "docker",
-        "k8s_exec",
-    }
-)
+CAPABILITY_ALLOWLIST: Final[frozenset[str]] = frozenset({c.value for c in Capability})
 """Capability tokens that may appear in `TargetSummary.capabilities`.
+
+Derived from ``hostlens.targets.base.Capability`` (M1 single source of
+truth). M1 value set is exactly ``{"shell", "file_read", "ssh",
+"systemd", "docker_cli"}``; M8 ``K8S_EXEC`` and M9 ``FILE_WRITE`` will
+expand both the enum and this allowlist together (spec §场景:capabilities
+与 ``CAPABILITY_ALLOWLIST`` 严格相等).
 
 Any token outside this set is silently dropped by
 `list_targets_handler` before reaching the agent — this prevents
-leaking internal capability names (e.g. `"internal_admin_root"`) that
-were never meant to be agent-visible. The allowlist intentionally
-mirrors the basic capability tokens the M1 ExecutionTarget abstraction
-will expose; M1 may extend it via a `Capability` enum.
+leaking internal capability names (e.g. ``"internal_admin_root"``) that
+were never meant to be agent-visible.
 """
 
 

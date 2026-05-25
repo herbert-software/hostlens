@@ -48,8 +48,13 @@ def test_config_error_accepts_optional_original_exception() -> None:
 
 
 def test_module_exports_exactly_six_exception_classes_after_m2() -> None:
-    """M2 (`add-tool-registry-capability-layer`) extends the M0 four-class
-    invariant to six by adding ToolError and ToolPolicyViolation.
+    """The exception module's public class set is locked.
+
+    Both M0 (which seeded four classes) and M2 (which added ``ToolError`` /
+    ``ToolPolicyViolation``) leave the set at six. M1
+    (``add-execution-target-abstraction``) does NOT add new classes — it
+    only extends ``ConfigError`` / ``TargetError`` signatures, so the
+    public-class count stays at six.
     """
 
     public_names = [
@@ -76,6 +81,148 @@ def test_module_exports_exactly_six_exception_classes_after_m2() -> None:
         "ToolError",
         "ToolPolicyViolation",
     ]
+
+
+# ---------------------------------------------------------------------------
+# M1: TargetError structured-field signature
+# ---------------------------------------------------------------------------
+
+
+def test_target_error_accepts_kind_keyword_form() -> None:
+    """Documented call style: keyword ``kind=`` + keyword ``target=``.
+
+    Spec §需求:`hostlens target` CLI 命令集 + design.md decision 4 lock
+    ``kind`` as a structured error code (e.g. ``"ssh_auth_failed"``)
+    surfaced by doctor / CLI as the user-visible error category.
+    """
+
+    err = TargetError(kind="ssh_auth_failed", target="prod-web")
+    assert err.kind == "ssh_auth_failed"
+    assert err.target == "prod-web"
+    assert err.extra == {}
+    assert err.original is None
+
+
+def test_target_error_accepts_positional_kind_form() -> None:
+    """Backward-compat shape ``TargetError("kind_string")``.
+
+    M0 already had ``TargetError`` as a bare ``HostlensError`` subclass
+    instantiated with a single positional message; M1 keeps that shape
+    viable by making ``kind`` the first positional parameter. This
+    avoids invalidating M0 callers like ``raise TargetError("boom")``.
+    """
+
+    err = TargetError("ssh_auth_failed", target="prod-web")
+    assert err.kind == "ssh_auth_failed"
+    assert err.target == "prod-web"
+
+
+def test_target_error_str_contains_kind_and_target() -> None:
+    """``__str__`` MUST surface ``kind`` + ``target`` for CLI / doctor output.
+
+    Without this, error renderers would have to introspect ``.kind`` /
+    ``.target`` attributes; the default ``Exception.__str__`` would
+    only show ``args[0]`` (which is ``kind`` alone).
+    """
+
+    err = TargetError(kind="ssh_auth_failed", target="prod-web")
+    text = str(err)
+    assert "ssh_auth_failed" in text
+    assert "prod-web" in text
+
+
+def test_target_error_collects_extra_keyword_fields() -> None:
+    """Arbitrary keyword args land in ``self.extra``.
+
+    Used by call sites like ``TargetError(kind="file_too_large",
+    target=..., path=..., size=...)`` — the structured context is what
+    makes per-error-kind diagnosis machine-readable.
+    """
+
+    err = TargetError(
+        kind="file_too_large",
+        target="prod-web",
+        path="/var/log/huge.log",
+        size=11_000_000,
+    )
+    assert err.extra == {"path": "/var/log/huge.log", "size": 11_000_000}
+    text = str(err)
+    # extra fields surface in the rendered form as `key=value` pairs.
+    assert "path=/var/log/huge.log" in text
+    assert "size=11000000" in text
+
+
+def test_target_error_chains_original_exception() -> None:
+    """``original`` parameter chains an upstream exception."""
+
+    cause = OSError("network unreachable")
+    err = TargetError(
+        kind="ssh_connect_failed",
+        target="prod-web",
+        original=cause,
+    )
+    assert err.original is cause
+
+
+# ---------------------------------------------------------------------------
+# M1: ConfigError structured-field extension (backward compatible)
+# ---------------------------------------------------------------------------
+
+
+def test_config_error_m0_call_style_still_works() -> None:
+    """The M0 single-message call style MUST still work.
+
+    Existing M0 callers (``load_settings()``) use
+    ``ConfigError("invalid yaml")`` and ``ConfigError("invalid yaml",
+    original=e)`` — the M1 signature extension is strictly additive.
+    """
+
+    err = ConfigError("invalid yaml")
+    assert err.kind is None
+    assert err.extra == {}
+    assert str(err) == "invalid yaml"
+
+
+def test_config_error_accepts_kind_with_structured_fields() -> None:
+    """The M1 structured-field call style works.
+
+    Spec §需求:`ConfigError` 必须扩展支持结构化 kind/extra 字段.
+    """
+
+    err = ConfigError(
+        kind="missing_env_var",
+        var_name="HOSTLENS_PWD",
+        target="prod-web",
+    )
+    assert err.kind == "missing_env_var"
+    assert err.extra == {"var_name": "HOSTLENS_PWD", "target": "prod-web"}
+
+    text = str(err)
+    assert "missing_env_var" in text
+    assert "var_name=HOSTLENS_PWD" in text
+    assert "target=prod-web" in text
+
+
+def test_config_error_kind_with_original_chain() -> None:
+    """``kind`` + ``original`` can coexist."""
+
+    cause = ValueError("oops")
+    err = ConfigError(kind="invalid_schema", original=cause)
+    assert err.kind == "invalid_schema"
+    assert err.original is cause
+    # Empty body: __str__ falls back to just the kind (no double colon).
+    assert str(err) == "invalid_schema"
+
+
+def test_config_error_message_with_kind_renders_both() -> None:
+    """``message`` and ``kind`` together render as ``"kind: message"``.
+
+    Test for the formatter contract — caller-supplied prose context plus
+    machine-readable kind both show up in user-facing rendering.
+    """
+
+    err = ConfigError("yaml parse failed", kind="invalid_yaml")
+    assert "invalid_yaml: yaml parse failed" in str(err)
 
 
 # ---------------------------------------------------------------------------

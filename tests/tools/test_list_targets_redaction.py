@@ -1,21 +1,29 @@
 """Tests for `list_targets_handler` end-to-end redaction.
 
-Constructs a stub `TargetRegistry` whose raw entries carry obviously
-sensitive fields (ssh_key_path / host / username / password /
-connection_string), runs the handler, and asserts that the returned
+Constructs a real `TargetRegistry` whose `TargetEntry` metadata carries
+obviously sensitive substrings (paths / IPs / usernames / credentials)
+embedded in normally-innocent fields like `display_name`, runs the
+handler, and asserts that the returned
 `ListTargetsOutput.model_dump_json()` cannot leak any of those
 substrings.
+
+Real-target migration (M1): the previous M2 stub `_StubTargetRegistry`
+fed the handler arbitrary attribute objects; M1 makes the registry
+canonical so test fixtures must round-trip through
+`build_registry_from_config` (or direct `TargetRegistry.register`) so the
+metadata-from-entry contract is exercised end-to-end.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
 
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.targets.config import LocalEntry, SSHEntry, TargetsConfig
+from hostlens.targets.registry import build_registry_from_config
 from hostlens.tools.base import NoopApprovalService, ToolContext
 from hostlens.tools.default_tools import list_targets_handler
 from hostlens.tools.schemas.list_targets import (
@@ -24,63 +32,10 @@ from hostlens.tools.schemas.list_targets import (
 )
 
 
-class _RawTarget:
-    """Stand-in for a raw M1 target config carrying sensitive fields.
-
-    Implements only the attributes `list_targets_handler` reads. Anything
-    sensitive (ssh_key_path / host / username / password / connection_string)
-    is present so we can assert it never reaches the agent surface.
-    """
-
-    def __init__(
-        self,
-        *,
-        name: str,
-        kind: str,
-        display_name: str | None = None,
-        description: str | None = None,
-        capabilities: list[str] | None = None,
-        tags: list[str] | None = None,
-        enabled: bool = True,
-        # Intentionally-leaky raw config fields (NOT in TargetSummary).
-        ssh_key_path: str | None = None,
-        host: str | None = None,
-        username: str | None = None,
-        password: str | None = None,
-        connection_string: str | None = None,
-    ) -> None:
-        self.name = name
-        self.kind = kind
-        self.display_name = display_name
-        self.description = description
-        self.capabilities = capabilities or []
-        self.tags = tags or []
-        self.enabled = enabled
-        # Even though TargetSummary forbids these, the handler MUST not
-        # accidentally serialize them via model_dump on the raw config.
-        self.ssh_key_path = ssh_key_path
-        self.host = host
-        self.username = username
-        self.password = password
-        self.connection_string = connection_string
-
-
-class _StubTargetRegistry:
-    def __init__(self, targets: list[Any]) -> None:
-        self._targets = targets
-
-    def list_summaries(self) -> list[Any]:
-        return list(self._targets)
-
-
-class _StubInspectorRegistry:
-    def list_summaries(self) -> list[Any]:
-        return []
-
-
-def _make_ctx(target_registry: _StubTargetRegistry) -> ToolContext:
+def _make_ctx(registry_config: TargetsConfig) -> ToolContext:
+    registry = build_registry_from_config(registry_config, Settings())
     return ToolContext(
-        target_registry=target_registry,
+        target_registry=registry,
         inspector_registry=_StubInspectorRegistry(),
         config=Settings(),
         logger=structlog.get_logger("test_list_targets_redaction"),
@@ -89,34 +44,43 @@ def _make_ctx(target_registry: _StubTargetRegistry) -> ToolContext:
     )
 
 
-def test_list_targets_handler_does_not_leak_sensitive_substrings() -> None:
-    """The raw target carries every forbidden substring; the redacted
-    output must contain none of them.
+class _StubInspectorRegistry:
+    """Inspector registry stays a stub — the next proposal lands the real
+    `InspectorRegistry`. `list_targets_handler` never consults this in any
+    case.
     """
-    # Sensitive-looking values are constructed at runtime so the raw
-    # `postgres://user:pass@...` / `secret123` literals never appear in the
-    # diff — otherwise GitGuardian's Username Password detector false-
-    # positives on this fixture (the entire point of which is to verify the
-    # redaction scrubber actually strips these substrings from output).
-    fake_password = "s" + "ecret" + "123"  # pragma: allowlist secret
-    fake_conn_str = (  # pragma: allowlist secret
-        f"postgres://{'user'}:{'pass'}@db:5432/x"
+
+    def list_summaries(self) -> list[object]:
+        return []
+
+
+def test_list_targets_handler_does_not_leak_sensitive_substrings() -> None:
+    """A `TargetEntry` whose `display_name` smuggles a path, IPv4, and
+    username substring must cause the whole target to be skipped — the
+    redacted output cannot contain any of those substrings.
+    """
+    # The path / IPv4 / "user alice" patterns each independently match
+    # `scrub_inventory_string`'s skip rules → entire target skipped.
+    fake_display_name = "login as admin@10.0.0.5 path /Users/alice/.ssh/id_rsa"
+    config = TargetsConfig(
+        version="1",
+        targets=[
+            SSHEntry(
+                name="prod-web",
+                type="ssh",
+                host="10.0.0.5",
+                user="admin",
+                # `password` is masked by SSHEntry.__repr__; we only test
+                # that user-visible scrubbed fields (display_name) don't
+                # leak embedded substrings.
+                display_name=fake_display_name,
+                description="primary web server",
+                tags=["prod", "web"],
+                enabled=True,
+            )
+        ],
     )
-    raw = _RawTarget(
-        name="prod-web",
-        kind="ssh",
-        display_name="prod web server",
-        description="primary web server",
-        capabilities=["shell", "file_read"],
-        tags=["prod", "web"],
-        enabled=True,
-        ssh_key_path="/Users/alice/.ssh/id_rsa",
-        host="10.0.0.5",
-        username="admin",
-        password=fake_password,
-        connection_string=fake_conn_str,
-    )
-    ctx = _make_ctx(_StubTargetRegistry([raw]))
+    ctx = _make_ctx(config)
 
     out = asyncio.run(list_targets_handler(ListTargetsInput(), ctx))
 
@@ -131,6 +95,9 @@ def test_list_targets_handler_does_not_leak_sensitive_substrings() -> None:
         "enabled",
     }
 
+    # The target was skipped because of the sensitive display_name.
+    assert out.targets == []
+
     json_text = out.model_dump_json()
 
     # None of the forbidden substrings (field values) may appear.
@@ -141,9 +108,6 @@ def test_list_targets_handler_does_not_leak_sensitive_substrings() -> None:
         "id_rsa",
         "10.0.0.5",
         "admin",
-        "secret123",
-        "postgres://",
-        "user:pass",
     ):
         assert needle not in json_text, (
             f"forbidden substring {needle!r} leaked into JSON: {json_text}"
@@ -151,33 +115,47 @@ def test_list_targets_handler_does_not_leak_sensitive_substrings() -> None:
 
 
 def test_list_targets_handler_returns_safe_planning_fields() -> None:
-    """The handler must still return the planning-useful fields after
-    redaction (name / kind / capabilities / tags / enabled), so the
-    Planner can actually use the output downstream.
+    """A clean LocalTarget round-trips through the registry → handler →
+    summary projection with the planning-useful fields intact (name /
+    kind / capabilities / tags / enabled).
     """
-    raw = _RawTarget(
-        name="prod-web",
-        kind="ssh",
-        capabilities=["shell", "file_read"],
-        tags=["web", "prod"],
-        enabled=True,
+    config = TargetsConfig(
+        version="1",
+        targets=[
+            LocalEntry(
+                name="prod-web",
+                type="local",
+                tags=["web", "prod"],
+                enabled=True,
+            )
+        ],
     )
-    ctx = _make_ctx(_StubTargetRegistry([raw]))
+    ctx = _make_ctx(config)
 
     out = asyncio.run(list_targets_handler(ListTargetsInput(), ctx))
     assert len(out.targets) == 1
     summary = out.targets[0]
     assert summary.name == "prod-web"
-    assert summary.kind == "ssh"
-    assert summary.capabilities == ["shell", "file_read"]
+    assert summary.kind == "local"
+    # LocalTarget's static baseline capabilities are SHELL + FILE_READ
+    # (probed extras like DOCKER_CLI / SYSTEMD only show up after the
+    # first `exec` call). `list_targets_handler` reads
+    # `target.capabilities` without forcing a probe, so we expect just
+    # the static baseline here.
+    assert summary.capabilities == ["file_read", "shell"]
     assert summary.tags == ["web", "prod"]
     assert summary.enabled is True
 
 
 def test_list_targets_handler_filters_disabled_by_default() -> None:
-    raw_enabled = _RawTarget(name="alpha", kind="local", enabled=True)
-    raw_disabled = _RawTarget(name="bravo", kind="local", enabled=False)
-    ctx = _make_ctx(_StubTargetRegistry([raw_enabled, raw_disabled]))
+    config = TargetsConfig(
+        version="1",
+        targets=[
+            LocalEntry(name="alpha", type="local", enabled=True),
+            LocalEntry(name="bravo", type="local", enabled=False),
+        ],
+    )
+    ctx = _make_ctx(config)
 
     # Default include_disabled=False → only "alpha" survives.
     out = asyncio.run(list_targets_handler(ListTargetsInput(), ctx))

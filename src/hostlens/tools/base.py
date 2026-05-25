@@ -6,15 +6,20 @@ surface adapter (agent / mcp / cli) consumes:
 - `ToolHandler` Protocol — async callable contract for tool handlers.
 - `ApprovalService` Protocol — minimal contract for write-side approval.
 - `NoopApprovalService` — M2 stub that always refuses (M9 will replace).
-- `TargetRegistry` / `InspectorRegistry` Protocols — placeholders until M1
-  ships the real registries; defined here so `ToolContext` can be typed
-  without a forward reference cycle.
+- `InspectorRegistry` Protocol — placeholder until the inspector
+  proposal lands the real registry; defined here so `ToolContext` can
+  be typed without a forward reference cycle.
 - `ToolContext` — frozen dataclass DI container, fields locked to the M2
   set (forbid LLMBackend per ADR-008).
 - `ToolSpec` — frozen Pydantic v2 model carrying full policy metadata.
 
 The module is import-side-effect free: importing it MUST NOT mutate any
 module-level / global / class-level registry.
+
+`TargetRegistry` is the real M1 class from
+`hostlens.targets.registry` — imported (not re-declared) so
+`get_type_hints(ToolContext)["target_registry"]` resolves to the real
+type per spec §场景:target_registry 是真实 TargetRegistry 类型.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hostlens.core.config import Settings
 from hostlens.core.exceptions import ToolPolicyViolation
+from hostlens.targets.registry import TargetRegistry
 
 # ---------------------------------------------------------------------------
 # Handler & approval Protocols
@@ -76,25 +82,14 @@ class NoopApprovalService:
 
 
 # ---------------------------------------------------------------------------
-# Stub registry Protocols (real registries land in M1)
+# Stub registry Protocols (Inspector registry — real registry lands in the
+# next proposal `add-inspector-plugin-system`).
 # ---------------------------------------------------------------------------
 
 
 @runtime_checkable
-class TargetRegistry(Protocol):
-    """Placeholder Protocol for the M1 ExecutionTarget registry.
-
-    M2 only needs the read-side `list_summaries` method to feed
-    `list_targets_handler` from a stub registry. M1 will land the full
-    registry with `register` / `get` / lifecycle methods.
-    """
-
-    def list_summaries(self) -> list[Any]: ...  # pragma: no cover
-
-
-@runtime_checkable
 class InspectorRegistry(Protocol):
-    """Placeholder Protocol for the M1 Inspector registry."""
+    """Placeholder Protocol for the Inspector registry."""
 
     def list_summaries(self) -> list[Any]: ...  # pragma: no cover
 
@@ -111,8 +106,10 @@ class ToolContext:
     M2 field set is **exactly** these six entries (ADR-008 forbids
     `llm_backend` / any LLM call entry point):
 
-    - `target_registry` — Target registry (M1 stub for now).
-    - `inspector_registry` — Inspector registry (M1 stub for now).
+    - `target_registry` — real `hostlens.targets.registry.TargetRegistry`
+      (M1 landed in the `add-execution-target-abstraction` proposal).
+    - `inspector_registry` — Inspector registry (still a stub Protocol
+      until the inspector plugin proposal lands).
     - `config` — `Settings` instance (M0).
     - `logger` — bound structlog logger.
     - `approval_service` — concrete `ApprovalService` (never `None`; M2

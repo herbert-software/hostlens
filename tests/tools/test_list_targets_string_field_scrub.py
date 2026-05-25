@@ -1,9 +1,11 @@
 """Tests for `list_targets_handler` per-string-field scrub paths
 (spec §需求:TargetSummary 输出 schema 必须脱敏 §字段值脱敏约束).
 
-Four scenarios covering the four new scrub paths:
-(a) `display_name` containing IPv4 / credential → whole target SKIP,
-    structured warning logged with code `sensitive_substring_in_display_name`,
+Four scenarios covering the four scrub paths against a real
+`TargetRegistry` populated by `build_registry_from_config`:
+
+(a) `display_name` containing IPv4 → whole target SKIP, structured
+    warning logged with code `sensitive_substring_in_display_name`,
     output JSON contains no IP.
 (b) `tags` containing IPv4 → whole target SKIP, warning code
     `sensitive_substring_in_tags`.
@@ -19,42 +21,21 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Generator
-from typing import Any
 
 import pytest
 import structlog
 from structlog.testing import LogCapture
 
 from hostlens.core.config import Settings
+from hostlens.targets.config import LocalEntry, TargetsConfig
+from hostlens.targets.registry import build_registry_from_config
 from hostlens.tools.base import NoopApprovalService, ToolContext
 from hostlens.tools.default_tools import list_targets_handler
 from hostlens.tools.schemas.list_targets import ListTargetsInput
 
 
-class _RawTarget:
-    def __init__(self, **kw: Any) -> None:
-        # Defaults — every test only sets the few fields it cares about.
-        self.name = kw.pop("name", "default")
-        self.kind = kw.pop("kind", "ssh")
-        self.display_name = kw.pop("display_name", None)
-        self.description = kw.pop("description", None)
-        self.capabilities = kw.pop("capabilities", [])
-        self.tags = kw.pop("tags", [])
-        self.enabled = kw.pop("enabled", True)
-        if kw:
-            raise TypeError(f"unexpected kwargs: {kw}")
-
-
-class _StubTargetRegistry:
-    def __init__(self, targets: list[Any]) -> None:
-        self._targets = targets
-
-    def list_summaries(self) -> list[Any]:
-        return list(self._targets)
-
-
 class _StubInspectorRegistry:
-    def list_summaries(self) -> list[Any]:
+    def list_summaries(self) -> list[object]:
         return []
 
 
@@ -78,9 +59,10 @@ def log_capture() -> Generator[LogCapture, None, None]:
         structlog.configure(**prior)
 
 
-def _ctx_with(targets: list[Any]) -> ToolContext:
+def _ctx_with(config: TargetsConfig) -> ToolContext:
+    registry = build_registry_from_config(config, Settings())
     return ToolContext(
-        target_registry=_StubTargetRegistry(targets),
+        target_registry=registry,
         inspector_registry=_StubInspectorRegistry(),
         config=Settings(),
         logger=structlog.get_logger("test_list_targets_scrub"),
@@ -90,17 +72,22 @@ def _ctx_with(targets: list[Any]) -> ToolContext:
 
 
 # ---------------------------------------------------------------------------
-# (a) display_name contains IPv4 + credential → SKIP whole target.
+# (a) display_name contains IPv4 → SKIP whole target.
 # ---------------------------------------------------------------------------
 
 
 def test_display_name_with_ipv4_triggers_skip(log_capture: LogCapture) -> None:
-    raw = _RawTarget(
-        name="prod-web",
-        kind="ssh",
-        display_name="login as admin@10.0.0.5",
+    config = TargetsConfig(
+        version="1",
+        targets=[
+            LocalEntry(
+                name="prod-web",
+                type="local",
+                display_name="login as admin@10.0.0.5",
+            )
+        ],
     )
-    ctx = _ctx_with([raw])
+    ctx = _ctx_with(config)
     out = asyncio.run(list_targets_handler(ListTargetsInput(), ctx))
 
     # Target is gone.
@@ -125,12 +112,17 @@ def test_display_name_with_ipv4_triggers_skip(log_capture: LogCapture) -> None:
 
 
 def test_tags_with_ipv4_triggers_skip(log_capture: LogCapture) -> None:
-    raw = _RawTarget(
-        name="prod-db",
-        kind="ssh",
-        tags=["prod", "db", "192.168.1.42"],
+    config = TargetsConfig(
+        version="1",
+        targets=[
+            LocalEntry(
+                name="prod-db",
+                type="local",
+                tags=["prod", "db", "192.168.1.42"],
+            )
+        ],
     )
-    ctx = _ctx_with([raw])
+    ctx = _ctx_with(config)
     out = asyncio.run(list_targets_handler(ListTargetsInput(), ctx))
 
     assert out.targets == []
@@ -152,12 +144,17 @@ def test_tags_with_ipv4_triggers_skip(log_capture: LogCapture) -> None:
 def test_description_with_user_keyword_redacts_identifier_token(
     log_capture: LogCapture,
 ) -> None:
-    raw = _RawTarget(
-        name="prod-web",
-        kind="ssh",
-        description="Owned by user alice, contact via slack",
+    config = TargetsConfig(
+        version="1",
+        targets=[
+            LocalEntry(
+                name="prod-web",
+                type="local",
+                description="Owned by user alice, contact via slack",
+            )
+        ],
     )
-    ctx = _ctx_with([raw])
+    ctx = _ctx_with(config)
     out = asyncio.run(list_targets_handler(ListTargetsInput(), ctx))
 
     assert len(out.targets) == 1
@@ -175,12 +172,17 @@ def test_description_with_user_keyword_redacts_identifier_token(
 
 
 def test_compound_word_tags_are_not_skipped(log_capture: LogCapture) -> None:
-    raw = _RawTarget(
-        name="prod-web",
-        kind="ssh",
-        tags=["user-service", "auth-microservice"],
+    config = TargetsConfig(
+        version="1",
+        targets=[
+            LocalEntry(
+                name="prod-web",
+                type="local",
+                tags=["user-service", "auth-microservice"],
+            )
+        ],
     )
-    ctx = _ctx_with([raw])
+    ctx = _ctx_with(config)
     out = asyncio.run(list_targets_handler(ListTargetsInput(), ctx))
 
     assert len(out.targets) == 1

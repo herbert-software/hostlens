@@ -66,3 +66,8 @@ hostlens.log
 *.key
 credentials.json
 !.env.example
+
+# Local venvs created during ad-hoc test runs
+.venv-clean/
+.venv-demo/
+.claude/scheduled_tasks.lock

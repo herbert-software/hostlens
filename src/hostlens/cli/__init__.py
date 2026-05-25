@@ -12,6 +12,7 @@ import sys
 import typer
 
 from hostlens.cli.doctor import run_doctor
+from hostlens.cli.target import target_app
 from hostlens.core.exceptions import ConfigError
 
 __all__ = ["app"]
@@ -58,6 +59,9 @@ def doctor_cmd(
         raise typer.Exit(code=2) from exc
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+
+app.add_typer(target_app, name="target")
 
 
 def main() -> None:  # pragma: no cover - convenience for `python -m hostlens.cli`

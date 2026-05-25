@@ -1,0 +1,39 @@
+version: 2
+
+# GitGuardian configuration (consumed by ggshield CLI / GitHub Action).
+#
+# NOTE: The GitGuardian GitHub App PR check uses dashboard-side
+# configuration, not this file. The three "Generic Password" incidents
+# (33150207, 33150209, 33150210) are deliberate self-documenting fake
+# fixture values used by the credential-redaction tests — they will
+# need to be marked as "ignored" on the GitGuardian dashboard. See
+# https://docs.gitguardian.com/internal-monitoring/prevent/detect-secrets-in-real-time-in-github
+# for the dashboard workflow.
+#
+# This file at least ensures local ggshield runs (and any contributor
+# pre-commit hook) skips the test tree, where fixture values are
+# expected.
+
+secret:
+  # Path-glob exclusions (POSIX style with `**` for recursive match).
+  # Keys are underscore-delimited per the official ggshield schema
+  # (see https://github.com/GitGuardian/ggshield/blob/main/.gitguardian.example.yml).
+  ignored_paths:
+    - "tests/**"
+
+  # Allowlist specific known-fake fixture strings. Either a SHA256 of
+  # the secret or the literal value can be supplied via `match`.
+  # `name` is human-readable for log output.
+  ignored_matches:
+    - name: fixture-fake-password-marker
+      match: "TEST_PWD_NOT_A_REAL_SECRET_XYZ"
+    - name: fixture-fake-password-marker-12345
+      match: "literal-pwd-do-not-leak-12345"
+    - name: fixture-fake-secret-marker
+      match: "literal-test-secret-do-not-leak"
+    - name: integration-fixture-fake-password
+      match: "hostlens-test-pwd"
+    - name: fixture-demo-password
+      match: "TEST_PWD_NOT_A_REAL_SECRET"
+    - name: fixture-passphrase
+      match: "TEST_PASSPHRASE_NOT_A_REAL_SECRET"

@@ -91,3 +91,30 @@ def test_settings_direct_construction_raises_validation_error(
     monkeypatch.setenv("HOSTLENS_LOG_LEVEL", "NotALevel")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_targets_config_path_default() -> None:
+    settings = load_settings()
+    assert isinstance(settings.targets_config_path, Path)
+    assert settings.targets_config_path == Path("~/.config/hostlens/targets.yaml").expanduser()
+
+
+def test_targets_config_path_env_var_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOSTLENS_TARGETS_CONFIG_PATH", "/tmp/x.yaml")
+    settings = load_settings()
+    assert settings.targets_config_path == Path("/tmp/x.yaml")
+
+
+def test_ssh_idle_timeout_seconds_default() -> None:
+    settings = load_settings()
+    assert settings.ssh.idle_timeout_seconds == 300
+
+
+def test_ssh_idle_timeout_seconds_env_var_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOSTLENS_SSH__IDLE_TIMEOUT_SECONDS", "120")
+    settings = load_settings()
+    assert settings.ssh.idle_timeout_seconds == 120

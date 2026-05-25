@@ -17,15 +17,30 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from hostlens.core.exceptions import ConfigError
 
 __all__ = [
     "Settings",
+    "SshSettings",
     "load_settings",
 ]
+
+
+class SshSettings(BaseModel):
+    """SSH-related runtime settings.
+
+    M1 scope (per execution-target spec §需求:SSHTarget) is intentionally a
+    single field — `connect_timeout` is a per-target override on
+    `TargetEntry`, not a global default, and future fields (e.g. keepalive
+    interval) join this namespace as they land.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    idle_timeout_seconds: int = 300
 
 
 _SENSITIVE_FIELD_PATTERN: re.Pattern[str] = re.compile(
@@ -51,12 +66,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="HOSTLENS_",
         env_file=".env",
+        env_nested_delimiter="__",
         extra="ignore",
     )
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_mode: Literal["dev", "prod"] = "prod"
     config_dir: Path = Path("~/.config/hostlens").expanduser()
+    targets_config_path: Path = Path("~/.config/hostlens/targets.yaml").expanduser()
+    ssh: SshSettings = Field(default_factory=SshSettings)
 
 
 def _is_sensitive(field_name: str) -> bool:

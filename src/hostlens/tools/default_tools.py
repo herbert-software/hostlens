@@ -21,6 +21,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from hostlens.targets.base import Capability
 from hostlens.tools.base import ToolContext
 from hostlens.tools.decorators import tool
 from hostlens.tools.registry import ToolRegistry
@@ -67,16 +68,6 @@ def _attr(obj: Any, name: str, default: Any) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(name, default)
     return getattr(obj, name, default)
-
-
-def _scrub_capabilities(raw: list[str]) -> list[str]:
-    """Filter capabilities down to `CAPABILITY_ALLOWLIST`.
-
-    Non-allowlisted tokens (e.g. `"internal_admin_root"`) are silently
-    dropped to prevent leaking internal capability names to the agent
-    surface. Order of the input list is preserved for the survivors.
-    """
-    return [c for c in raw if c in CAPABILITY_ALLOWLIST]
 
 
 # ---------------------------------------------------------------------------
@@ -152,43 +143,48 @@ async def list_inspectors_handler(
 # ---------------------------------------------------------------------------
 
 
-_STRING_FIELDS_FOR_SCRUB: tuple[str, ...] = (
-    "name",
-    "display_name",
-    "description",
-)
-
-
 async def list_targets_handler(args: ListTargetsInput, ctx: ToolContext) -> ListTargetsOutput:
-    """Project each raw target config down to a redacted `TargetSummary`.
+    """Project each registered ExecutionTarget down to a redacted `TargetSummary`.
+
+    Source of fields (per tool-registry spec §需求:M2 首批 ToolSpec
+    §场景:TargetSummary metadata 字段必须来自 TargetEntry):
+
+    - `name` / `kind` come from the `ExecutionTarget` instance
+      (`target.name` / `target.type`).
+    - `capabilities` come from `target.capabilities` (a set of
+      `Capability` enum members) — projected to `.value` strings and
+      filtered through `CAPABILITY_ALLOWLIST` in lexicographic order.
+    - `display_name` / `description` / `tags` / `enabled` come from the
+      paired `TargetEntry` returned by `ctx.target_registry.get_entry(name)`
+      — these fields do **not** live on the `ExecutionTarget` Protocol,
+      so any attribute of the same name found on the target instance
+      MUST be ignored.
 
     Every string field (`name` / `display_name` / `description` plus
-    every `capabilities[*]` / `tags[*]`) MUST pass through
-    `scrub_inventory_string` before reaching the agent surface; the
-    handler NEVER calls `model_dump` on raw target config (that would
-    leak credentials by definition).
-
-    Skip semantics: if any scrubbed string field returns `None`, the
-    whole target is dropped from the output (a half-revealed target is
-    a worse leak than a missing row). A structured warning is logged
-    with the reason code (e.g. `sensitive_substring_in_display_name`)
-    but NOT the offending field value.
+    every `tags[*]`) MUST pass through `scrub_inventory_string` before
+    reaching the agent surface; if scrub returns `None` (sensitive
+    substring matched), the whole target is dropped (a half-revealed
+    target is a worse leak than a missing row). A structured warning
+    is logged with the reason code (e.g.
+    `sensitive_substring_in_display_name`) but NOT the offending field
+    value.
     """
-    raw_targets = ctx.target_registry.list_summaries()
+    targets = ctx.target_registry.list()
     summaries: list[TargetSummary] = []
 
-    for raw in raw_targets:
-        enabled = bool(_attr(raw, "enabled", True))
+    for target in targets:
+        entry = ctx.target_registry.get_entry(target.name)
+
+        enabled = bool(entry.enabled)
         if not enabled and not args.include_disabled:
             continue
 
-        kind = _attr(raw, "kind", None)
+        # `target.type` is a closed Literal set per ExecutionTarget Protocol
+        # — but we still defence-in-depth check it here so a misbehaving
+        # custom target implementation cannot push an unsupported kind
+        # through TargetSummary's discriminator.
+        kind = target.type
         if kind not in ("local", "ssh", "docker", "k8s"):
-            # Do NOT echo the raw `kind` value — it could leak attacker-
-            # controlled config substrings into structured logs, contrary to
-            # this handler's "reason code only, never the offending value"
-            # contract. The reason code is enough to diagnose; full value
-            # lives in the config file the caller already owns.
             ctx.logger.warning(
                 "list_targets_skip",
                 reason="unsupported_kind",
@@ -196,25 +192,19 @@ async def list_targets_handler(args: ListTargetsInput, ctx: ToolContext) -> List
             )
             continue
 
-        # Scrub scalar string fields. A None result means: drop this target.
+        # Scrub scalar string fields sourced from target + entry.
+        # `name` ← target.name; `display_name` / `description` ← entry.
+        scalar_field_sources: dict[str, str | None] = {
+            "name": target.name,
+            "display_name": entry.display_name,
+            "description": entry.description,
+        }
         scrubbed: dict[str, str | None] = {}
         skip_this_target = False
-        for field_name in _STRING_FIELDS_FOR_SCRUB:
-            value = _attr(raw, field_name, None)
+        for field_name, value in scalar_field_sources.items():
             if value is None:
                 scrubbed[field_name] = None
                 continue
-            if not isinstance(value, str):
-                # Hard reject non-strings on string-typed fields. The
-                # spec assumes raw configs use strings here; anything
-                # else is a config bug, not a leak.
-                ctx.logger.warning(
-                    "list_targets_skip",
-                    reason="non_string_field",
-                    field_kind=field_name,
-                )
-                skip_this_target = True
-                break
             cleaned = scrub_inventory_string(value, field_kind=field_name)
             if cleaned is None:
                 ctx.logger.warning(
@@ -228,19 +218,10 @@ async def list_targets_handler(args: ListTargetsInput, ctx: ToolContext) -> List
         if skip_this_target:
             continue
 
-        # Scrub list-of-string fields.
-        raw_tags = list(_attr(raw, "tags", []))
+        # Scrub tag list (sourced from entry.tags).
         clean_tags: list[str] = []
         skip_for_tags = False
-        for tag in raw_tags:
-            if not isinstance(tag, str):
-                ctx.logger.warning(
-                    "list_targets_skip",
-                    reason="non_string_field",
-                    field_kind="tags",
-                )
-                skip_for_tags = True
-                break
+        for tag in entry.tags:
             cleaned_tag = scrub_inventory_string(tag, field_kind="tags")
             if cleaned_tag is None:
                 ctx.logger.warning(
@@ -253,40 +234,37 @@ async def list_targets_handler(args: ListTargetsInput, ctx: ToolContext) -> List
         if skip_for_tags:
             continue
 
-        raw_caps = list(_attr(raw, "capabilities", []))
-        clean_caps_pre_allowlist: list[str] = []
-        skip_for_caps = False
-        for cap in raw_caps:
-            if not isinstance(cap, str):
+        # Project capabilities: Capability enum → .value string, filter
+        # through CAPABILITY_ALLOWLIST, then sort lexicographically per
+        # spec §需求:M2 首批 ToolSpec handler 投影契约.
+        capability_values: list[str] = []
+        for cap in target.capabilities:
+            if not isinstance(cap, Capability):
+                # Defence-in-depth: an outside contributor could push a
+                # bare string into `target.capabilities`. Skip silently
+                # but log so the bug surfaces in observability.
                 ctx.logger.warning(
-                    "list_targets_skip",
-                    reason="non_string_field",
-                    field_kind="capabilities",
+                    "list_targets_capability_not_enum",
+                    capability_type=type(cap).__name__,
                 )
-                skip_for_caps = True
-                break
-            cleaned_cap = scrub_inventory_string(cap, field_kind="capabilities")
-            if cleaned_cap is None:
+                continue
+            value = cap.value
+            if value in CAPABILITY_ALLOWLIST:
+                capability_values.append(value)
+            else:
+                # Non-allowlisted tokens are silently dropped per spec
+                # §场景:list_targets 投影过滤 allowlist 外 token.
                 ctx.logger.warning(
-                    "list_targets_skip",
-                    reason="sensitive_substring_in_capabilities",
+                    "list_targets_capability_dropped",
+                    reason="not_in_allowlist",
                 )
-                skip_for_caps = True
-                break
-            clean_caps_pre_allowlist.append(cleaned_cap)
-        if skip_for_caps:
-            continue
+        allowlisted_caps = sorted(capability_values)
 
-        # Strip non-allowlisted capability tokens silently (e.g.
-        # "internal_admin_root").
-        allowlisted_caps = _scrub_capabilities(clean_caps_pre_allowlist)
-
-        # `scrubbed["name"]` is `None` only if the raw config had no
-        # name; in that case the target is unidentifiable, skip it.
-        clean_name = scrubbed.get("name")
-        if clean_name is None:
-            ctx.logger.warning("list_targets_skip", reason="missing_name")
-            continue
+        # `target.name` is regex-enforced by TargetRegistry.register, so
+        # `scrubbed["name"]` should always be a string here. Guard the
+        # narrow type cast for mypy.
+        clean_name = scrubbed["name"]
+        assert clean_name is not None
 
         summaries.append(
             TargetSummary(

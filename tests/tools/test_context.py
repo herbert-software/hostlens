@@ -1,9 +1,11 @@
 """Tests for ToolContext per spec §需求:ToolContext 必须包含 M2 字段最小集.
 
-Covers three scenarios:
+Covers:
 1. Field set is exactly the M2 six-entry minimum (no more, no less).
 2. ToolContext instances are immutable (frozen dataclass).
 3. `approval_service` cannot be `None` — `NoopApprovalService` is the M2 default.
+4. `target_registry` resolves to the real `hostlens.targets.registry.TargetRegistry`
+   class (M1 landed in `add-execution-target-abstraction`).
 """
 
 from __future__ import annotations
@@ -16,16 +18,12 @@ import pytest
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.targets.registry import TargetRegistry
 from hostlens.tools.base import (
     ApprovalService,
     NoopApprovalService,
     ToolContext,
 )
-
-
-class _StubTargetRegistry:
-    def list_summaries(self) -> list[object]:
-        return []
 
 
 class _StubInspectorRegistry:
@@ -39,7 +37,7 @@ def _make_settings() -> Settings:
 
 def _make_ctx(approval: ApprovalService | None = None) -> ToolContext:
     return ToolContext(
-        target_registry=_StubTargetRegistry(),
+        target_registry=TargetRegistry(),
         inspector_registry=_StubInspectorRegistry(),
         config=_make_settings(),
         logger=structlog.get_logger("test"),
@@ -76,6 +74,21 @@ def test_tool_context_approval_service_is_not_optional_in_type_hints() -> None:
     """
     hints = get_type_hints(ToolContext)
     assert hints["approval_service"] is ApprovalService
+
+
+def test_tool_context_target_registry_is_real_class() -> None:
+    """Per execution-target spec §场景:target_registry 是真实 TargetRegistry 类型,
+    `get_type_hints(ToolContext)["target_registry"]` must resolve to the
+    real `hostlens.targets.registry.TargetRegistry` class — NOT a stub
+    Protocol or `typing.Any`.
+
+    We use `get_type_hints` (not `__annotations__`) on purpose: the
+    module uses `from __future__ import annotations`, which means
+    `__annotations__` would give us a string `"TargetRegistry"` rather
+    than the resolved type object.
+    """
+    hints = get_type_hints(ToolContext)
+    assert hints["target_registry"] is TargetRegistry
 
 
 def test_noop_approval_service_always_refuses() -> None:

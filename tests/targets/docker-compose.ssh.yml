@@ -1,0 +1,42 @@
+# pytest-docker compose file for the SSHTarget integration tests.
+# Spec: ssh-execution-target/spec.md §需求:SSH 集成测试必须用真实 sshd 容器.
+#
+# Key knobs:
+#   - linuxserver/openssh-server is small (~50 MB), boots in ~3 s
+#   - PASSWORD_ACCESS=true lets the integration tests use password auth
+#     (no key wrangling at fixture setup time)
+#   - DOCKER_MODS injects the AcceptEnv HOSTLENS_TEST_* directive into
+#     sshd_config (spec §需求 "AcceptEnv HOSTLENS_TEST_*"). We inject
+#     via the container's startup `custom-cont-init.d` hook (see
+#     `init-sshd.sh`) instead of relying on a DOCKER_MODS image — the
+#     hook is checked into git, fully audited, and skips the cold-cache
+#     image pull DOCKER_MODS would impose on CI.
+#
+# Port 2222 is exposed so the host-side pytest fixture can address the
+# container directly. Each test uses an ephemeral username via
+# `useradd` to keep test isolation per spec task 5.11.
+
+services:
+  sshd:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: hostlens-test-sshd
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - PASSWORD_ACCESS=true
+      - USER_NAME=hostlens
+      - USER_PASSWORD=hostlens-test-pwd
+      - SUDO_ACCESS=false
+    ports:
+      - "2222:2222"
+    # NB: AcceptEnv injection happens **post-start** from the pytest
+    # fixture (``_inject_accept_env``) — the linuxserver init system
+    # materialises ``/config/sshd/sshd_config`` during boot, so a
+    # ``custom-cont-init.d`` hook runs too early to see the file.
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 2222 || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 30

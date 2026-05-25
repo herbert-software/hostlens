@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from hostlens.core.config import Settings
 from hostlens.core.exceptions import ToolError
+from hostlens.targets.registry import TargetRegistry
 from hostlens.tools.base import NoopApprovalService, ToolContext, ToolSpec
 from hostlens.tools.registry import ToolRegistry
 
@@ -65,15 +66,19 @@ def _make_spec(
     )
 
 
-class _StubRegistry:
+class _StubInspectorRegistry:
+    """Inspector registry stub kept here until the inspector plugin
+    proposal ships the real registry.
+    """
+
     def list_summaries(self) -> list[object]:
         return []
 
 
 def _make_ctx() -> ToolContext:
     return ToolContext(
-        target_registry=_StubRegistry(),
-        inspector_registry=_StubRegistry(),
+        target_registry=TargetRegistry(),
+        inspector_registry=_StubInspectorRegistry(),
         config=Settings(),
         logger=structlog.get_logger("test"),
         approval_service=NoopApprovalService(),

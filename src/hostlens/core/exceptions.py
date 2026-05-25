@@ -1,7 +1,6 @@
 """Hostlens core exception hierarchy.
 
-M0 scope per openspec/changes/bootstrap-project-skeleton/specs/core-services/spec.md
-introduced exactly four classes: HostlensError, ConfigError, TargetError,
+M0 introduced exactly four classes: HostlensError, ConfigError, TargetError,
 InspectorError.
 
 M2 (`add-tool-registry-capability-layer`) extends this module with two
@@ -10,6 +9,13 @@ ToolError and ToolPolicyViolation. The latter carries a fully constrained
 structured-field set (all four fields drawn from bounded value domains) so
 that its string representation cannot become a prompt/log injection or
 secret-leak surface.
+
+M1 (`add-execution-target-abstraction`) extends `ConfigError` and
+`TargetError` with structured `kind` + `**extra` fields so that loader /
+target layer error sites can attach machine-readable error codes and
+structured context (e.g. `kind="missing_env_var", var_name="X",
+target="prod-web"`) without losing M0 positional-message backward
+compatibility.
 """
 
 from __future__ import annotations
@@ -52,6 +58,19 @@ def _preview(value: object) -> str:
     return type(value).__name__
 
 
+def _format_extra(extra: dict[str, object]) -> str:
+    """Render an ``extra`` dict as ``key=value`` pairs, sorted by key.
+
+    Used by ``ConfigError`` / ``TargetError`` ``__str__`` so structured
+    context is reproducible across calls (test snapshots) and human-readable
+    without dumping the whole dict's repr.
+    """
+
+    if not extra:
+        return ""
+    return " ".join(f"{key}={extra[key]}" for key in sorted(extra))
+
+
 # ---------------------------------------------------------------------------
 # Literal value domains for ToolPolicyViolation
 # ---------------------------------------------------------------------------
@@ -82,19 +101,99 @@ class HostlensError(Exception):
 class ConfigError(HostlensError):
     """Raised when configuration loading or validation fails.
 
-    `original` optionally chains the underlying exception (e.g. a
-    `pydantic.ValidationError` captured by `load_settings()`), so callers
-    can introspect raw error details while the formatted message stays
-    redacted for sensitive fields.
+    M1 extension (`add-execution-target-abstraction`): accepts an optional
+    structured ``kind`` (e.g. ``"missing_env_var"``) plus arbitrary
+    ``**extra`` keyword fields (``var_name=...``, ``target=...``,
+    ``field=...``) so loader call sites can attach machine-readable error
+    codes for doctor / structured logging. ``original`` still chains the
+    underlying exception (e.g. a ``pydantic.ValidationError`` captured by
+    ``load_settings()``).
+
+    Backward compatible with the M0 call style ``ConfigError("invalid
+    yaml")`` and ``ConfigError("invalid yaml", original=e)``.
+
+    ``__str__`` format:
+        ``"{kind}: {message} key=value ..."`` when ``kind`` is set, else
+        ``"{message} key=value ..."``; the trailing ``key=value`` list is
+        only appended when ``extra`` is non-empty.
+
+    Spec contract (per CLAUDE.md / proposal): callers MUST NOT put raw
+    secret values into ``extra`` — pass references like ``var_name=...``
+    instead, never the value itself.
     """
 
-    def __init__(self, message: str, *, original: Exception | None = None) -> None:
-        super().__init__(message)
-        self.original = original
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        kind: str | None = None,
+        original: Exception | None = None,
+        **extra: object,
+    ) -> None:
+        super().__init__(message if message is not None else "")
+        self.message: str | None = message
+        self.kind: str | None = kind
+        self.original: Exception | None = original
+        self.extra: dict[str, object] = dict(extra)
+
+    def __str__(self) -> str:
+        parts: list[str] = []
+        body = self.message if self.message is not None else ""
+        if self.kind is not None:
+            parts.append(f"{self.kind}: {body}" if body else self.kind)
+        elif body:
+            parts.append(body)
+        extra_str = _format_extra(self.extra)
+        if extra_str:
+            parts.append(extra_str)
+        return " ".join(parts)
 
 
 class TargetError(HostlensError):
-    """Raised on ExecutionTarget errors (used from M1+)."""
+    """Raised on ExecutionTarget errors (used from M1+).
+
+    Carries a structured ``kind`` (e.g. ``"ssh_auth_failed"`` /
+    ``"duplicate_target"`` / ``"file_too_large"`` / ``"invalid_target_name"``
+    / ``"target_entry_name_mismatch"`` / ``"target_disabled"`` /
+    ``"ssh_connection_lost"`` / ``"ssh_connect_timeout"`` /
+    ``"ssh_connect_failed"`` / ``"sftp_unavailable"``) so CLI / doctor
+    can render machine-readable error codes without parsing free text.
+
+    Field ``target`` is the **target identifier** the error is about
+    (``None`` when not applicable). ``**extra`` collects any other
+    structured context (``path=``, ``size=``, ``entry_name=``,
+    ``host=``, etc.); callers MUST NOT include raw secret values.
+
+    Spec: ``execution-target/spec.md`` §需求:`ExecutionTarget` Protocol
+    必须定义完整接口 / `TargetRegistry` 必须按 name 索引 / ``hostlens
+    target`` CLI 命令集.
+    """
+
+    def __init__(
+        self,
+        kind: str,
+        *,
+        target: str | None = None,
+        original: Exception | None = None,
+        **extra: object,
+    ) -> None:
+        # Build a stable base message so ``args[0]`` is non-empty even
+        # before ``__str__`` is called (helps debuggers that print
+        # ``exc.args``).
+        super().__init__(kind)
+        self.kind: str = kind
+        self.target: str | None = target
+        self.original: Exception | None = original
+        self.extra: dict[str, object] = dict(extra)
+
+    def __str__(self) -> str:
+        parts: list[str] = [self.kind]
+        if self.target is not None:
+            parts.append(f"target={self.target}")
+        extra_str = _format_extra(self.extra)
+        if extra_str:
+            parts.append(extra_str)
+        return " ".join(parts)
 
 
 class InspectorError(HostlensError):

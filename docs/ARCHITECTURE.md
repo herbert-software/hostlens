@@ -592,6 +592,8 @@ graph LR
 
 ## 5. ExecutionTarget 抽象
 
+> **M1 落地状态**（2026-05）：`LocalTarget`、`SSHTarget`、`TargetRegistry`、`TargetsConfig` loader、`build_registry_from_config` 工厂、`hostlens target` CLI 子命令组、`hostlens doctor --check-targets`、以及 `tool-registry-capability-layer` 的 stub 消除全部已实现于 OpenSpec 提案 `add-execution-target-abstraction`（spec PR #12 → main commit `cccdf68`；实施 PR 见 `feat/impl-execution-target-abstraction`）。SSHTarget 严格实现了 per-target control connection pool（per-process per-target 单连接 + asyncssh 原生并行 channel + `Settings.ssh.idle_timeout_seconds` 默认 300s idle close + 1 次自动重连 1s→4s→16s），对齐 [docs/OPERABILITY.md §2](OPERABILITY.md) 「不允许『每个 Inspector 重新 SSH 一次』」硬约束。
+
 ### Protocol
 
 ```python
@@ -631,8 +633,8 @@ class ExecutionTarget(Protocol):
 
 | Target               | exec 方式                                                                                                                                  | 典型 Capability                            | 阶段 |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------ | ---- |
-| `LocalTarget`      | `asyncio.create_subprocess_shell`（Inspector 命令含 pipe / redirect / 变量引用，必须 shell 解析；env 通过 subprocess `env=` 参数注入） | FILE_READ, DOCKER_CLI（如本地装了 docker） | M1   |
-| `SSHTarget`        | AsyncSSH                                                                                                                                   | SSH, SYSTEMD, FILE_READ                    | M1   |
+| `LocalTarget`      | `asyncio.create_subprocess_shell`（Inspector 命令含 pipe / redirect / 变量引用，必须 shell 解析；env 通过 subprocess `env=` 参数注入；超时走 `os.killpg(getpgid, SIGKILL)` 杀整个进程组防 zombie） | SHELL, FILE_READ + 运行时探测 DOCKER_CLI / SYSTEMD | M1（**已落地**） |
+| `SSHTarget`        | AsyncSSH（per-target control connection 复用 + idle close 300s + 1 次自动重连 1s→4s→16s + SFTP-only read_file + 三层凭据脱敏）                | SSH, SHELL, FILE_READ + 运行时探测 SYSTEMD / DOCKER_CLI | M1（**已落地**）|
 | `DockerTarget`     | `docker exec` via docker-py                                                                                                              | DOCKER_CLI                                 | M8   |
 | `KubernetesTarget` | Pod exec via kubernetes-asyncio                                                                                                            | （受 Pod 内容器限制）                      | M8   |
 
