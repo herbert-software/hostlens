@@ -18,6 +18,7 @@ import re
 import warnings as _warnings
 from typing import Annotated, Any, Literal
 
+import jsonschema
 import simpleeval
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -102,11 +103,16 @@ def _is_empty_matchable_subtree(args: Any) -> bool:
     latter case is covered by rule (e) `prefix_subset_alternation`
     (an empty branch is a literal prefix of every other branch).
 
-    Three categories that count as "direct empty-matchable":
+    Categories that count as "direct empty-matchable":
       - the subpattern is a single naked BRANCH with an empty alternative
-      - the subpattern contains a MAX_REPEAT/MIN_REPEAT with min=0 AND max=1
-        (i.e., an inner `?` quantifier) — applies whether wrapped in a
-        SUBPATTERN or not
+      - the subpattern contains an inner ``MAX_REPEAT`` / ``MIN_REPEAT`` /
+        ``POSSESSIVE_REPEAT`` with ``min == 0`` (any ``max`` — covers ``?``
+        ``*`` ``{0,N}``) — applies whether wrapped in a ``SUBPATTERN`` or
+        not. Treating ``min == 0`` as the trigger (rather than only the
+        ``?`` shape ``min=0, max=1``) is what classifies ``(a*)+`` as
+        ``quantifier_on_empty_matchable`` rather than ``nested_quantifier``;
+        the inner ``a*`` can match the empty string, making the outer
+        ``+`` repeat over zero-width matches.
       - the entire subpattern is a single ASSERT/ASSERT_NOT (lookaround)
     """
 
@@ -132,27 +138,34 @@ def _is_empty_matchable_subtree(args: Any) -> bool:
             if any(len(b) == 0 for b in branches):
                 return True
 
-    # Inner `?` quantifier — direct or wrapped in SUBPATTERN.
+    possessive_op = getattr(_sc, "POSSESSIVE_REPEAT", None)
+    empty_matchable_ops: tuple[Any, ...] = (_sc.MAX_REPEAT, _sc.MIN_REPEAT)
+    if possessive_op is not None:
+        empty_matchable_ops = (*empty_matchable_ops, possessive_op)
+
+    # Inner quantifier with ``min == 0`` — direct or wrapped in SUBPATTERN.
+    # Covers ``?`` (min=0, max=1), ``*`` (min=0, max=MAXREPEAT), and any
+    # ``{0,N}`` bounded form. Each of these admits the empty match for
+    # the inner subpattern, so the outer repeat iterates over zero-width
+    # matches → catastrophic backtracking.
     for op, sub_args in items:
-        if op in (_sc.MAX_REPEAT, _sc.MIN_REPEAT) and (
+        if op in empty_matchable_ops and (
             isinstance(sub_args, tuple)
             and len(sub_args) >= 2
             and sub_args[0] == 0
-            and sub_args[1] == 1
         ):
             return True
         if op is _sc.SUBPATTERN and (
             isinstance(sub_args, tuple) and len(sub_args) >= 4
         ):
             # SUBPATTERN args: (group, addflags, delflags, subpattern).
-            # Walk the immediate subpattern looking for `?` quantifier.
+            # Walk the immediate subpattern looking for a min=0 quantifier.
             inner = sub_args[3]
             for inner_op, inner_args in inner:
-                if inner_op in (_sc.MAX_REPEAT, _sc.MIN_REPEAT) and (
+                if inner_op in empty_matchable_ops and (
                     isinstance(inner_args, tuple)
                     and len(inner_args) >= 2
                     and inner_args[0] == 0
-                    and inner_args[1] == 1
                 ):
                     return True
     return False
@@ -410,14 +423,32 @@ _AGGREGATE_VAR_ATTR_PATTERN = re.compile(r"\{([a-z_][a-z_0-9]*)\.")
 def _is_compilable_simpleeval(expr: str) -> tuple[bool, str | None]:
     """Return (ok, error_message).
 
-    `simpleeval` doesn't expose a pure-compile API — we eval against an
-    empty context. Errors that mean "the expression parses but references
-    something unbound at empty context" (NameNotDefined / FunctionNotDefined
-    / AttributeDoesNotExist / OperatorNotDefined) are treated as success
-    because the runtime will bind those. `SyntaxError` (Python AST parse
-    failure) and `FeatureNotAvailable` (simpleeval permanently refuses the
-    construct — lambda, listcomp, dunder, etc.) are real compile failures.
+    Two layers gate the expression:
+
+      1. `dsl.validate_ast(expr)` — the same static AST gate the runtime
+         evaluator applies. simpleeval would otherwise let constructs like
+         `__import__('os')` through at empty-context eval (NameNotDefined
+         on `__import__`) only to surface them at runtime; running the
+         gate here forces loader-time rejection so the manifest never
+         reaches the runner.
+      2. `simpleeval.SimpleEval().eval(expr)` against an empty context.
+         NameNotDefined / FunctionNotDefined / AttributeDoesNotExist /
+         OperatorNotDefined are expected (runtime binds those); SyntaxError
+         and FeatureNotAvailable are real compile failures.
+
+    Imported lazily to keep `schema` independent of `dsl` at module-load
+    time (avoids any risk of a future bidirectional import).
     """
+
+    # Lazy import: keep `schema` free of an unconditional `dsl` dependency
+    # at module-load time so a hypothetical future `dsl → schema` import
+    # cannot trigger a cycle.
+    from hostlens.inspectors import dsl as _dsl
+
+    try:
+        _dsl.validate_ast(expr)
+    except simpleeval.FeatureNotAvailable as exc:
+        return False, str(exc)
 
     evaluator = simpleeval.SimpleEval()
     try:
@@ -428,15 +459,25 @@ def _is_compilable_simpleeval(expr: str) -> tuple[bool, str | None]:
         simpleeval.AttributeDoesNotExist,
         simpleeval.OperatorNotDefined,
     ):
+        # Empty-context evaluation legitimately fails on unbound names /
+        # functions / attributes / operators because the runtime context
+        # has not yet been substituted in. The expression itself parsed
+        # cleanly; treat as compilable.
+        return True, None
+    except simpleeval.InvalidExpression:
+        # Other simpleeval business failures at empty context (NumberTooHigh /
+        # IterableTooLong / WrongType / generic InvalidExpression) — the
+        # expression parsed but hit a semantic limit at validation time. The
+        # runtime DSL evaluator will surface the real context's verdict.
         return True, None
     except (SyntaxError, simpleeval.FeatureNotAvailable) as exc:
         return False, str(exc)
-    except Exception:
-        # Any other runtime error indicates the expression *parsed* but
-        # hit a runtime semantic issue (type error / divide by zero / etc.)
-        # at the empty validation context — treat as compilable and let
-        # the runtime DSL evaluator decide. The validator's only job is
-        # to reject genuine syntax / FeatureNotAvailable failures.
+    except (TypeError, AttributeError):
+        # Stdlib-level fallbacks for evaluator paths that surface a raw
+        # TypeError / AttributeError before simpleeval wraps it (e.g. a
+        # binary op against an unbound name resolves to a default sentinel
+        # whose ``__add__`` raises ``TypeError``). The expression parsed —
+        # the runtime evaluator's job, not the static gate's, to reject.
         return True, None
     return True, None
 
@@ -586,3 +627,40 @@ class InspectorManifest(BaseModel):
                 "type='object' at the top level"
             )
         return value
+
+    @model_validator(mode="after")
+    def _validate_jsonschema_well_formed(self) -> InspectorManifest:
+        """Reject manifests whose ``parameters`` / ``output_schema`` are not
+        valid JSON Schema documents.
+
+        Without this gate, a manifest with ``output_schema: {type: bogus}``
+        would pass Pydantic + the loader and only crash at runtime inside
+        ``jsonschema.validate``, raising ``jsonschema.exceptions.SchemaError``
+        which is NOT in the runner's narrow ``except`` list — the exception
+        would escape ``run()`` as an unhandled error rather than collapse to
+        an ``InspectorResult`` status. Doing the well-formedness check at
+        manifest load time turns the failure into the standard
+        ``manifest_validation_error`` surface.
+
+        Note: an empty schema ``{}`` is a valid JSON Schema (matches every
+        instance) and is intentionally accepted here.
+        """
+
+        if self.parameters is not None:
+            try:
+                jsonschema.Draft202012Validator.check_schema(self.parameters)
+            except jsonschema.exceptions.SchemaError as exc:
+                raise ValueError(
+                    f"manifest_validation_error: parameters is not a valid "
+                    f"JSON Schema: {exc.message}"
+                ) from exc
+
+        try:
+            jsonschema.Draft202012Validator.check_schema(self.output_schema)
+        except jsonschema.exceptions.SchemaError as exc:
+            raise ValueError(
+                f"manifest_validation_error: output_schema is not a valid "
+                f"JSON Schema: {exc.message}"
+            ) from exc
+
+        return self

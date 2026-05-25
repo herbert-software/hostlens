@@ -7,7 +7,7 @@ The runner is the M1 sole entry point that translates an
 Design contract — per-call-site exception scoping (design.md Decision 7):
 
   * Every business call site has a **precise** ``except`` list. The runner
-    never wraps the orchestrator body in ``except Exception`` or in a
+    never wraps the orchestrator body in a bare-``Exception`` catch or in a
     blanket ``except (AttributeError, KeyError, TypeError)`` — those would
     swallow runner-internal bugs and silently coerce them into
     ``status="exception"``. The only allowed ``except KeyError`` /
@@ -60,7 +60,7 @@ __all__ = ["InspectorRunner"]
 # --------------------------------------------------------------------------- #
 # Precise exception sets — kept as module-level tuples so the precise-except
 # contract is grep-friendly: `grep "except (" runner.py` enumerates every
-# capture point and `grep "except Exception" runner.py` must remain empty.
+# capture point and the bare-``Exception`` grep gate must remain empty.
 # --------------------------------------------------------------------------- #
 
 # DSL ``evaluate`` call-site — simpleeval 1.0+ surfaces every business
@@ -131,11 +131,18 @@ class InspectorRunner:
         ``InspectorStatus`` values without exception propagation.
         """
 
-        del cancel  # M1 runner does not yet check cooperative cancellation
         if manifest is None:
             raise ValueError("manifest must not be None")
         if target is None:
             raise ValueError("target must not be None")
+
+        # Cooperative cancellation channel (ToolContext.cancel) — checked
+        # at every phase boundary. Raising ``asyncio.CancelledError`` lets
+        # the ToolRegistry dispatch layer propagate the signal naturally;
+        # adding a new ``InspectorStatus`` value would require a spec
+        # update, while CancelledError is the standard async cancellation
+        # contract that callers already handle.
+        _check_cancel(cancel)
 
         start = time.monotonic()
         self._logger.info(
@@ -146,9 +153,10 @@ class InspectorRunner:
         )
 
         # ---- Steps 1-6: preflight ------------------------------------ #
-        status, missing = await self._preflight(
+        status, missing, preflight_error = await self._preflight(
             manifest, target, allow_privileged=allow_privileged
         )
+        _check_cancel(cancel)
         if status == "requires_unmet":
             return self._finish(
                 manifest=manifest,
@@ -166,8 +174,80 @@ class InspectorRunner:
                     missing=missing,
                 ),
             )
+        if status == "target_unreachable":
+            return self._finish(
+                manifest=manifest,
+                target=target,
+                start=start,
+                result=InspectorResult(
+                    name=manifest.name,
+                    version=manifest.version,
+                    status="target_unreachable",
+                    target_name=target.name,
+                    duration_seconds=time.monotonic() - start,
+                    output={},
+                    findings=[],
+                    error=preflight_error,
+                    missing=[],
+                ),
+            )
 
-        # ---- Step 7: render command + collect secrets env ------------ #
+        # ---- Step 7: validate parameters + render command + collect secrets env ---- #
+        #
+        # Parameter validation is done at the ``run()`` boundary rather than inside
+        # ``_render_command`` so that ``_render_command`` stays a pure Jinja2 helper
+        # (no result-shape coupling) and the established "narrow ``except`` per call
+        # site" pattern stays uniform. The manifest loader already validates that
+        # ``manifest.parameters`` is itself a well-formed JSON Schema (see
+        # ``InspectorManifest._validate_jsonschema_well_formed``), but the runner
+        # must still validate the caller-supplied *values* against that schema:
+        # without this gate, an attacker (or a buggy dispatcher) could pass a
+        # string like ``"5432; rm -rf /"`` for a parameter declared as
+        # ``{type: integer}``; because numeric types are assumed safe by the
+        # loader's sh-filter gate, the rendered template would smuggle the
+        # injection payload into the shell. ``SchemaError`` is also caught as a
+        # defense-in-depth path for callers that bypass Pydantic via
+        # ``model_construct`` (same shape as the ``output_schema`` defense at
+        # step 9-10).
+        _check_cancel(cancel)
+        if manifest.parameters is not None:
+            try:
+                jsonschema.validate(parameters or {}, manifest.parameters)
+            except jsonschema.ValidationError as exc:
+                return self._finish(
+                    manifest=manifest,
+                    target=target,
+                    start=start,
+                    result=InspectorResult(
+                        name=manifest.name,
+                        version=manifest.version,
+                        status="exception",
+                        target_name=target.name,
+                        duration_seconds=time.monotonic() - start,
+                        output={},
+                        findings=[],
+                        error=f"parameter_validation_failed: {exc.message}",
+                        missing=[],
+                    ),
+                )
+            except jsonschema.exceptions.SchemaError as exc:
+                return self._finish(
+                    manifest=manifest,
+                    target=target,
+                    start=start,
+                    result=InspectorResult(
+                        name=manifest.name,
+                        version=manifest.version,
+                        status="exception",
+                        target_name=target.name,
+                        duration_seconds=time.monotonic() - start,
+                        output={},
+                        findings=[],
+                        error=f"parameter_schema_invalid: {exc.message}",
+                        missing=[],
+                    ),
+                )
+
         try:
             cmd, secrets_env = await self._render_command(manifest, parameters)
         except (jinja2.UndefinedError, jinja2.TemplateError) as exc:
@@ -189,6 +269,7 @@ class InspectorRunner:
             )
 
         # ---- Step 8: exec via target --------------------------------- #
+        _check_cancel(cancel)
         try:
             exec_result = await target.exec(
                 cmd,
@@ -234,6 +315,7 @@ class InspectorRunner:
             )
 
         # ---- Steps 9-10: parse + jsonschema validate ----------------- #
+        _check_cancel(cancel)
         try:
             output = self._parse_and_validate(
                 exec_result.stdout, manifest.parse, manifest.output_schema
@@ -276,8 +358,34 @@ class InspectorRunner:
                 stdout_length=len(exec_result.stdout),
                 stderr_length=len(exec_result.stderr),
             )
+        except jsonschema.exceptions.SchemaError as exc:
+            # Defense in depth: ``InspectorManifest._validate_jsonschema_well_formed``
+            # rejects malformed ``output_schema`` at load time, but a caller using
+            # ``InspectorManifest.model_construct(...)`` bypasses every Pydantic
+            # validator. The runner must still collapse this to ``status="exception"``
+            # rather than let ``SchemaError`` escape ``run()`` as an unhandled error
+            # (per spec §需求:`InspectorRunner.run` 必须永远返回 `InspectorResult` 不抛业务异常).
+            return self._finish(
+                manifest=manifest,
+                target=target,
+                start=start,
+                result=InspectorResult(
+                    name=manifest.name,
+                    version=manifest.version,
+                    status="exception",
+                    target_name=target.name,
+                    duration_seconds=time.monotonic() - start,
+                    output={},
+                    findings=[],
+                    error=f"output_schema_invalid: {exc.message}",
+                    missing=[],
+                ),
+                stdout_length=len(exec_result.stdout),
+                stderr_length=len(exec_result.stderr),
+            )
 
         # ---- Step 11: evaluate findings ------------------------------ #
+        _check_cancel(cancel)
         findings = await self._evaluate_findings(
             manifest.findings, output, parameters
         )
@@ -311,7 +419,11 @@ class InspectorRunner:
         target: ExecutionTarget,
         *,
         allow_privileged: bool,
-    ) -> tuple[Literal["ok", "requires_unmet"], list[str]]:
+    ) -> tuple[
+        Literal["ok", "requires_unmet", "target_unreachable"],
+        list[str],
+        str | None,
+    ]:
         """Run the 6-step preflight in fixed order.
 
         The order is contractual (spec §需求:`InspectorRunner` 求值顺序必须
@@ -326,22 +438,30 @@ class InspectorRunner:
         restricts the character set at manifest load time; ``shlex.quote``
         here is the documented defense-in-depth second gate (per spec
         §场景:shlex.quote 防御验证).
+
+        The third tuple element is the ``TargetError.kind`` when the
+        probe call site raises (e.g. ``ssh_connection_lost``); ``None``
+        otherwise. Per the per-call-site exception contract,
+        ``TargetError`` from ``target.exec`` during a probe maps to the
+        ``target_unreachable`` status — the runner's ``run`` translates
+        that tuple into the corresponding ``InspectorResult`` without
+        letting the exception escape.
         """
 
         # Step 1: target type compatibility ---------------------------- #
         if target.type not in manifest.targets:
-            return "requires_unmet", ["target_type"]
+            return "requires_unmet", ["target_type"], None
 
         # Step 2: capabilities ---------------------------------------- #
         required_caps = set(manifest.requires_capabilities)
         present_caps = {cap.value for cap in target.capabilities}
         missing_caps = required_caps - present_caps
         if missing_caps:
-            return "requires_unmet", sorted(missing_caps)
+            return "requires_unmet", sorted(missing_caps), None
 
         # Step 3: privilege opt-in ------------------------------------ #
         if manifest.privilege != "none" and not allow_privileged:
-            return "requires_unmet", ["privilege_opt_in"]
+            return "requires_unmet", ["privilege_opt_in"], None
 
         # Step 4: env secrets ----------------------------------------- #
         missing_secrets = [
@@ -350,19 +470,22 @@ class InspectorRunner:
             if name not in os.environ
         ]
         if missing_secrets:
-            return "requires_unmet", missing_secrets
+            return "requires_unmet", missing_secrets, None
 
         # Step 5: binary probes (parallel) ---------------------------- #
         if manifest.requires_binaries:
-            probe_results = await asyncio.gather(
-                *(
-                    target.exec(
-                        f"command -v {shlex.quote(binary)}",
-                        timeout=10,
+            try:
+                probe_results = await asyncio.gather(
+                    *(
+                        target.exec(
+                            f"command -v {shlex.quote(binary)}",
+                            timeout=10,
+                        )
+                        for binary in manifest.requires_binaries
                     )
-                    for binary in manifest.requires_binaries
                 )
-            )
+            except TargetError as exc:
+                return "target_unreachable", [], exc.kind
             missing_bins = [
                 f"bin:{binary}"
                 for binary, exec_result in zip(
@@ -371,19 +494,22 @@ class InspectorRunner:
                 if exec_result.exit_code != 0
             ]
             if missing_bins:
-                return "requires_unmet", missing_bins
+                return "requires_unmet", missing_bins, None
 
         # Step 6: file readability probes (parallel) ------------------ #
         if manifest.requires_files:
-            file_probes = await asyncio.gather(
-                *(
-                    target.exec(
-                        f"[ -r {shlex.quote(path)} ]",
-                        timeout=5,
+            try:
+                file_probes = await asyncio.gather(
+                    *(
+                        target.exec(
+                            f"[ -r {shlex.quote(path)} ]",
+                            timeout=5,
+                        )
+                        for path in manifest.requires_files
                     )
-                    for path in manifest.requires_files
                 )
-            )
+            except TargetError as exc:
+                return "target_unreachable", [], exc.kind
             missing_files = [
                 f"file:{path}"
                 for path, exec_result in zip(
@@ -392,9 +518,9 @@ class InspectorRunner:
                 if exec_result.exit_code != 0
             ]
             if missing_files:
-                return "requires_unmet", missing_files
+                return "requires_unmet", missing_files, None
 
-        return "ok", []
+        return "ok", [], None
 
     async def _render_command(
         self,
@@ -643,18 +769,43 @@ class InspectorRunner:
 # --------------------------------------------------------------------------- #
 
 
+def _check_cancel(cancel: asyncio.Event | None) -> None:
+    """Raise ``asyncio.CancelledError`` when the cooperative cancel event
+    is set.
+
+    Called at every phase boundary inside ``InspectorRunner.run``. Using
+    the standard async cancellation contract (rather than a new
+    ``InspectorStatus`` value) keeps the spec stable — the
+    ``ToolRegistry`` dispatch layer already propagates
+    ``CancelledError`` naturally.
+    """
+
+    if cancel is not None and cancel.is_set():
+        raise asyncio.CancelledError()
+
+
 def _sh_filter(value: object) -> str:
     """Jinja2 ``sh`` filter — wraps a value in ``shlex.quote``.
 
-    ``None`` / empty list raise ``ValueError`` rather than rendering as
-    an empty quoted string. Silent empty rendering would let a missing
-    parameter slip past the manifest contract.
+    ``None`` / empty list raise ``jinja2.TemplateRuntimeError`` (a subclass
+    of ``jinja2.TemplateError``) rather than rendering as an empty quoted
+    string. Silent empty rendering would let a missing parameter slip past
+    the manifest contract.
+
+    The exception type is deliberately a Jinja2 template-runtime error —
+    not ``ValueError`` — so the runner's ``except (jinja2.UndefinedError,
+    jinja2.TemplateError)`` block at the ``_render_command`` call site
+    catches it and surfaces a ``status="exception"`` ``InspectorResult``
+    with ``error="render_failed: ..."``. A bare ``ValueError`` would
+    escape that block and propagate out of ``run()`` as a runner bug.
     """
 
     if value is None:
-        raise ValueError("sh filter received None — parameter must be bound")
+        raise jinja2.TemplateRuntimeError(
+            "sh filter received None — parameter must be bound"
+        )
     if isinstance(value, list) and not value:
-        raise ValueError(
+        raise jinja2.TemplateRuntimeError(
             "sh filter received empty list — use map('sh') | join(...) only on non-empty arrays"
         )
     return shlex.quote(str(value))

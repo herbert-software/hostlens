@@ -32,7 +32,7 @@ import simpleeval
 
 from hostlens.core.exceptions import InspectorError
 
-__all__ = ["evaluate", "format_message", "parse_for_each"]
+__all__ = ["evaluate", "format_message", "parse_for_each", "validate_ast"]
 
 
 _FOR_EACH_PATTERN = re.compile(r"^(.+?)\s+as\s+([a-z_][a-z_0-9]*)$")
@@ -49,6 +49,39 @@ _FORBIDDEN_AST_NODES: tuple[type[ast.AST], ...] = (
     ast.GeneratorExp,
     ast.Import,
     ast.ImportFrom,
+)
+
+
+# Deny-list of dangerous Python builtins. simpleeval's runtime check would
+# catch them via ``FunctionNotDefined`` (since they aren't in
+# ``_DSL_FUNCTIONS``), but the static gate's contract is "reject before
+# evaluation reaches simpleeval". Surfacing the rejection at `validate_ast`
+# makes the manifest-load-time error message clear and stops a future
+# simpleeval policy change from silently allowing these.
+#
+# The deny-list is enforced on **any** ``ast.Name`` reference (call target,
+# argument, or bare reference) — passing ``getattr`` / ``eval`` as a value
+# to another callable is just as dangerous as calling them directly, and
+# enforcing the rule at the Name level (not just on ``Call.func``) is
+# defense in depth against simpleeval policy regressions.
+_FORBIDDEN_NAMES: frozenset[str] = frozenset(
+    {
+        # Code-execution / introspection primitives
+        "eval", "exec", "compile", "open", "globals", "locals", "vars", "dir",
+        "__import__",
+        # Attribute indirection — bypass dunder restrictions by string
+        "getattr", "setattr", "delattr", "hasattr",
+        # Reflection / object identity
+        "type", "id", "hash", "repr",
+        # Iteration primitives — can drive arbitrary __next__ side effects
+        "iter", "next",
+        # IO primitives
+        "print", "input", "breakpoint",
+        # Memory / buffer constructors — exposing C-level conversions
+        "memoryview", "bytearray", "bytes",
+        # Descriptor / class machinery — escape paths via method binding
+        "classmethod", "staticmethod", "property", "super",
+    }
 )
 
 
@@ -74,12 +107,17 @@ _DSL_FUNCTIONS: dict[str, Any] = {
 }
 
 
-def _validate_ast(expr: str) -> None:
+def validate_ast(expr: str) -> None:
     """Static gate — reject lambda / comprehensions / imports / dunder access.
 
     Raises `simpleeval.FeatureNotAvailable` on any hit so the caller sees
     the same exception type whether the rejection came from the AST gate
     or from simpleeval itself.
+
+    Exposed publicly so the schema-layer `FindingRule._validate_dsl` can
+    apply the same static gate at manifest load time — otherwise
+    constructs like `__import__('os')` slip past simpleeval's empty-context
+    eval and only fail at runtime.
     """
 
     try:
@@ -105,6 +143,18 @@ def _validate_ast(expr: str) -> None:
         if isinstance(node, ast.Name) and node.id.startswith("__"):
             raise simpleeval.FeatureNotAvailable(
                 f"dunder name reference ({node.id!r}) is not permitted"
+            )
+        # Reject any ``ast.Name`` whose id is in ``_FORBIDDEN_NAMES``,
+        # regardless of position (call target, argument, or bare reference).
+        # simpleeval would block missing names at runtime via
+        # ``NameNotDefined`` / ``FunctionNotDefined``, but the static gate's
+        # contract is to reject *before* evaluation so the threat model
+        # isn't dependent on the runtime function set — and so passing a
+        # forbidden builtin as an argument (e.g. ``f(eval)``) is rejected
+        # even when ``f`` itself is benign.
+        if isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
+            raise simpleeval.FeatureNotAvailable(
+                f"reference to {node.id!r} is not permitted in DSL expressions"
             )
 
 
@@ -142,7 +192,7 @@ async def evaluate(
         asyncio.TimeoutError: evaluation exceeded `timeout_seconds`.
     """
 
-    _validate_ast(expr)
+    validate_ast(expr)
     evaluator = _build_evaluator(context)
     return await asyncio.wait_for(
         asyncio.to_thread(evaluator.eval, expr),

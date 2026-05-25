@@ -113,7 +113,7 @@ async def test_target_type_incompatible_returns_target_type() -> None:
     runner = _runner()
     manifest = _make_manifest(targets=["ssh"])
     target = _make_target(type_="local")
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     assert missing == ["target_type"]
     # exec should NOT have been called — step 1 returns immediately.
@@ -129,7 +129,7 @@ async def test_missing_capability_returns_sorted_caps() -> None:
     runner = _runner()
     manifest = _make_manifest(requires_capabilities=["systemd"])
     target = _make_target(capabilities={Capability.SHELL, Capability.FILE_READ})
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     assert missing == ["systemd"]
 
@@ -148,7 +148,7 @@ async def test_capability_step_runs_before_binary_step() -> None:
             exit_code=127, stdout="", stderr="", duration_seconds=0.01, timed_out=False,
         )},
     )
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     assert missing == ["systemd"]
     # Binary probe must NOT have run since step 2 returned early.
@@ -164,7 +164,7 @@ async def test_privilege_required_without_opt_in() -> None:
     runner = _runner()
     manifest = _make_manifest(privilege="sudo")
     target = _make_target(capabilities={Capability.SHELL})
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     assert missing == ["privilege_opt_in"]
 
@@ -173,7 +173,7 @@ async def test_privilege_required_with_opt_in_passes() -> None:
     runner = _runner()
     manifest = _make_manifest(privilege="sudo")
     target = _make_target(capabilities={Capability.SHELL})
-    status, missing = await runner._preflight(manifest, target, allow_privileged=True)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=True)
     assert status == "ok"
     assert missing == []
 
@@ -188,7 +188,7 @@ async def test_env_secret_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = _runner()
     manifest = _make_manifest(secrets=["PGPASSWORD"])
     target = _make_target(capabilities={Capability.SHELL})
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     assert missing == ["env:PGPASSWORD"]
 
@@ -200,7 +200,7 @@ async def test_env_secret_collects_all_missing(monkeypatch: pytest.MonkeyPatch) 
     runner = _runner()
     manifest = _make_manifest(secrets=["VAR_A", "VAR_B", "VAR_C"])
     target = _make_target(capabilities={Capability.SHELL})
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     # Both missing secrets are reported; the present one is not.
     assert set(missing) == {"env:VAR_A", "env:VAR_B"}
@@ -222,7 +222,7 @@ async def test_binary_missing() -> None:
             ),
         },
     )
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     assert missing == ["bin:nginx"]
 
@@ -256,7 +256,7 @@ async def test_file_missing() -> None:
             ),
         },
     )
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "requires_unmet"
     assert missing == ["file:/etc/nginx/nginx.conf"]
 
@@ -331,6 +331,85 @@ async def test_all_passes_returns_ok() -> None:
     runner = _runner()
     manifest = _make_manifest(requires_binaries=["echo"], requires_files=["/tmp"])
     target = _make_target(capabilities={Capability.SHELL})
-    status, missing = await runner._preflight(manifest, target, allow_privileged=False)
+    status, missing, _err = await runner._preflight(manifest, target, allow_privileged=False)
     assert status == "ok"
     assert missing == []
+
+
+# ---------------------------------------------------------------------- #
+# Preflight ``TargetError`` → ``target_unreachable``
+#
+# When the probe call site raises ``TargetError`` (e.g. SSH connection
+# drops mid-probe) the runner contract maps that to
+# ``status=target_unreachable`` with ``error=err.kind``. Without the
+# wrap, the exception would escape ``run()`` and violate the per-call-site
+# exception contract.
+# ---------------------------------------------------------------------- #
+
+
+def _make_target_raising(
+    *,
+    kind: str,
+    capabilities: set[Capability] | None = None,
+) -> Any:
+    """Stub target whose ``exec`` raises ``TargetError(kind=...)`` on every call."""
+
+    from hostlens.core.exceptions import TargetError
+
+    target = MagicMock()
+    target.name = "t1"
+    target.type = "local"
+    target.capabilities = capabilities if capabilities is not None else {Capability.SHELL}
+    target.exec = AsyncMock(side_effect=TargetError(kind=kind))
+    return target
+
+
+async def test_target_error_in_binary_probe_maps_to_target_unreachable() -> None:
+    runner = _runner()
+    manifest = _make_manifest(requires_binaries=["nginx"])
+    target = _make_target_raising(kind="ssh_connection_lost")
+    status, missing, err = await runner._preflight(
+        manifest, target, allow_privileged=False
+    )
+    assert status == "target_unreachable"
+    assert missing == []
+    assert err == "ssh_connection_lost"
+
+
+async def test_target_error_in_file_probe_maps_to_target_unreachable() -> None:
+    runner = _runner()
+    manifest = _make_manifest(requires_files=["/etc/nginx/nginx.conf"])
+    target = _make_target_raising(kind="ssh_connection_lost")
+    status, missing, err = await runner._preflight(
+        manifest, target, allow_privileged=False
+    )
+    assert status == "target_unreachable"
+    assert missing == []
+    assert err == "ssh_connection_lost"
+
+
+async def test_run_with_target_error_in_preflight_returns_target_unreachable() -> None:
+    """End-to-end: TargetError during preflight surfaces as a final
+    ``InspectorResult.status == "target_unreachable"`` rather than
+    escaping ``run()``.
+    """
+
+    from hostlens.inspectors.schema import CollectSpec, ParseSpec
+
+    runner = _runner()
+    manifest = InspectorManifest(
+        name="test.preflight",
+        version="1.0.0",
+        description="test",
+        targets=["local"],
+        requires_binaries=["nginx"],
+        collect=CollectSpec(command="echo ok"),
+        parse=ParseSpec(format="raw"),
+        output_schema={"type": "object"},
+        findings=[],
+    )
+    target = _make_target_raising(kind="ssh_connection_lost")
+    result = await runner.run(manifest, target)
+    assert result.status == "target_unreachable"
+    assert result.error == "ssh_connection_lost"
+    assert result.missing == []

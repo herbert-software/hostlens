@@ -421,7 +421,17 @@ class TestRawExtractRegexLayers:
 
 _REDOS_FIXTURES: list[tuple[str, str, str]] = [
     ("nested_quantifier_capturing", r"(?P<x>(a+)+)", "nested_quantifier"),
-    ("nested_quantifier_star_star", r"(?P<x>(a*)*)", "nested_quantifier"),
+    # Inner ``a*`` admits the empty match → outer repeat is over zero-width
+    # matches. Spec-semantically this is the ``quantifier_on_empty_matchable``
+    # category (a stricter classification than the historical
+    # ``nested_quantifier`` label which only described the syntactic shape).
+    ("nested_quantifier_star_star", r"(?P<x>(a*)*)", "quantifier_on_empty_matchable"),
+    ("quantifier_on_empty_star_plus", r"(?P<x>(a*)+)", "quantifier_on_empty_matchable"),
+    (
+        "quantifier_on_empty_bounded",
+        r"(?P<x>(a{0,5})+)",
+        "quantifier_on_empty_matchable",
+    ),
     ("nested_quantifier_non_capturing", r"(?P<x>(?:a+)+)", "nested_quantifier"),
     ("quantifier_on_lookahead", r"(?P<x>(?=a+)+a)", "quantifier_on_assert"),
     ("atomic_group", r"(?P<x>(?>a+))", "atomic_group_forbidden"),
@@ -451,3 +461,79 @@ def test_redos_fixture_rejected_with_specific_tag(
         f"ReDoS fixture {case_id!r} ({regex!r}) raised but msg does not contain "
         f"expected tag {expected_tag!r}; got msg={msg!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# InspectorManifest — JSON Schema well-formedness gate
+# --------------------------------------------------------------------------- #
+
+
+class TestJSONSchemaWellFormedness:
+    """`parameters` / `output_schema` must be valid JSON Schema documents.
+
+    Without this gate, a bogus inline schema would pass Pydantic + loader
+    and only crash at runtime inside `jsonschema.validate`, raising
+    `jsonschema.exceptions.SchemaError` which the runner does not catch.
+    """
+
+    def test_bogus_parameters_type_rejected(self) -> None:
+        kwargs = _valid_manifest_kwargs()
+        kwargs["parameters"] = {"type": "bogus"}
+        with pytest.raises(ValidationError) as exc_info:
+            InspectorManifest(**kwargs)  # type: ignore[arg-type]
+        msg = exc_info.value.errors()[0]["msg"]
+        assert "manifest_validation_error" in msg
+        assert "parameters" in msg
+
+    def test_bogus_output_schema_type_rejected(self) -> None:
+        kwargs = _valid_manifest_kwargs()
+        kwargs["output_schema"] = {"type": "not_a_real_type"}
+        with pytest.raises(ValidationError) as exc_info:
+            InspectorManifest(**kwargs)  # type: ignore[arg-type]
+        msg = exc_info.value.errors()[0]["msg"]
+        # The output_schema_top_level_not_object validator runs first for
+        # this case (type != "object"), so any error message is acceptable
+        # as long as the manifest is rejected.
+        assert msg
+
+    def test_output_schema_with_invalid_inner_type_rejected(self) -> None:
+        kwargs = _valid_manifest_kwargs()
+        kwargs["output_schema"] = {
+            "type": "object",
+            "properties": {"x": {"type": 42}},
+        }
+        with pytest.raises(ValidationError) as exc_info:
+            InspectorManifest(**kwargs)  # type: ignore[arg-type]
+        msg = exc_info.value.errors()[0]["msg"]
+        assert "manifest_validation_error" in msg
+        assert "output_schema" in msg
+
+    def test_valid_parameters_schema_loads(self) -> None:
+        kwargs = _valid_manifest_kwargs()
+        kwargs["parameters"] = {
+            "type": "object",
+            "properties": {"host": {"type": "string", "pattern": "^[a-z]+$"}},
+        }
+        m = InspectorManifest(**kwargs)  # type: ignore[arg-type]
+        assert m.parameters is not None
+
+    def test_empty_output_schema_top_level_rejected_by_object_validator(
+        self,
+    ) -> None:
+        # Empty `{}` is a valid JSON Schema (matches everything) so the
+        # well-formedness gate would accept it, BUT the top-level
+        # `type=object` requirement (separate validator) still rejects.
+        kwargs = _valid_manifest_kwargs()
+        kwargs["output_schema"] = {}
+        with pytest.raises(ValidationError) as exc_info:
+            InspectorManifest(**kwargs)  # type: ignore[arg-type]
+        msg = exc_info.value.errors()[0]["msg"]
+        assert "output_schema_top_level_not_object" in msg
+
+    def test_empty_parameters_schema_accepted(self) -> None:
+        # Empty `{}` is a valid JSON Schema — parameters has no
+        # `type=object` requirement, so this loads cleanly.
+        kwargs = _valid_manifest_kwargs()
+        kwargs["parameters"] = {}
+        m = InspectorManifest(**kwargs)  # type: ignore[arg-type]
+        assert m.parameters == {}

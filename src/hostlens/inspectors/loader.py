@@ -422,8 +422,20 @@ def _validate_command_template(
         is_subscripted = isinstance(parent, nodes.Getitem) and parent.node is name_node
 
         if is_subscripted and schema_type == "array":
-            # `endpoints[0]` — element type drives validation.
-            assert isinstance(parent, nodes.Getitem)  # narrow for mypy; `is_subscripted` already checks this
+            # `endpoints[0]` (or `servers[0].host` / `servers[0]['host']`) —
+            # element type drives validation. When the subscript is followed
+            # by a further attribute / string-subscript chain, delegate to
+            # the same object-member walker as for top-level object params
+            # so the leaf type can be resolved through the array's `items`
+            # schema. Otherwise fall back to the simple element-type check.
+            assert isinstance(parent, nodes.Getitem)  # narrow for mypy
+            grandparent = parents.get(id(parent))
+            chain_continues = isinstance(grandparent, (nodes.Getattr, nodes.Getitem)) and grandparent.node is parent
+            if chain_continues:
+                _validate_object_member_access(
+                    name_node, schema, name, parents, path=path
+                )
+                continue
             items_class = _classify_array_items(schema, name)
             if items_class == "undetermined":
                 raise InspectorError(
@@ -479,7 +491,217 @@ def _validate_command_template(
             # Numeric items — no filter requirement.
             continue
 
-        # Numeric / boolean / object scalar parameters — no filter requirement.
+        if schema_type == "object":
+            # Bare object-typed Name with no member access (e.g. `{{ db }}`)
+            # is not a shell-injection vector by itself — Jinja2 would
+            # stringify the dict; the manifest author hits an obvious bug
+            # at render time. Member-access chains (`{{ db.host }}` /
+            # `{{ db['host'] }}` / `{{ db.deep.host }}`) require the leaf
+            # type to flow through the same string / array-of-strings
+            # gating as a top-level parameter — handled below.
+            _validate_object_member_access(
+                name_node, schema, name, parents, path=path
+            )
+            continue
+
+        # Numeric / boolean scalar parameters — no filter requirement.
+
+
+# Sentinel values returned by `_walk_member_chain` instead of `None`. They
+# distinguish "no chain — bare reference / dynamic subscript on schema-typed
+# object" from "chain contains an integer subscript that must be resolved by
+# inspecting the parent schema at walk time" so the caller can attach the
+# right error kind.
+_WALK_DYNAMIC_SUBSCRIPT: object = object()
+_WALK_INVALID_INT_SUBSCRIPT_ON_OBJECT: object = object()
+
+
+def _walk_member_chain(
+    name_node: nodes.Name, parents: dict[int, nodes.Node]
+) -> tuple[list[tuple[str | int, nodes.Node]], nodes.Node] | object | None:
+    """Collect a member-access chain rooted at ``name_node``.
+
+    Returns ``(steps, outermost)`` where ``steps`` is a list of
+    ``(key, ancestor_node)`` pairs — one per ``Getattr`` /
+    ``Getitem(Const str)`` / ``Getitem(Const int)`` ancestor — and
+    ``outermost`` is the last ancestor in the chain (the node a filter
+    chain would wrap). ``key`` is the attribute name (str) for string
+    accesses or an int for integer subscripts.
+
+    Sentinel returns:
+
+      * ``None`` — Name has no member-access ancestor (bare reference).
+      * ``_WALK_DYNAMIC_SUBSCRIPT`` — chain contains a ``Getitem`` whose
+        ``arg`` is neither a constant string nor a constant int (dynamic
+        subscripts on schema-typed objects are unsafe in M1).
+
+    Distinguishing the two sentinels lets the caller raise
+    ``unquoted_parameter_in_command`` for dynamic subscripts without
+    confusing them with bare references that don't need any validation.
+    """
+
+    steps: list[tuple[str | int, nodes.Node]] = []
+    current: nodes.Node = name_node
+    while True:
+        parent = parents.get(id(current))
+        if parent is None:
+            break
+        if isinstance(parent, nodes.Getattr) and parent.node is current:
+            steps.append((parent.attr, parent))
+            current = parent
+            continue
+        if isinstance(parent, nodes.Getitem) and parent.node is current:
+            arg = parent.arg
+            if isinstance(arg, nodes.Const) and isinstance(arg.value, str):
+                steps.append((arg.value, parent))
+                current = parent
+                continue
+            if isinstance(arg, nodes.Const) and isinstance(arg.value, int) and not isinstance(arg.value, bool):
+                # Integer subscript — resolution to `array.items` or
+                # `unquoted_parameter_in_command` happens in
+                # `_resolve_member_leaf` against the parent schema at this
+                # point in the chain.
+                steps.append((arg.value, parent))
+                current = parent
+                continue
+            # Non-const subscript on a schema-typed object — unsafe.
+            return _WALK_DYNAMIC_SUBSCRIPT
+        break
+    if not steps:
+        return None
+    return steps, current
+
+
+def _resolve_member_leaf(
+    root_schema: dict[str, Any], member_path: list[str | int]
+) -> dict[str, Any] | object | None:
+    """Walk ``root_schema`` down ``member_path`` and return the leaf
+    property schema, ``None`` for "no resolution along the chain", or the
+    sentinel ``_WALK_INVALID_INT_SUBSCRIPT_ON_OBJECT`` when an integer
+    subscript is applied to a schema whose ``type`` is not ``array``.
+
+    String steps walk ``properties`` (requires ``type=object``); int steps
+    walk ``items`` (requires ``type=array``). Any mismatch returns
+    ``None`` or the integer-on-object sentinel as appropriate.
+    """
+
+    schema: dict[str, Any] = root_schema
+    for step in member_path:
+        if isinstance(step, int) and not isinstance(step, bool):
+            # Integer subscript — parent must be array; descend into items.
+            if schema.get("type") != "array":
+                return _WALK_INVALID_INT_SUBSCRIPT_ON_OBJECT
+            items = schema.get("items")
+            if not isinstance(items, dict):
+                return None
+            schema = items
+            continue
+        # String step — parent must be object; descend into properties.
+        if schema.get("type") != "object":
+            return None
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return None
+        next_schema = properties.get(step)
+        if not isinstance(next_schema, dict):
+            return None
+        schema = next_schema
+    return schema
+
+
+def _validate_object_member_access(
+    name_node: nodes.Name,
+    root_schema: dict[str, Any],
+    root_name: str,
+    parents: dict[int, nodes.Node],
+    *,
+    path: Path | None,
+) -> None:
+    """Validate a ``{{ root.a.b }}`` / ``{{ root['a'] }}`` style chain.
+
+    Resolves the leaf schema by walking ``root_schema.properties`` and
+    applies the same string / array(string-items) / numeric rules as the
+    top-level walker. The ``parameter`` field of any raised
+    ``InspectorError`` carries the dot-joined path (e.g. ``db.host``).
+    """
+
+    walk = _walk_member_chain(name_node, parents)
+    if walk is None:
+        # Bare object reference (no member access — not a shell vector).
+        return
+    if walk is _WALK_DYNAMIC_SUBSCRIPT:
+        # Dynamic subscript like ``{{ db[user_input] }}`` — unsafe in M1
+        # because the leaf type cannot be resolved statically.
+        raise InspectorError(
+            kind="unquoted_parameter_in_command",
+            path=path,
+            parameter=root_name,
+        )
+
+    assert isinstance(walk, tuple)  # narrow for mypy
+    steps, outermost = walk
+    member_path: list[str | int] = [attr for attr, _node in steps]
+    dot_path = ".".join([root_name, *(str(s) for s in member_path)])
+
+    leaf_schema = _resolve_member_leaf(root_schema, member_path)
+    if leaf_schema is _WALK_INVALID_INT_SUBSCRIPT_ON_OBJECT:
+        # Integer subscript applied to a non-array (object / scalar) parent
+        # is nonsensical and likely malicious — Jinja2 stringifies the
+        # result as `None`, which would silently drop the parameter from
+        # the command. Reject statically.
+        raise InspectorError(
+            kind="unquoted_parameter_in_command",
+            path=path,
+            parameter=dot_path,
+        )
+    if leaf_schema is None:
+        # Schema lookup failed somewhere along the chain — either the
+        # property is undeclared or an intermediate field is not an object.
+        # Reject conservatively per spec: an unresolved leaf type cannot be
+        # gated, so the manifest must declare the path before it's used.
+        raise InspectorError(
+            kind="unquoted_parameter_in_command",
+            path=path,
+            parameter=dot_path,
+        )
+
+    assert isinstance(leaf_schema, dict)  # narrow for mypy
+    leaf_type = leaf_schema.get("type")
+    chain = _filter_chain_from(outermost, parents)
+
+    if leaf_type == "string":
+        if not _chain_contains_sh(chain):
+            raise InspectorError(
+                kind="unquoted_parameter_in_command",
+                path=path,
+                parameter=dot_path,
+            )
+        return
+
+    if leaf_type == "array":
+        items_class = _classify_array_items(leaf_schema, dot_path)
+        if items_class == "undetermined":
+            raise InspectorError(
+                kind="array_parameter_items_type_undetermined",
+                path=path,
+                parameter=dot_path,
+            )
+        if items_class == "string" and not _chain_is_map_sh_then_join(chain):
+            raise InspectorError(
+                kind="unquoted_array_parameter_in_command",
+                path=path,
+                parameter=dot_path,
+            )
+        return
+
+    if leaf_type == "object":
+        # The Name itself binds an object, but the access chain stopped at
+        # another object — Jinja2 will stringify a dict at render time
+        # which is a manifest authoring bug (not a shell-injection vector
+        # because the leaf isn't user-controlled string content). Skip.
+        return
+
+    # Numeric / boolean / unknown leaf type — no filter requirement.
 
 
 def _filter_chain_from(

@@ -125,7 +125,10 @@ async def test_undefined_parameter_propagates() -> None:
 async def test_sh_filter_rejects_none() -> None:
     runner = _runner()
     manifest = _make_manifest(command="ping {{ host | sh }}")
-    with pytest.raises(ValueError, match="None"):
+    # `sh` filter raises `jinja2.TemplateRuntimeError` (subclass of
+    # `jinja2.TemplateError`) so that the runner's narrow `except` block at
+    # `_render_command` catches it and surfaces `status="exception"`.
+    with pytest.raises(jinja2.TemplateError, match="None"):
         await runner._render_command(manifest, {"host": None})
 
 
@@ -135,7 +138,7 @@ async def test_sh_filter_rejects_empty_list() -> None:
     # explicit empty-list rejection inside the `sh` filter — silent empty
     # rendering would hide a missing parameter.
     manifest = _make_manifest(command="ping {{ endpoints | sh }}")
-    with pytest.raises(ValueError, match="empty list"):
+    with pytest.raises(jinja2.TemplateError, match="empty list"):
         await runner._render_command(manifest, {"endpoints": []})
 
 

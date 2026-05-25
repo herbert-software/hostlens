@@ -104,6 +104,96 @@ class TestEvaluateRejectsDangerousConstructs:
         with pytest.raises(simpleeval.FeatureNotAvailable):
             await dsl.evaluate("__import__('os')", {})
 
+    async def test_eval_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("eval('1+1')", {})
+
+    async def test_exec_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("exec('x=1')", {})
+
+    async def test_compile_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("compile('x', '<string>', 'eval')", {})
+
+    async def test_open_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("open('/etc/passwd').read()", {})
+
+    async def test_globals_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("globals()", {})
+
+    async def test_locals_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("locals()", {})
+
+    async def test_vars_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("vars()", {})
+
+    async def test_dir_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("dir()", {})
+
+    async def test_getattr_call_rejected(self) -> None:
+        # ``getattr`` bypasses dunder restrictions via string indirection.
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("getattr(x, '__class__')", {})
+
+    async def test_setattr_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("setattr(x, 'attr', 1)", {})
+
+    async def test_delattr_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("delattr(x, 'attr')", {})
+
+    async def test_hasattr_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("hasattr(x, '__init__')", {})
+
+    async def test_type_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("type(x)", {})
+
+    async def test_iter_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("iter(x)", {})
+
+    async def test_next_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("next(x)", {})
+
+    async def test_repr_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("repr(x)", {})
+
+    async def test_super_call_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("super()", {})
+
+    async def test_bare_denied_name_as_argument_rejected(self) -> None:
+        # Bare denied names (e.g. ``eval`` passed as an argument rather than
+        # called) must also be blocked — defense in depth against simpleeval
+        # policy regressions that might let the value flow into a callable
+        # which then invokes it.
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("f(eval)", {})
+
+    async def test_bare_getattr_as_argument_rejected(self) -> None:
+        with pytest.raises(simpleeval.FeatureNotAvailable):
+            await dsl.evaluate("f(getattr)", {})
+
+    async def test_len_still_works_after_denylist(self) -> None:
+        # Sanity check: the deny-list must not accidentally block whitelisted
+        # builtins. `len` lives in `_DSL_FUNCTIONS`, not in the deny-list.
+        assert await dsl.evaluate("len(items)", {"items": [1, 2, 3]}) == 3
+
+    async def test_normal_names_still_work_after_denylist(self) -> None:
+        # Sanity check: the deny-list must not block bound user variables.
+        assert await dsl.evaluate("x + 1", {"x": 5}) == 6
+
 
 # --------------------------------------------------------------------------- #
 # evaluate — timeout path

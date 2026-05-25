@@ -193,6 +193,36 @@ async def test_status_exception_render_failed() -> None:
     assert result.error.startswith("render_failed:")
 
 
+async def test_status_exception_render_failed_sh_filter_none() -> None:
+    """`sh` filter on `None` must NOT escape `run()` — it raises a
+    `jinja2.TemplateRuntimeError` that the runner catches as render_failed.
+    """
+
+    runner = _runner()
+    manifest = _make_manifest(command="ping {{ host | sh }}")
+    target = _make_target()
+    result = await runner.run(manifest, target, parameters={"host": None})
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("render_failed:")
+
+
+async def test_status_exception_render_failed_sh_filter_empty_list() -> None:
+    """`sh` filter on an empty list must NOT escape `run()` — it raises a
+    `jinja2.TemplateRuntimeError` that the runner catches as render_failed.
+    """
+
+    runner = _runner()
+    manifest = _make_manifest(command="ping {{ endpoints | sh }}")
+    target = _make_target()
+    result = await runner.run(
+        manifest, target, parameters={"endpoints": []}
+    )
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("render_failed:")
+
+
 async def test_status_exception_parse_failed_json() -> None:
     runner = _runner()
     manifest = _make_manifest(
@@ -228,6 +258,230 @@ async def test_status_exception_output_schema_mismatch() -> None:
     assert result.status == "exception"
     assert result.error is not None
     assert result.error.startswith("output_schema_mismatch:")
+
+
+async def test_status_exception_output_schema_invalid_via_model_construct() -> None:
+    """Adversarial: a caller using ``InspectorManifest.model_construct`` bypasses
+    every Pydantic validator (including ``_validate_jsonschema_well_formed``),
+    so a malformed ``output_schema`` reaches ``jsonschema.validate`` at runtime
+    and raises ``jsonschema.exceptions.SchemaError``. The runner must collapse
+    this to ``status="exception"`` rather than let ``SchemaError`` escape.
+    """
+
+    runner = _runner()
+    manifest = InspectorManifest.model_construct(
+        name="test.bad_schema",
+        version="1.0.0",
+        description="test",
+        tags=[],
+        targets=["local"],
+        requires_capabilities=[],
+        requires_binaries=[],
+        requires_files=[],
+        privilege="none",
+        parameters=None,
+        secrets=[],
+        collect=CollectSpec(command="echo ok"),
+        parse=ParseSpec(format="raw"),
+        # Malformed JSON Schema: ``type`` is not a JSON Schema primitive.
+        output_schema={"type": "bogus"},
+        findings=[],
+    )
+    target = _make_target()
+    result = await runner.run(manifest, target)
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("output_schema_invalid:")
+
+
+# ---------------------------------------------------------------------- #
+# Status: exception — parameter validation against manifest.parameters
+# ---------------------------------------------------------------------- #
+
+
+def _make_manifest_with_parameters(
+    *,
+    command: str,
+    parameters: dict[str, Any] | None,
+) -> InspectorManifest:
+    """Build an ``InspectorManifest`` with an arbitrary ``parameters`` schema.
+
+    Uses the public constructor (which goes through Pydantic) so the loader's
+    well-formedness gate runs — the malformed-schema test below uses
+    ``model_construct`` separately to skip Pydantic and exercise the runtime
+    defense-in-depth path.
+    """
+
+    return InspectorManifest(
+        name="test.run.params",
+        version="1.0.0",
+        description="test",
+        targets=["local"],
+        privilege="none",
+        parameters=parameters,
+        collect=CollectSpec(command=command),
+        parse=ParseSpec(format="raw"),
+        output_schema={"type": "object", "properties": {"raw": {"type": "string"}}},
+        findings=[],
+    )
+
+
+async def test_parameter_validation_type_confusion_attack_blocked() -> None:
+    """Manifest declares ``port`` as an integer; an attacker / buggy
+    dispatcher passing a string with a shell-injection payload must be
+    rejected before any subprocess is spawned. The static loader gate
+    trusts the manifest's declared types; this is the runtime check that
+    actually enforces them on caller-supplied values.
+    """
+
+    runner = _runner()
+    manifest = _make_manifest_with_parameters(
+        command="psql -p {{ port }}",
+        parameters={
+            "type": "object",
+            "properties": {
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+            },
+            "required": ["port"],
+        },
+    )
+    target = _make_target()
+    result = await runner.run(
+        manifest, target, parameters={"port": "5432; rm -rf /"}
+    )
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("parameter_validation_failed:")
+    # Critical: NO subprocess invocation. The malicious payload never
+    # reached ``target.exec``.
+    assert target.exec.call_count == 0
+
+
+async def test_parameter_validation_missing_required_parameter() -> None:
+    runner = _runner()
+    manifest = _make_manifest_with_parameters(
+        command="ping {{ host }}",
+        parameters={
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "pattern": "^[a-zA-Z0-9.-]+$"}
+            },
+            "required": ["host"],
+        },
+    )
+    target = _make_target()
+    result = await runner.run(manifest, target, parameters={})
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("parameter_validation_failed:")
+    assert target.exec.call_count == 0
+
+
+async def test_parameter_validation_pattern_violation() -> None:
+    """Even though the ``sh`` filter would quote ``'; rm -rf /``, the
+    manifest's pattern explicitly says such values are out of contract.
+    Rejecting at validation time gives a clearer error and never even
+    reaches the rendering layer.
+    """
+
+    runner = _runner()
+    manifest = _make_manifest_with_parameters(
+        command="ping {{ host | sh }}",
+        parameters={
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "pattern": "^[a-zA-Z0-9.-]+$"}
+            },
+            "required": ["host"],
+        },
+    )
+    target = _make_target()
+    result = await runner.run(
+        manifest, target, parameters={"host": "'; rm -rf /"}
+    )
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("parameter_validation_failed:")
+    assert target.exec.call_count == 0
+
+
+async def test_parameter_validation_valid_integer_passes() -> None:
+    """A valid integer value must pass validation and reach the renderer.
+
+    ``RunInspectorInput.parameters`` is typed ``dict[str, str]`` at the
+    ToolRegistry boundary, but the runner accepts ``dict[str, Any]`` and
+    must correctly handle integer parameter values passed directly.
+    """
+
+    runner = _runner()
+    manifest = _make_manifest_with_parameters(
+        command="psql -p {{ port }}",
+        parameters={
+            "type": "object",
+            "properties": {
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+            },
+            "required": ["port"],
+        },
+    )
+    target = _make_target()
+    result = await runner.run(manifest, target, parameters={"port": 5432})
+    assert result.status == "ok"
+    assert result.error is None
+    target.exec.assert_awaited_once()
+    rendered_cmd = target.exec.await_args.args[0]
+    assert rendered_cmd == "psql -p 5432"
+
+
+async def test_parameter_validation_skipped_when_manifest_has_no_parameters() -> None:
+    """When the manifest declares no ``parameters`` schema, callers may
+    still pass arbitrary key/values (e.g. for use inside the template);
+    validation must not run and the rendered command must reach exec.
+    """
+
+    runner = _runner()
+    manifest = _make_manifest()  # parameters: None (default)
+    target = _make_target()
+    result = await runner.run(
+        manifest, target, parameters={"anything": "goes"}
+    )
+    assert result.status == "ok"
+    target.exec.assert_awaited_once()
+
+
+async def test_parameter_schema_invalid_via_model_construct() -> None:
+    """Adversarial: caller uses ``model_construct`` to bypass Pydantic
+    (including the loader's ``_validate_jsonschema_well_formed`` gate),
+    so a malformed ``parameters`` schema reaches ``jsonschema.validate``
+    at runtime and raises ``SchemaError``. The runner must collapse this
+    to ``status="exception"`` rather than let ``SchemaError`` escape.
+    """
+
+    runner = _runner()
+    manifest = InspectorManifest.model_construct(
+        name="test.bad_param_schema",
+        version="1.0.0",
+        description="test",
+        tags=[],
+        targets=["local"],
+        requires_capabilities=[],
+        requires_binaries=[],
+        requires_files=[],
+        privilege="none",
+        # Malformed JSON Schema: ``type`` is not a JSON Schema primitive.
+        parameters={"type": "bogus"},
+        secrets=[],
+        collect=CollectSpec(command="echo ok"),
+        parse=ParseSpec(format="raw"),
+        output_schema={"type": "object"},
+        findings=[],
+    )
+    target = _make_target()
+    result = await runner.run(manifest, target, parameters={"x": 1})
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("parameter_schema_invalid:")
+    assert target.exec.call_count == 0
 
 
 # ---------------------------------------------------------------------- #
@@ -277,6 +531,80 @@ async def test_runner_internal_attribute_error_propagates() -> None:
     with pytest.raises(AttributeError):
         # type: ignore[arg-type] — we deliberately pass a non-Manifest.
         await runner.run(BrokenManifest(), target)  # type: ignore[arg-type]
+
+
+async def test_cancel_set_before_run_raises_cancelled_error() -> None:
+    """``cancel`` is the cooperative cancellation channel from
+    ``ToolContext.cancel``. Setting it before ``run()`` is entered must
+    surface as ``asyncio.CancelledError`` at the first phase check.
+    """
+
+    import asyncio
+
+    runner = _runner()
+    manifest = _make_manifest()
+    target = _make_target()
+    cancel = asyncio.Event()
+    cancel.set()
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(manifest, target, cancel=cancel)
+
+
+async def test_cancel_set_mid_run_raises_cancelled_error() -> None:
+    """When the cancel event fires during ``target.exec`` (simulated by
+    the exec side-effect itself setting the event), the next phase
+    boundary check observes it and raises ``CancelledError``.
+    """
+
+    import asyncio
+
+    runner = _runner()
+    manifest = _make_manifest()
+    cancel = asyncio.Event()
+
+    async def _exec_then_cancel(
+        cmd: str, *, timeout: int, env: Any = None
+    ) -> ExecResult:
+        cancel.set()
+        return ExecResult(
+            exit_code=0,
+            stdout="hello\n",
+            stderr="",
+            duration_seconds=0.01,
+            timed_out=False,
+        )
+
+    target = MagicMock()
+    target.name = "t1"
+    target.type = "local"
+    target.capabilities = {Capability.SHELL}
+    target.exec = AsyncMock(side_effect=_exec_then_cancel)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run(manifest, target, cancel=cancel)
+
+
+async def test_cancel_not_set_completes_normally() -> None:
+    """A non-set ``cancel`` event must not interfere with normal completion."""
+
+    import asyncio
+
+    runner = _runner()
+    manifest = _make_manifest()
+    target = _make_target()
+    cancel = asyncio.Event()  # never set
+    result = await runner.run(manifest, target, cancel=cancel)
+    assert result.status == "ok"
+
+
+async def test_cancel_none_completes_normally() -> None:
+    """Passing ``cancel=None`` (default) must not error."""
+
+    runner = _runner()
+    manifest = _make_manifest()
+    target = _make_target()
+    result = await runner.run(manifest, target, cancel=None)
+    assert result.status == "ok"
 
 
 async def test_format_message_keyerror_does_not_propagate() -> None:
