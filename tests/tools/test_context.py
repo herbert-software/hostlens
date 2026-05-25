@@ -18,6 +18,10 @@ import pytest
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.inspectors.registry import (
+    InspectorRegistry,
+    build_registry_from_search_paths,
+)
 from hostlens.targets.registry import TargetRegistry
 from hostlens.tools.base import (
     ApprovalService,
@@ -26,19 +30,23 @@ from hostlens.tools.base import (
 )
 
 
-class _StubInspectorRegistry:
-    def list_summaries(self) -> list[object]:
-        return []
-
-
 def _make_settings() -> Settings:
     return Settings()
+
+
+def _make_inspector_registry() -> InspectorRegistry:
+    # No user paths — only builtin inspectors (hello.echo + system.uptime)
+    # are loaded. The post-stub contract requires the real
+    # `InspectorRegistry` type; we unpack via `.registry` because
+    # `build_registry_from_search_paths` returns a `RegistryBuildResult`
+    # double value (registry + per-file errors).
+    return build_registry_from_search_paths([], settings=_make_settings()).registry
 
 
 def _make_ctx(approval: ApprovalService | None = None) -> ToolContext:
     return ToolContext(
         target_registry=TargetRegistry(),
-        inspector_registry=_StubInspectorRegistry(),
+        inspector_registry=_make_inspector_registry(),
         config=_make_settings(),
         logger=structlog.get_logger("test"),
         approval_service=approval if approval is not None else NoopApprovalService(),
@@ -89,6 +97,20 @@ def test_tool_context_target_registry_is_real_class() -> None:
     """
     hints = get_type_hints(ToolContext)
     assert hints["target_registry"] is TargetRegistry
+
+
+def test_tool_context_inspector_registry_is_real_class() -> None:
+    """Per inspector-plugin-system spec §场景:inspector_registry 是真实
+    InspectorRegistry 类型, `get_type_hints(ToolContext)["inspector_registry"]`
+    must resolve to the real `hostlens.inspectors.registry.InspectorRegistry`
+    class — NOT a stub Protocol or `typing.Any`.
+
+    Same rationale for `get_type_hints` over `__annotations__`: the module
+    uses `from __future__ import annotations`, so `__annotations__` would
+    only yield the string `"InspectorRegistry"`.
+    """
+    hints = get_type_hints(ToolContext)
+    assert hints["inspector_registry"] is InspectorRegistry
 
 
 def test_noop_approval_service_always_refuses() -> None:

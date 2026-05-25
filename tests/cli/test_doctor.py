@@ -10,6 +10,19 @@ Covers tasks 7.1-7.4 of ``add-execution-target-abstraction``:
 - 7.4 M0 checks (python_version / anthropic_key / config_dir) remain
       under the same keys so the existing snapshot / redaction tests
       continue to pass.
+
+M1.4 additions (``add-inspector-plugin-system`` Group 8a) extend the
+file with tasks 11.1-11.4:
+
+- 11.1 ``_check_inspectors`` returns the three documented statuses
+       (``ok`` / ``warn`` / ``fail``) and surfaces fatal
+       ``duplicate_inspector`` errors uniformly.
+- 11.2 ``doctor --json`` carries an ``inspectors`` key alongside the
+       existing M0 / M1.1 sections.
+- 11.3 ``inspectors.status == "fail"`` flips the overall exit code to 1
+       even when targets are healthy.
+- 11.4 The pre-existing M0 + M1.1 keys remain present after the M1.4
+       additive change.
 """
 
 from __future__ import annotations
@@ -27,6 +40,62 @@ from typer.testing import CliRunner
 from hostlens.cli import app
 from hostlens.targets.base import Capability
 from hostlens.targets.registry import TargetRegistry
+
+
+def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
+    """Persist a manifest dict as yaml under ``path``.
+
+    Local helper for the M1.4 inspectors tests; matches the same shape
+    used by ``tests/cli/test_inspectors.py`` so a future shared fixture
+    file can absorb both without churn.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+
+def _valid_manifest_payload(
+    *,
+    name: str,
+    secrets: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build a minimal valid manifest dict for user-path test fixtures."""
+
+    return {
+        "name": name,
+        "version": "1.0.0",
+        "description": f"Doctor test inspector {name}",
+        "tags": [],
+        "targets": ["local"],
+        "requires_capabilities": [],
+        "requires_binaries": [],
+        "privilege": "none",
+        "secrets": secrets or [],
+        "collect": {"command": "echo test", "timeout_seconds": 5},
+        "parse": {"format": "raw"},
+        "output_schema": {
+            "type": "object",
+            "properties": {"raw": {"type": "string"}},
+            "required": ["raw"],
+        },
+        "findings": [],
+    }
+
+
+@pytest.fixture
+def user_inspectors_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point ``Settings.inspectors_search_paths`` at a per-test tmp dir.
+
+    Mirrors the same ``HOSTLENS_INSPECTORS_SEARCH_PATHS`` env override used
+    by the CLI inspectors test module — see that file for the rationale.
+    Without this fixture, doctor would scan the operator's real
+    ``~/.config/hostlens/inspectors`` and tests would become host-sensitive.
+    """
+
+    user_path = tmp_path / "inspectors"
+    user_path.mkdir()
+    monkeypatch.setenv("HOSTLENS_INSPECTORS_SEARCH_PATHS", str(user_path))
+    return user_path
 
 
 @pytest.fixture
@@ -408,3 +477,149 @@ def test_doctor_calls_aclose_on_targets_with_aclose(
     assert result.exit_code == 0, result.stdout + result.stderr
     for t in fakes:
         assert t.aclose.await_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Task 11.x — M1.4 ``inspectors`` section
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_json_inspectors_status_ok_with_builtins_only(
+    runner: CliRunner,
+    user_inspectors_dir: Path,
+    targets_yaml: Path,
+) -> None:
+    """Spec §场景:全部加载成功 status=ok.
+
+    The builtin set always loads cleanly; with an empty user path and no
+    declared secrets, ``inspectors.status`` is ``ok``, ``loaded == 2``
+    (``hello.echo`` + ``system.uptime``), and both error lists are
+    empty.
+    """
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["inspectors"]["status"] == "ok"
+    assert payload["inspectors"]["loaded"] == 2
+    assert payload["inspectors"]["errors"] == []
+    assert payload["inspectors"]["missing_secrets"] == []
+
+
+def test_doctor_json_inspectors_status_warn_on_missing_secret(
+    runner: CliRunner,
+    user_inspectors_dir: Path,
+    targets_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §场景:secret 缺失 status=warn.
+
+    A user manifest declaring ``secrets: [PGPASSWORD]`` plus the env var
+    being **absent** triggers ``status="warn"``; the overall doctor exit
+    stays 0 because ``warn`` does not flip readiness.
+    """
+
+    monkeypatch.delenv("PGPASSWORD", raising=False)
+    _write_manifest(
+        user_inspectors_dir / "pg.yaml",
+        _valid_manifest_payload(name="db.pg", secrets=["PGPASSWORD"]),
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["inspectors"]["status"] == "warn"
+    assert payload["inspectors"]["missing_secrets"] == [
+        {"inspector": "db.pg", "secret": "PGPASSWORD"}
+    ]
+    # Warn does not produce a load-error row.
+    assert payload["inspectors"]["errors"] == []
+
+
+def test_doctor_json_inspectors_status_fail_on_bad_yaml(
+    runner: CliRunner,
+    user_inspectors_dir: Path,
+    targets_yaml: Path,
+) -> None:
+    """Spec §场景:加载错误 status=fail.
+
+    A malformed user manifest lands in ``inspectors.errors`` and flips
+    ``status`` to ``fail``; doctor's overall exit code becomes 1 because
+    ``_is_ready`` rejects ``inspectors.status == "fail"``.
+    """
+
+    bad = user_inspectors_dir / "bad.yaml"
+    bad.write_text("name: [unclosed")
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 1, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["inspectors"]["status"] == "fail"
+    assert len(payload["inspectors"]["errors"]) == 1
+    err_row = payload["inspectors"]["errors"][0]
+    assert err_row["kind"] == "manifest_parse_error"
+    assert "bad.yaml" in err_row["path"]
+
+
+def test_doctor_inspectors_fail_with_healthy_targets_still_exits_1(
+    runner: CliRunner,
+    user_inspectors_dir: Path,
+    targets_yaml: Path,
+) -> None:
+    """Task 11.3: ``inspectors=fail`` joins the fail set even when targets ok.
+
+    Verifies the readiness predicate ANDs the inspector status into the
+    existing target / check criteria — a healthy target registry is no
+    longer enough to keep doctor at exit 0 once a user manifest is bad.
+    """
+
+    bad = user_inspectors_dir / "bad.yaml"
+    bad.write_text("name: [unclosed")
+    _write_yaml(
+        targets_yaml,
+        {"version": "1", "targets": [{"name": "alpha", "type": "local"}]},
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 1, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    # Target is healthy.
+    [trow] = payload["targets"]
+    assert trow["connectivity"] == "ok"
+    # Inspectors flipped exit code.
+    assert payload["inspectors"]["status"] == "fail"
+
+
+def test_doctor_json_keeps_all_pre_existing_keys(
+    runner: CliRunner,
+    user_inspectors_dir: Path,
+    targets_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task 11.4: every previously-defined top-level key remains.
+
+    Locks the additive guarantee — ``checks`` retains all three M0
+    entries, ``targets`` from M1.1 stays under its own key, and the
+    new ``inspectors`` block sits alongside without displacing anything.
+    Snapshot tests in ``test_doctor_schema_snapshot.py`` use the same
+    keyset; failing this here surfaces the regression closer to the
+    affected wiring.
+    """
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-placeholder")
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+    expected = {"version", "timestamp", "checks", "ready", "targets", "inspectors"}
+    assert set(payload.keys()) == expected
+    assert set(payload["checks"].keys()) >= {
+        "python_version",
+        "anthropic_key",
+        "config_dir",
+    }
+    # Inspector block has the four documented fields.
+    assert set(payload["inspectors"].keys()) == {
+        "status",
+        "loaded",
+        "errors",
+        "missing_secrets",
+    }

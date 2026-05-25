@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from hostlens.core.config import Settings
 from hostlens.core.exceptions import ToolError
+from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.targets.registry import TargetRegistry
 from hostlens.tools.base import NoopApprovalService, ToolContext, ToolSpec
 from hostlens.tools.registry import ToolRegistry
@@ -66,19 +67,17 @@ def _make_spec(
     )
 
 
-class _StubInspectorRegistry:
-    """Inspector registry stub kept here until the inspector plugin
-    proposal ships the real registry.
-    """
-
-    def list_summaries(self) -> list[object]:
-        return []
-
-
 def _make_ctx() -> ToolContext:
+    # Real `InspectorRegistry` from `build_registry_from_search_paths([])`
+    # — only builtin inspectors are loaded (the registry tests don't care
+    # about inspector content; they just need the real type so
+    # `ToolContext` field validation succeeds).
+    inspector_registry = build_registry_from_search_paths(
+        [], settings=Settings()
+    ).registry
     return ToolContext(
         target_registry=TargetRegistry(),
-        inspector_registry=_StubInspectorRegistry(),
+        inspector_registry=inspector_registry,
         config=Settings(),
         logger=structlog.get_logger("test"),
         approval_service=NoopApprovalService(),

@@ -34,6 +34,10 @@ dependencies = [
     "structlog>=24.1",
     "asyncssh>=2.18,<3",
     "aiofiles>=23.0",
+    "pyyaml>=6.0,<7",
+    "simpleeval>=1.0,<2",
+    "jinja2>=3.1,<4",
+    "jsonschema>=4.20,<5",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +48,6 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "pre-commit>=3.7",
-    "jsonschema>=4.21",
     "pytest-docker>=3.1,<4",
     "pytest-rerunfailures>=14.0,<16",
     "psutil>=5.9",
@@ -91,6 +94,10 @@ strict = true
 disallow_any_generics = true
 plugins = ["pydantic.mypy"]
 exclude = ['tests/']
+
+[[tool.mypy.overrides]]
+module = ["simpleeval", "jsonschema"]
+ignore_missing_imports = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

@@ -12,6 +12,7 @@ import sys
 import typer
 
 from hostlens.cli.doctor import run_doctor
+from hostlens.cli.inspectors import app as inspectors_app
 from hostlens.cli.target import target_app
 from hostlens.core.exceptions import ConfigError
 
@@ -62,6 +63,7 @@ def doctor_cmd(
 
 
 app.add_typer(target_app, name="target")
+app.add_typer(inspectors_app, name="inspectors")
 
 
 def main() -> None:  # pragma: no cover - convenience for `python -m hostlens.cli`

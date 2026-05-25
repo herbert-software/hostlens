@@ -25,6 +25,7 @@ from typing import Any, Literal
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.targets.base import Capability
 from hostlens.targets.config import LocalEntry
 from hostlens.targets.registry import TargetRegistry
@@ -86,19 +87,17 @@ def _make_registry(target: _FakeTarget) -> TargetRegistry:
 
 
 def _ctx_with(target: _FakeTarget) -> ToolContext:
+    inspector_registry = build_registry_from_search_paths(
+        [], settings=Settings()
+    ).registry
     return ToolContext(
         target_registry=_make_registry(target),
-        inspector_registry=_StubInspectorRegistry(),
+        inspector_registry=inspector_registry,
         config=Settings(),
         logger=structlog.get_logger("test_capabilities_allowlist"),
         approval_service=NoopApprovalService(),
         cancel=asyncio.Event(),
     )
-
-
-class _StubInspectorRegistry:
-    def list_summaries(self) -> list[object]:
-        return []
 
 
 def test_non_allowlisted_capability_is_dropped() -> None:

@@ -1,0 +1,36 @@
+name: system.uptime
+version: 1.0.0
+description: Extract 1/5/15-minute load averages from uptime output.
+tags: [linux, performance, system]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [uptime]
+privilege: none
+
+collect:
+  command: "uptime"
+  timeout_seconds: 5
+
+parse:
+  format: raw
+  raw_extract_regex: "load average:\\s+(?P<load1>[\\d.]+),\\s+(?P<load5>[\\d.]+),\\s+(?P<load15>[\\d.]+)"
+  columns: [load1, load5, load15]
+
+output_schema:
+  type: object
+  properties:
+    load1:
+      type: ["string", "null"]
+    load5:
+      type: ["string", "null"]
+    load15:
+      type: ["string", "null"]
+  additionalProperties: false
+
+findings:
+  - when: "load1 and float(load1) > 4.0"
+    severity: warning
+    message: "1-min load average is {load1}"
+  - when: "load1 and float(load1) > 8.0"
+    severity: critical
+    message: "1-min load average critically high: {load1}"

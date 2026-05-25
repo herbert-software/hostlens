@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from hostlens.core.exceptions import ConfigError
 
@@ -75,6 +75,34 @@ class Settings(BaseSettings):
     config_dir: Path = Path("~/.config/hostlens").expanduser()
     targets_config_path: Path = Path("~/.config/hostlens/targets.yaml").expanduser()
     ssh: SshSettings = Field(default_factory=SshSettings)
+    inspectors_search_paths: Annotated[list[Path], NoDecode] = Field(
+        default_factory=lambda: [Path("~/.config/hostlens/inspectors").expanduser()]
+    )
+
+    @field_validator("inspectors_search_paths", mode="before")
+    @classmethod
+    def _split_inspectors_search_paths(cls, value: Any) -> Any:
+        """Parse env override for `inspectors_search_paths` as Unix-PATH-style.
+
+        pydantic-settings would otherwise JSON-decode this list-typed env
+        value before any validator runs; the `NoDecode` annotation on the
+        field disables that, so the env source hands us the raw `str` and
+        we apply the documented `:`-separated contract here:
+
+        - empty string → empty list (`HOSTLENS_INSPECTORS_SEARCH_PATHS=""`)
+        - `"/a"` → `[Path("/a")]`
+        - `"/a:/b"` → `[Path("/a"), Path("/b")]` (order preserved)
+        - each path is `expanduser()`-ed so `~/x` resolves consistently
+
+        Non-string inputs (default factory list, programmatic construction)
+        are passed through unchanged for the regular pydantic coercion path.
+        """
+
+        if not isinstance(value, str):
+            return value
+        if value == "":
+            return []
+        return [Path(part).expanduser() for part in value.split(":")]
 
 
 def _is_sensitive(field_name: str) -> bool:

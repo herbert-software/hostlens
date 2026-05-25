@@ -203,13 +203,19 @@ hostlens target test prod-web-01
 # 自检环境（参考全局 CLI 范式：doctor 子命令）
 hostlens doctor
 
+# 列出已安装 Inspector（M1 落地；builtin 随包发布）
+hostlens inspectors list
+
+# 查看单个 Inspector 的 manifest
+hostlens inspectors show hello.echo
+
 # 按意图巡检（Agent 自动选 Inspector）
 hostlens inspect prod-web-01 --intent "为什么今早 CPU 持续高于 80%？"
 
 # 跑指定 Inspector
 hostlens inspect prod-web-01 --inspector linux.cpu.top_processes
 
-# 列出所有可用 Inspector
+# 按 tag 过滤 Inspector
 hostlens inspectors list --tag linux
 
 # 输出 HTML 报告

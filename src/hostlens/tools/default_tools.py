@@ -16,11 +16,13 @@ non-idempotent: a duplicate call on the same registry raises
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from pydantic import BaseModel
 
+from hostlens.core.exceptions import InspectorError, ToolError
+from hostlens.inspectors.runner import InspectorRunner
 from hostlens.targets.base import Capability
 from hostlens.tools.base import ToolContext
 from hostlens.tools.decorators import tool
@@ -52,50 +54,98 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _attr(obj: Any, name: str, default: Any) -> Any:
-    """Read `name` from `obj` whether it is a Pydantic model, dataclass,
-    plain object, or any `collections.abc.Mapping` (covers `dict`,
-    `os._Environ`, and other mapping types). M1 hasn't shipped the real
-    `TargetRegistry` / `InspectorRegistry` summary types yet, so handlers
-    accept any structurally-compatible object and fall back to mapping
-    lookup. This is the only place we accept heterogeneity — once M1
-    lands, summaries become typed and this helper can be deleted.
-    """
-    if isinstance(obj, Mapping):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-# ---------------------------------------------------------------------------
 # Handler: run_inspector
 # ---------------------------------------------------------------------------
 
 
 async def run_inspector_handler(args: RunInspectorInput, ctx: ToolContext) -> RunInspectorOutput:
-    """M2 stub handler. M1 will replace this once `ExecutionTarget` +
-    `Inspector` ship. For now we return a single placeholder finding so
-    the demo path can exercise registry dispatch + adapter projection
-    end-to-end.
+    """Dispatch one Inspector run against one target via `InspectorRunner`.
+
+    Caller-side programming errors (unknown target name / unknown inspector
+    name) raise `ToolError` so the agent loop surfaces the misuse instead
+    of silently returning empty findings — these are not business failures.
+
+    Every other failure (target unreachable, command timeout, parse /
+    schema mismatch, finding-rule errors, missing capabilities, missing
+    privilege opt-in) collapses into a successful tool dispatch that
+    returns `findings=[]`. The runner's `InspectorStatus` is recorded via
+    structlog (per design.md Decision 7) but is **not** projected into
+    `RunInspectorOutput` because that schema is M2-locked; M3
+    `add-report-data-model` is the proposal that extends the surface to
+    expose status / error / missing.
+
+    `allow_privileged` is forced to `False` on the agent surface — the
+    Planner Agent cannot opt-in to sudo/root inspectors. Only the human
+    CLI / approval flow may do so (and that flow lives downstream).
     """
-    # We deliberately ignore the registries: M1 isn't here yet. Touching
-    # them is reserved for the M1 integration step.
-    del ctx
+
+    # ---- 1. Lookup target -------------------------------------------- #
+    # `TargetRegistry.get` raises bare `KeyError` for an unknown name
+    # (per execution-target spec §场景:get 未找到 raise KeyError); convert
+    # it into a structured `ToolError` so the agent loop can surface the
+    # misuse without crashing the tool_use turn on a stray KeyError.
+    try:
+        target = ctx.target_registry.get(args.target_name)
+    except KeyError as exc:
+        raise ToolError(
+            f"target_not_found: target_name={args.target_name!r} "
+            "is not registered in target_registry"
+        ) from exc
+
+    # ---- 2. Lookup inspector manifest -------------------------------- #
+    try:
+        manifest = ctx.inspector_registry.get(args.inspector_name)
+    except InspectorError as exc:
+        if exc.kind == "inspector_not_found":
+            raise ToolError(
+                f"inspector_not_found: inspector_name={args.inspector_name!r} "
+                "is not registered in inspector_registry"
+            ) from exc
+        # Any other InspectorError shape on `get` would be a registry bug —
+        # let it propagate so the runner-internal contract is visible.
+        raise
+
+    # ---- 3. Build runner + dispatch ---------------------------------- #
+    runner = InspectorRunner(
+        ctx.target_registry,
+        settings=ctx.config,
+        logger=ctx.logger,
+    )
+    result = await runner.run(
+        manifest,
+        target,
+        parameters=dict(args.parameters) if args.parameters else None,
+        # Agent surface NEVER opts in to privilege — only the CLI / human
+        # approval path may set this to True in a future milestone.
+        allow_privileged=False,
+        cancel=ctx.cancel,
+    )
+
+    # ---- 4. Log status (status field is NOT exposed via RunInspectorOutput) ---- #
+    if result.status != "ok":
+        # status/error/missing belong to M3's RunInspectorOutput extension;
+        # for M2 we surface them only via structlog so the Planner Agent
+        # sees an empty findings list + the operator can debug via logs.
+        ctx.logger.info(
+            "run_inspector_non_ok_status",
+            inspector_name=result.name,
+            target_name=result.target_name,
+            inspector_status=result.status,
+            error=result.error,
+            missing=result.missing,
+        )
+
+    # ---- 5. Project InspectorResult -> RunInspectorOutput ------------ #
     return RunInspectorOutput(
-        target_name=args.target_name,
-        inspector_name=args.inspector_name,
+        target_name=result.target_name,
+        inspector_name=result.name,
         findings=[
             FindingSummary(
-                severity="info",
-                message=(
-                    f"stub finding for inspector {args.inspector_name!r} "
-                    f"on target {args.target_name!r} (M1 handler not yet shipped)"
-                ),
-                evidence={},
+                severity=finding.severity,
+                message=finding.message,
+                evidence={k: str(v) for k, v in finding.evidence.items()},
             )
+            for finding in result.findings
         ],
     )
 
@@ -111,30 +161,24 @@ async def list_inspectors_handler(
     """Read inspector summaries from `ctx.inspector_registry` and apply
     optional `tag` / `target_kind` filters.
 
-    The handler trusts `ctx.inspector_registry.list_summaries()` to
-    return objects exposing `name` / `version` / `description` / `tags`
-    / `compatible_target_kinds` attributes (or matching dict keys).
+    `ctx.inspector_registry.list_summaries()` returns
+    `list[InspectorSummary]` directly — the real registry already projects
+    each manifest into the M2-locked summary schema and sorts `tags` /
+    `compatible_target_kinds` in dictionary order for prompt-cache prefix
+    stability (per inspector-plugin-system spec §需求:`InspectorRegistry`
+    API 必须支持注册 / 查询 / 列表 / summary 投影).
     """
     raw_summaries = ctx.inspector_registry.list_summaries()
     summaries: list[InspectorSummary] = []
-    for raw in raw_summaries:
-        tags = list(_attr(raw, "tags", []))
-        compatible = list(_attr(raw, "compatible_target_kinds", []))
-
-        if args.tag is not None and args.tag not in tags:
+    for summary in raw_summaries:
+        if args.tag is not None and args.tag not in summary.tags:
             continue
-        if args.target_kind is not None and args.target_kind not in compatible:
+        if (
+            args.target_kind is not None
+            and args.target_kind not in summary.compatible_target_kinds
+        ):
             continue
-
-        summaries.append(
-            InspectorSummary(
-                name=str(_attr(raw, "name", "")),
-                version=str(_attr(raw, "version", "")),
-                description=str(_attr(raw, "description", "")),
-                tags=tags,
-                compatible_target_kinds=compatible,
-            )
-        )
+        summaries.append(summary)
     return ListInspectorsOutput(inspectors=summaries)
 
 

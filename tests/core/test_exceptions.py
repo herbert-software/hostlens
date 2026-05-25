@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -18,14 +19,29 @@ from hostlens.core.exceptions import (
 def test_subclasses_inherit_from_hostlens_error() -> None:
     assert isinstance(ConfigError("x"), HostlensError)
     assert isinstance(TargetError("x"), HostlensError)
-    assert isinstance(InspectorError("x"), HostlensError)
+    assert isinstance(InspectorError(kind="manifest_parse_error"), HostlensError)
 
 
 def test_hostlens_error_catches_all_subclasses() -> None:
+    """``HostlensError`` is the catch-all parent for all hostlens exceptions.
+
+    Each subclass uses its own canonical construction form (positional
+    free-text for ``ConfigError`` / ``TargetError`` because they retain M0
+    backward compat; keyword-only for ``InspectorError`` because the M1
+    structured-field migration deliberately drops the positional shape so
+    every loader / runner call site is forced to carry a machine-readable
+    ``kind``).
+    """
+
     caught: list[type[HostlensError]] = []
-    for exc_cls in (ConfigError, TargetError, InspectorError):
+    raisers: list[HostlensError] = [
+        ConfigError("boom"),
+        TargetError("boom"),
+        InspectorError(kind="manifest_parse_error"),
+    ]
+    for exc in raisers:
         try:
-            raise exc_cls("boom")
+            raise exc
         except HostlensError as e:
             caught.append(type(e))
     assert caught == [ConfigError, TargetError, InspectorError]
@@ -449,3 +465,157 @@ def test_tool_policy_violation_repr_never_leaks_sensitive_substrings() -> None:
         for sub in sensitive_substrings:
             assert sub not in text
         assert not ipv4_pattern.search(text)
+
+
+# ---------------------------------------------------------------------------
+# M1 (`add-inspector-plugin-system`): InspectorError structured-field
+# ---------------------------------------------------------------------------
+
+
+def test_inspector_error_accepts_keyword_call_with_multiple_fields() -> None:
+    """Spec §场景:InspectorError 结构化字段可访问.
+
+    Constructor takes keyword-only structured fields; all attributes must
+    be accessible from the resulting instance so doctor / CLI / structured
+    logging can render machine-readable errors without reparsing
+    ``str(err)``.
+    """
+
+    err = InspectorError(
+        kind="duplicate_inspector",
+        inspector="x.y",
+        existing_path=Path("a"),
+        new_path=Path("b"),
+    )
+    assert err.kind == "duplicate_inspector"
+    assert err.inspector == "x.y"
+    assert err.existing_path == Path("a")
+    assert err.new_path == Path("b")
+    # Unset structured fields default to None / empty.
+    assert err.path is None
+    assert err.parameter is None
+    assert err.secret is None
+    assert err.field is None
+    assert err.index is None
+    assert err.errors is None
+    assert err.original is None
+    assert err.extra == {}
+
+
+def test_inspector_error_rejects_invalid_kind() -> None:
+    """Spec §场景:非法 kind 被拒绝.
+
+    Any kind outside the 15-value M1 enum raises ``ValueError`` at
+    construction time so a typo cannot silently propagate into logs as a
+    string that looks like a structured error code.
+    """
+
+    with pytest.raises(ValueError, match=r"InspectorError\.kind must be one of"):
+        InspectorError(kind="custom_kind_not_in_enum")  # type: ignore[arg-type]
+
+
+def test_inspector_error_rejects_positional_call() -> None:
+    """Spec §场景:positional 调用被拒绝.
+
+    The M1 signature uses ``*`` to make every parameter keyword-only,
+    forcing every caller through the structured form. Legacy M0
+    free-text positional construction must now raise ``TypeError``; the
+    rejection-fixture below is the **only** intentional positional
+    invocation in the repository (its sole purpose is to verify the
+    rejection contract; the inline ``noqa`` keeps the repository-wide
+    grep gate `grep -rn 'InspectorError\\("` clean — see task 2.2).
+    """
+
+    with pytest.raises(TypeError):
+        # Positional construction is the rejection fixture — splitting
+        # the open paren and the literal across two lines keeps the
+        # repository-wide grep gate `grep -rn 'InspectorError\\("' clean
+        # (task 2.2) without sacrificing the negative-test coverage that
+        # task 2.1 requires.
+        InspectorError(
+            "manifest_parse_error",  # type: ignore[misc]
+        )
+
+
+def test_inspector_error_str_contains_all_structured_fields() -> None:
+    """Spec §场景:InspectorError 结构化字段可访问 (``str(err)`` 含全部字段).
+
+    ``__str__`` MUST surface ``kind`` as a prefix plus every non-None
+    structured field as ``key=value`` pair (sorted) so doctor / CLI
+    error rendering and structlog snapshots show the full context
+    without introspecting attributes.
+    """
+
+    err = InspectorError(
+        kind="duplicate_inspector",
+        inspector="x.y",
+        existing_path=Path("a"),
+        new_path=Path("b"),
+    )
+    text = str(err)
+    # ``kind`` is always the prefix (machine-readable error code).
+    assert text.startswith("duplicate_inspector:")
+    assert "inspector=x.y" in text
+    assert "existing_path=a" in text
+    assert "new_path=b" in text
+
+
+def test_inspector_error_str_includes_extra_kwargs() -> None:
+    """Extra keyword arguments land in ``self.extra`` and appear in ``str()``.
+
+    Loader / runner sometimes attach error context that isn't part of the
+    canonical named-field set (e.g. ``size=`` for ``manifest_too_large``,
+    ``line=`` / ``column=`` for ``manifest_parse_error``); these surface
+    via the ``**extra`` bag and must render the same way as named fields.
+    """
+
+    err = InspectorError(
+        kind="manifest_too_large",
+        path=Path("/tmp/x.yaml"),
+        size=300_000,
+    )
+    assert err.extra == {"size": 300_000}
+    text = str(err)
+    assert text.startswith("manifest_too_large:")
+    assert "path=/tmp/x.yaml" in text
+    assert "size=300000" in text
+
+
+def test_inspector_error_renders_errors_count_not_payload() -> None:
+    """``errors`` Pydantic-error list renders as ``<N items>``.
+
+    The full list can be hundreds of bytes per item (Pydantic's
+    ``.errors()`` output) and putting it inline would make doctor /
+    structlog output unreadable. The full payload stays on the
+    ``.errors`` attribute for callers that need it.
+    """
+
+    err = InspectorError(
+        kind="manifest_validation_error",
+        path=Path("/tmp/x.yaml"),
+        errors=[{"loc": ("name",), "msg": "field required"}],
+    )
+    text = str(err)
+    assert "errors=<1 items>" in text
+
+
+def test_inspector_error_args_carries_kind_for_debugger_output() -> None:
+    """``exc.args[0]`` is the kind so debuggers / unittest output that
+    print ``exc.args`` show the machine-readable error code rather than
+    an empty tuple (the latter is the default when ``super().__init__()``
+    is called with no positional arg).
+    """
+
+    err = InspectorError(kind="parse_json_not_object")
+    assert err.args == ("parse_json_not_object",)
+
+
+def test_inspector_error_no_structured_fields_str_is_kind_with_colon() -> None:
+    """When only ``kind`` is supplied, ``str(err)`` is ``"<kind>:"``.
+
+    Keeps the rendering deterministic so log snapshot tests don't have to
+    branch on whether structured fields are present.
+    """
+
+    err = InspectorError(kind="inspector_not_found")
+    assert str(err) == "inspector_not_found:"

@@ -1,0 +1,28 @@
+name: hello.echo
+version: 1.0.0
+description: Echo "hello" via the target to verify the inspector pipeline end-to-end.
+tags: [demo, hello]
+targets: [local, ssh]
+requires_capabilities: []
+requires_binaries: [echo]
+privilege: none
+
+collect:
+  command: "echo hello"
+  timeout_seconds: 5
+
+parse:
+  format: raw
+
+output_schema:
+  type: object
+  properties:
+    raw:
+      type: string
+  required: [raw]
+  additionalProperties: false
+
+findings:
+  - when: "len(raw) > 0"
+    severity: info
+    message: "hello received: {raw}"

@@ -1,0 +1,29 @@
+name: bad.injection
+version: 1.0.0
+description: Demo of loader's static rejection (parameter_missing_charset_constraint).
+targets: [local]
+
+parameters:
+  type: object
+  properties:
+    host:
+      type: string
+      # Intentionally missing both `pattern` and `enum` — the loader rejects
+      # this at load time with kind=parameter_missing_charset_constraint.
+      # A string parameter without a character-set constraint would be a
+      # shell-injection vector if it ever reached `collect.command`.
+
+collect:
+  command: "ping {{ host | sh }}"
+  timeout_seconds: 5
+
+parse:
+  format: raw
+
+output_schema:
+  type: object
+  properties:
+    raw:
+      type: string
+
+findings: []

@@ -21,7 +21,8 @@ compatibility.
 from __future__ import annotations
 
 import re
-from typing import Literal, get_args
+from pathlib import Path
+from typing import Any, Literal, get_args
 
 __all__ = [
     "ConfigError",
@@ -196,8 +197,129 @@ class TargetError(HostlensError):
         return " ".join(parts)
 
 
+InspectorErrorKind = Literal[
+    "manifest_parse_error",
+    "manifest_validation_error",
+    "manifest_too_large",
+    "unquoted_parameter_in_command",
+    "unquoted_array_parameter_in_command",
+    "array_parameter_items_type_undetermined",
+    "parameter_missing_charset_constraint",
+    "secret_inlined_in_command",
+    "unsafe_raw_not_supported_in_m1",
+    "command_template_invalid",
+    "finding_when_invalid",
+    "finding_message_invalid_aggregate_ref",
+    "duplicate_inspector",
+    "inspector_not_found",
+    "parse_json_not_object",
+]
+
+
+# Pre-compute the allowed-kind set once; used by ``InspectorError.__init__``
+# to validate the ``kind`` argument without re-introspecting the ``Literal``
+# on every construction.
+_INSPECTOR_ERROR_KINDS: frozenset[str] = frozenset(get_args(InspectorErrorKind))
+
+
 class InspectorError(HostlensError):
-    """Raised on Inspector loading or execution errors (used from M1+)."""
+    """Raised on Inspector loading or execution errors (M1+).
+
+    Spec: ``inspector-plugin-system/spec.md`` §需求:``InspectorError``
+    必须扩展支持结构化字段.
+
+    All parameters are **keyword-only** — positional construction (with
+    a bare string as the first arg) raises ``TypeError`` so legacy M0
+    free-text call sites are forced to migrate to the structured form.
+    ``kind`` is constrained to the 15-value M1 enum
+    (``InspectorErrorKind``); any other value raises ``ValueError`` at
+    construction time so a typo cannot silently surface in logs.
+
+    ``__str__`` format:
+        ``"{kind}: key=value key=value ..."`` — the ``kind`` is always the
+        prefix (it is the machine-readable error code surfaced to doctor /
+        CLI / structured logging); structured fields with non-``None``
+        values are appended as ``key=value`` pairs sorted by key for
+        snapshot stability. ``errors`` (Pydantic / loader detail list) is
+        rendered as ``errors=<N items>`` rather than the full payload to
+        keep the rendering log-friendly; callers wanting full details
+        should inspect the attribute directly.
+
+    Spec contract (per CLAUDE.md §4.5 / proposal): callers MUST NOT put
+    raw secret values into ``extra`` — pass references like
+    ``secret="PGPASSWORD"`` instead, never the value itself.
+    """
+
+    def __init__(
+        self,
+        *,
+        kind: InspectorErrorKind,
+        path: Path | None = None,
+        inspector: str | None = None,
+        parameter: str | None = None,
+        secret: str | None = None,
+        field: str | None = None,
+        index: int | None = None,
+        existing_path: Path | None = None,
+        new_path: Path | None = None,
+        errors: list[dict[str, Any]] | None = None,
+        original: Exception | None = None,
+        **extra: object,
+    ) -> None:
+        if kind not in _INSPECTOR_ERROR_KINDS:
+            allowed = tuple(sorted(_INSPECTOR_ERROR_KINDS))
+            raise ValueError(
+                f"InspectorError.kind must be one of {allowed}, got {kind!r}"
+            )
+
+        # ``args[0]`` is the kind so debuggers / unittest output that print
+        # ``exc.args`` show the machine-readable error code rather than an
+        # empty string.
+        super().__init__(kind)
+        self.kind: InspectorErrorKind = kind
+        self.path: Path | None = path
+        self.inspector: str | None = inspector
+        self.parameter: str | None = parameter
+        self.secret: str | None = secret
+        self.field: str | None = field
+        self.index: int | None = index
+        self.existing_path: Path | None = existing_path
+        self.new_path: Path | None = new_path
+        self.errors: list[dict[str, Any]] | None = errors
+        self.original: Exception | None = original
+        self.extra: dict[str, object] = dict(extra)
+
+    def __str__(self) -> str:
+        # Collect named structured fields whose value is non-None into a
+        # ``{key: value}`` dict for sorted rendering. Keep ``errors`` /
+        # ``original`` out of the rendered surface (large payloads / repr
+        # noise); callers can pull them off the attribute directly.
+        rendered: dict[str, str] = {}
+        if self.path is not None:
+            rendered["path"] = str(self.path)
+        if self.inspector is not None:
+            rendered["inspector"] = self.inspector
+        if self.parameter is not None:
+            rendered["parameter"] = self.parameter
+        if self.secret is not None:
+            rendered["secret"] = self.secret
+        if self.field is not None:
+            rendered["field"] = self.field
+        if self.index is not None:
+            rendered["index"] = str(self.index)
+        if self.existing_path is not None:
+            rendered["existing_path"] = str(self.existing_path)
+        if self.new_path is not None:
+            rendered["new_path"] = str(self.new_path)
+        if self.errors is not None:
+            rendered["errors"] = f"<{len(self.errors)} items>"
+        for key in sorted(self.extra):
+            rendered[key] = str(self.extra[key])
+
+        if not rendered:
+            return f"{self.kind}:"
+        body = " ".join(f"{key}={rendered[key]}" for key in sorted(rendered))
+        return f"{self.kind}: {body}"
 
 
 class ToolError(HostlensError):

@@ -6,9 +6,6 @@ surface adapter (agent / mcp / cli) consumes:
 - `ToolHandler` Protocol — async callable contract for tool handlers.
 - `ApprovalService` Protocol — minimal contract for write-side approval.
 - `NoopApprovalService` — M2 stub that always refuses (M9 will replace).
-- `InspectorRegistry` Protocol — placeholder until the inspector
-  proposal lands the real registry; defined here so `ToolContext` can
-  be typed without a forward reference cycle.
 - `ToolContext` — frozen dataclass DI container, fields locked to the M2
   set (forbid LLMBackend per ADR-008).
 - `ToolSpec` — frozen Pydantic v2 model carrying full policy metadata.
@@ -20,6 +17,13 @@ module-level / global / class-level registry.
 `hostlens.targets.registry` — imported (not re-declared) so
 `get_type_hints(ToolContext)["target_registry"]` resolves to the real
 type per spec §场景:target_registry 是真实 TargetRegistry 类型.
+
+`InspectorRegistry` is the real M1 class from
+`hostlens.inspectors.registry` (landed via the
+`add-inspector-plugin-system` proposal) — imported (not re-declared) so
+`get_type_hints(ToolContext)["inspector_registry"]` resolves to the real
+type per the same spec block. The previous stub Protocol has been
+deleted now that the real registry exists.
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from hostlens.core.config import Settings
 from hostlens.core.exceptions import ToolPolicyViolation
+from hostlens.inspectors.registry import InspectorRegistry
 from hostlens.targets.registry import TargetRegistry
 
 # ---------------------------------------------------------------------------
@@ -82,19 +87,6 @@ class NoopApprovalService:
 
 
 # ---------------------------------------------------------------------------
-# Stub registry Protocols (Inspector registry — real registry lands in the
-# next proposal `add-inspector-plugin-system`).
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class InspectorRegistry(Protocol):
-    """Placeholder Protocol for the Inspector registry."""
-
-    def list_summaries(self) -> list[Any]: ...  # pragma: no cover
-
-
-# ---------------------------------------------------------------------------
 # ToolContext — DI container
 # ---------------------------------------------------------------------------
 
@@ -108,8 +100,9 @@ class ToolContext:
 
     - `target_registry` — real `hostlens.targets.registry.TargetRegistry`
       (M1 landed in the `add-execution-target-abstraction` proposal).
-    - `inspector_registry` — Inspector registry (still a stub Protocol
-      until the inspector plugin proposal lands).
+    - `inspector_registry` — real
+      `hostlens.inspectors.registry.InspectorRegistry` (M1 landed via the
+      `add-inspector-plugin-system` proposal).
     - `config` — `Settings` instance (M0).
     - `logger` — bound structlog logger.
     - `approval_service` — concrete `ApprovalService` (never `None`; M2

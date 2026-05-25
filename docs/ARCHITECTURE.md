@@ -313,6 +313,27 @@ def project_to_mcp(spec: ToolSpec) -> MCPToolDefinition | None:
 
 ## 4. Inspector 插件体系
 
+> **M1 落地（PR 待定）**：`InspectorManifest` Pydantic schema、loader（含 shell 注入静态校验五件套）、`InspectorRegistry`（含 builtin + 用户目录搜索）、`InspectorRunner`（4 种 parse format + Finding DSL 求值引擎 + 6 步 preflight + 5 种闭集 `InspectorStatus`）、2 个内置 Inspector（`hello.echo` / `system.uptime`）、`hostlens inspectors list/show` CLI、`hostlens doctor` 的 `inspectors` section 全部落地于 OpenSpec 提案 [`add-inspector-plugin-system`](../openspec/changes/add-inspector-plugin-system/)。Finding DSL 在 simpleeval 上注册 `len/sum/min/max/any/all/now/float/int`（`float`/`int` 是 `system.uptime` 阈值比较所需的类型转换函数）。
+>
+> **M1 范围**（严格子集，写在 manifest 内多余字段会被 loader `extra="forbid"` 拒绝）：
+>
+> - manifest 加载（`yaml.safe_load` + 256 KB 上限 + Pydantic v2 严格字段集）
+> - 4 种 `parse.format`：`raw` / `table` / `json` / `kv`
+> - Finding DSL（`for_each` / `when` / `severity` / `message` 四字段；simpleeval 已注册 `float` / `int`）
+> - Runner 求值顺序固定为 preflight → render → exec → parse → schema → findings；6 步 preflight；5 种 `InspectorStatus` 闭集：`ok` / `timeout` / `target_unreachable` / `requires_unmet` / `exception`
+> - `hostlens inspectors list/show` CLI（只读，允许 root）
+> - 2 个内置 Inspector（`hello.echo` / `system.uptime`），随包发布
+>
+> **M1 明确不在范围**（写了 loader 直接 raise，留给后续提案）：
+>
+> - `hook.py` Python 扩展 —— 留给 M6 复杂场景（PostgreSQL bloat / TLS expiry）
+> - `parse.format: sql_result` —— 留给 M6 PostgreSQL Inspector
+> - `collect.sampling_window` —— 留给 M2.8 incident pack 的 `log.tail.error_burst` Inspector
+> - `artifacts` —— 留给 M3 报告系统（依赖 Report 数据模型支持 attachment）
+> - `hostlens inspect <target> --inspector <name>` 端到端命令 —— 依赖 Report 数据模型，留给下一提案 `add-report-data-model`
+>
+> 实现细节与 manifest 字段速查另见 [docs/operations/inspectors.md](operations/inspectors.md)；写作教程见 [docs/operations/inspector-authoring.md](operations/inspector-authoring.md)。
+
 ### 设计目标
 
 新增一个巡检项 = **加一个 YAML 文件**，零 Python 代码（复杂场景才上 hook.py）。

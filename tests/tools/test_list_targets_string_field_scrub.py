@@ -27,16 +27,12 @@ import structlog
 from structlog.testing import LogCapture
 
 from hostlens.core.config import Settings
+from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.targets.config import LocalEntry, TargetsConfig
 from hostlens.targets.registry import build_registry_from_config
 from hostlens.tools.base import NoopApprovalService, ToolContext
 from hostlens.tools.default_tools import list_targets_handler
 from hostlens.tools.schemas.list_targets import ListTargetsInput
-
-
-class _StubInspectorRegistry:
-    def list_summaries(self) -> list[object]:
-        return []
 
 
 @pytest.fixture
@@ -61,9 +57,12 @@ def log_capture() -> Generator[LogCapture, None, None]:
 
 def _ctx_with(config: TargetsConfig) -> ToolContext:
     registry = build_registry_from_config(config, Settings())
+    inspector_registry = build_registry_from_search_paths(
+        [], settings=Settings()
+    ).registry
     return ToolContext(
         target_registry=registry,
-        inspector_registry=_StubInspectorRegistry(),
+        inspector_registry=inspector_registry,
         config=Settings(),
         logger=structlog.get_logger("test_list_targets_scrub"),
         approval_service=NoopApprovalService(),

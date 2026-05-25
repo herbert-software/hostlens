@@ -22,6 +22,7 @@ import logging
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.targets.config import LocalEntry, SSHEntry, TargetsConfig
 from hostlens.targets.registry import build_registry_from_config
 from hostlens.tools.base import NoopApprovalService, ToolContext
@@ -34,24 +35,17 @@ from hostlens.tools.schemas.list_targets import (
 
 def _make_ctx(registry_config: TargetsConfig) -> ToolContext:
     registry = build_registry_from_config(registry_config, Settings())
+    inspector_registry = build_registry_from_search_paths(
+        [], settings=Settings()
+    ).registry
     return ToolContext(
         target_registry=registry,
-        inspector_registry=_StubInspectorRegistry(),
+        inspector_registry=inspector_registry,
         config=Settings(),
         logger=structlog.get_logger("test_list_targets_redaction"),
         approval_service=NoopApprovalService(),
         cancel=asyncio.Event(),
     )
-
-
-class _StubInspectorRegistry:
-    """Inspector registry stays a stub — the next proposal lands the real
-    `InspectorRegistry`. `list_targets_handler` never consults this in any
-    case.
-    """
-
-    def list_summaries(self) -> list[object]:
-        return []
 
 
 def test_list_targets_handler_does_not_leak_sensitive_substrings() -> None:

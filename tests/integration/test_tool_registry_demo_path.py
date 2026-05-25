@@ -65,9 +65,10 @@ async def test_dispatch_list_inspectors_walks_full_handler_path(
 ) -> None:
     adapter = ToolsAdapter(tool_registry, tool_context_factory)
 
-    # The default `tool_context_factory` wires a stub inspector registry
-    # that returns a single `_StubInspectorSummary` — this is enough to
-    # walk the entire dispatch path (gates → handler → model_dump).
+    # The default `tool_context_factory` wires a real `InspectorRegistry`
+    # populated from the builtin search path (hello.echo + system.uptime).
+    # That's enough to walk the entire dispatch path (gates → handler →
+    # model_dump).
     ctx = tool_context_factory()
     result: dict[str, Any] = await adapter.dispatch("list_inspectors", {}, ctx)
 
@@ -77,5 +78,7 @@ async def test_dispatch_list_inspectors_walks_full_handler_path(
     assert isinstance(result, dict)
     assert "inspectors" in result
     assert isinstance(result["inspectors"], list)
-    # Stub registry registered one inspector — make sure it surfaced.
-    assert len(result["inspectors"]) == 1
+    # The default real `InspectorRegistry` ships two M1 builtins —
+    # confirming the handler surfaces them as a non-empty list.
+    names = [entry["name"] for entry in result["inspectors"]]
+    assert names == ["hello.echo", "system.uptime"]

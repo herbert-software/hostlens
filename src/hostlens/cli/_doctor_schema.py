@@ -26,6 +26,9 @@ __all__ = [
     "CheckResult",
     "CheckStatus",
     "DoctorReport",
+    "InspectorLoadErrorRow",
+    "InspectorMissingSecretRow",
+    "InspectorsHealth",
     "TargetConnectivity",
     "TargetCredentialSource",
     "TargetHealth",
@@ -105,6 +108,63 @@ class TargetHealth(BaseModel):
     error_kind: str | None = None
 
 
+# M1 (`add-inspector-plugin-system`) extension: aggregate inspector
+# health rolled up under ``DoctorReport.inspectors``. Kept as a single
+# nested model rather than ``list[InspectorHealth]`` because the
+# checker computes one summary status across all loaded inspectors
+# (errors / missing secrets / count) — there is no per-inspector row.
+
+
+class InspectorLoadErrorRow(BaseModel):
+    """Single inspector manifest load failure surfaced under ``inspectors.errors``.
+
+    Mirrors ``hostlens.inspectors.registry.RegistryLoadError`` but with
+    ``path`` rendered as a string for stable JSON output (the source
+    dataclass holds a ``Path`` which pydantic would otherwise emit as a
+    POSIX-coerced string anyway — keeping it explicit here means the JSON
+    schema is self-describing).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    kind: str
+    detail: str
+
+
+class InspectorMissingSecretRow(BaseModel):
+    """Single ``(inspector, secret)`` row under ``inspectors.missing_secrets``.
+
+    Carries only the env-var **name** — never the value, which doctor
+    never reads (spec §需求:`hostlens doctor` 必须新增 `inspectors` section
+    explicitly forbids dereferencing missing secrets to ``os.environ``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    inspector: str
+    secret: str
+
+
+class InspectorsHealth(BaseModel):
+    """Aggregate health of the Inspector registry.
+
+    Status mapping (spec §需求:`hostlens doctor` 必须新增 `inspectors` section):
+
+    - ``fail`` : ``errors`` non-empty (registry build collected per-file
+      failures, or duplicate_inspector raised fatally).
+    - ``warn`` : ``errors`` empty but ``missing_secrets`` non-empty.
+    - ``ok``   : both lists empty.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "warn", "fail"]
+    loaded: int
+    errors: list[InspectorLoadErrorRow] = []
+    missing_secrets: list[InspectorMissingSecretRow] = []
+
+
 class DoctorReport(BaseModel):
     """Top-level JSON contract emitted by `hostlens doctor --json`."""
 
@@ -118,3 +178,8 @@ class DoctorReport(BaseModel):
     # snapshots does not break the schema test (the field defaults to
     # an empty list, which renders as ``"targets": []`` in JSON).
     targets: list[TargetHealth] = []
+    # M1.4 (`add-inspector-plugin-system`) additive field — optional with
+    # a sentinel default so the M0 snapshot tests that only assert on
+    # ``checks`` / ``ready`` keep working. Real ``run_doctor`` calls
+    # always populate this.
+    inspectors: InspectorsHealth = InspectorsHealth(status="ok", loaded=0)
