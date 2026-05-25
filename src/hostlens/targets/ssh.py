@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import contextlib
+import os
 import re
 import socket
 import time
@@ -268,7 +269,7 @@ class SSHTarget:
             "connect_timeout": self._connect_timeout(),
         }
         if entry.key_path is not None:
-            kwargs["client_keys"] = [entry.key_path]
+            kwargs["client_keys"] = [os.path.expanduser(entry.key_path)]
         if entry.password is not None:
             kwargs["password"] = entry.password
         if entry.passphrase is not None:
@@ -706,7 +707,7 @@ class SSHTarget:
                     # variant.
                     raise FileNotFoundError(path) from exc
                 size = int(attrs.size) if attrs.size is not None else 0
-                if size >= _READ_FILE_MAX_BYTES:
+                if size > _READ_FILE_MAX_BYTES:
                     raise TargetError(
                         kind="file_too_large",
                         target=self.name,

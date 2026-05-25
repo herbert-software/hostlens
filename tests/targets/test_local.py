@@ -417,6 +417,21 @@ async def test_read_file_over_10mb_raises_target_error(tmp_path: Path) -> None:
     assert err.extra["size"] == 10 * 1024 * 1024 + 1
 
 
+async def test_read_file_at_exact_10mb_boundary_succeeds(tmp_path: Path) -> None:
+    """Files of exactly 10 MiB must read successfully — the cap is "larger
+    than" not "at or above". A sparse 10 MiB file reads as 10 MiB of zero
+    bytes, which exercises the boundary without allocating real data.
+    """
+
+    target = LocalTarget("t1")
+    on_boundary = tmp_path / "exactly_10mb.bin"
+    on_boundary.write_bytes(b"")
+    os.truncate(on_boundary, 10 * 1024 * 1024)
+
+    data = await target.read_file(str(on_boundary))
+    assert len(data) == 10 * 1024 * 1024
+
+
 async def test_read_file_rejects_nul_byte_in_path() -> None:
     """NUL in the path raises ``TargetError(kind="invalid_path")`` so the
     error surface is structured (the stdlib would raise ``ValueError``

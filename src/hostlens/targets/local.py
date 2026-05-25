@@ -247,7 +247,7 @@ class LocalTarget:
         # the spec contract (callers treat "missing file" with the stdlib
         # exception class, not a ``TargetError`` variant).
         size = p.stat().st_size
-        if size >= _READ_FILE_MAX_BYTES:
+        if size > _READ_FILE_MAX_BYTES:
             raise TargetError(
                 kind="file_too_large",
                 target=self.name,

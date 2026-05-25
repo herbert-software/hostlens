@@ -635,6 +635,35 @@ async def test_read_file_over_10mb_raises_before_download() -> None:
     sftp.open.assert_not_called()
 
 
+async def test_read_file_at_exact_10mb_boundary_succeeds() -> None:
+    """Files of exactly 10 MiB must read — the cap is "larger than", not
+    "at or above". Mirrors the LocalTarget boundary contract.
+    """
+
+    target = SSHTarget("ssh-host")
+    _attach_entry(target, FakeEntry())
+
+    payload = b"\x00" * (10 * 1024 * 1024)
+    conn = _make_fake_conn()
+    sftp = MagicMock()
+    sftp.stat = AsyncMock(return_value=MagicMock(size=10 * 1024 * 1024))
+
+    sftp_file = MagicMock()
+    sftp_file.__aenter__ = AsyncMock(return_value=sftp_file)
+    sftp_file.__aexit__ = AsyncMock(return_value=None)
+    sftp_file.read = AsyncMock(return_value=payload)
+    sftp.open = MagicMock(return_value=sftp_file)
+    _attach_sftp(conn, sftp)
+
+    with patch(
+        "hostlens.targets.ssh.asyncssh.connect",
+        new=AsyncMock(return_value=conn),
+    ):
+        data = await target.read_file("/tmp/exactly_10mb.bin")
+
+    assert len(data) == 10 * 1024 * 1024
+
+
 async def test_read_file_nul_byte_path_rejected_before_connect() -> None:
     """NUL byte must short-circuit before any SFTP / connect call."""
 
@@ -739,6 +768,26 @@ async def test_env_is_passed_through_run_kwarg_not_command_string() -> None:
     assert call_args.kwargs["env"] == {
         "SECRET_TOKEN": "literal-secret-do-not-leak",
     }
+
+
+def test_connect_kwargs_expands_tilde_in_key_path() -> None:
+    """``~`` in ``key_path`` must be expanded before reaching asyncssh.
+
+    asyncssh.connect does not shell-evaluate ``client_keys`` entries;
+    passing a raw ``~/.ssh/id_rsa`` silently fails to load the key and
+    falls through to other auth methods. Hostlens expands ``~`` via
+    ``os.path.expanduser`` so the documented home-relative form works.
+    """
+
+    import os
+
+    target = SSHTarget("ssh-host")
+    _attach_entry(target, FakeEntry(key_path="~/.ssh/id_test_no_real_key"))
+
+    kwargs = target._connect_kwargs()
+
+    assert kwargs["client_keys"] == [os.path.expanduser("~/.ssh/id_test_no_real_key")]
+    assert "~" not in kwargs["client_keys"][0]
 
 
 # ---------------------------------------------------------------------------

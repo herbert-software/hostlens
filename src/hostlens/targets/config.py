@@ -275,7 +275,7 @@ def load_targets_config(path: Path, *, expand_env: bool = True) -> TargetsConfig
     Behaviour per spec §需求:`TargetsConfig` 必须从 yaml 加载且环境变量占位展开:
 
     - File absent → return ``TargetsConfig(version="1", targets=[])`` and
-      log INFO. **Not** an error; doctor surfaces a hint to run
+      log DEBUG. **Not** an error; doctor surfaces a hint to run
       ``hostlens target add`` to bootstrap the config.
     - File present but empty → same as absent (treat empty file as
       "version=1, no targets").
@@ -351,21 +351,44 @@ def load_targets_config(path: Path, *, expand_env: bool = True) -> TargetsConfig
         raise
 
 
-def _strip_placeholders(obj: Any) -> Any:
-    """Walk ``obj`` recursively and replace ``${VAR}`` strings with ``None``.
+def _strip_placeholders(
+    obj: Any,
+    *,
+    path: tuple[Any, ...] = (),
+) -> Any:
+    """Walk ``obj`` recursively and replace ``${VAR}`` strings with ``None``
+    for fields on the placeholder allowlist (``password`` / ``passphrase``).
 
     Used by write-path loads (``load_targets_config(expand_env=False)``)
-    to make ``targets.yaml`` validate even when some referenced env
-    vars aren't currently set. The returned structure is for in-memory
-    validation only — the actual yaml on disk keeps its ``${VAR}``
-    strings untouched, and the write path serialises via
-    ``_load_raw_targets_dict`` so placeholders survive verbatim.
+    to make ``targets.yaml`` validate even when some referenced env vars
+    aren't currently set. Placeholders in non-allowlisted fields raise
+    ``ConfigError(kind="env_placeholder_not_allowed_here")`` — mirroring
+    the read path so the write path cannot silently accept misconfiguration
+    that the read path rejects.
     """
 
     if isinstance(obj, dict):
-        return {k: _strip_placeholders(v) for k, v in obj.items()}
+        is_target_dict = len(path) == 2 and path[0] == "targets" and isinstance(path[1], int)
+        if is_target_dict:
+            previous_name = _current_target["name"]
+            raw_name = obj.get("name")
+            _current_target["name"] = raw_name if isinstance(raw_name, str) else None
+            try:
+                return {
+                    key: _strip_placeholders(value, path=(*path, key)) for key, value in obj.items()
+                }
+            finally:
+                _current_target["name"] = previous_name
+        return {key: _strip_placeholders(value, path=(*path, key)) for key, value in obj.items()}
     if isinstance(obj, list):
-        return [_strip_placeholders(v) for v in obj]
+        return [_strip_placeholders(item, path=(*path, index)) for index, item in enumerate(obj)]
     if isinstance(obj, str) and _PLACEHOLDER_PATTERN.fullmatch(obj):
+        field = path[-1] if path else None
+        if not isinstance(field, str) or field not in _PLACEHOLDER_ALLOWED_FIELDS:
+            raise ConfigError(
+                kind="env_placeholder_not_allowed_here",
+                field=str(field) if field is not None else "<root>",
+                target=_infer_target_name(path),
+            )
         return None
     return obj

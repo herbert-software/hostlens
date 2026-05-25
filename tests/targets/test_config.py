@@ -359,3 +359,71 @@ def test_load_keeps_disabled_targets(tmp_path: Path) -> None:
     assert {e.name for e in cfg.targets} == {"alive", "sleeping"}
     enabled_map = {e.name: e.enabled for e in cfg.targets}
     assert enabled_map == {"alive": True, "sleeping": False}
+
+
+def test_load_expand_env_false_rejects_non_secret_placeholder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Write-path must surface the same misconfiguration as read-path.
+
+    Placeholder in ``host`` (a non-secret field) is forbidden regardless
+    of whether the env var is set — the write path used by ``hostlens
+    target add`` / ``remove`` must not silently accept this.
+    """
+
+    monkeypatch.delenv("UNSET_FOR_HOSTLENS_TEST", raising=False)
+    cfg_path = tmp_path / "targets.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": "1",
+                "targets": [
+                    {
+                        "name": "prod-web",
+                        "type": "ssh",
+                        "host": "${UNSET_FOR_HOSTLENS_TEST}",
+                        "user": "alice",
+                    }
+                ],
+            }
+        )
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_targets_config(cfg_path, expand_env=False)
+    assert exc.value.kind == "env_placeholder_not_allowed_here"
+    assert exc.value.extra["field"] == "host"
+    assert exc.value.extra["target"] == "prod-web"
+
+
+def test_load_expand_env_false_strips_secret_placeholder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``password: "${UNSET}"`` validates under ``expand_env=False`` even
+    when the env var is missing — entries with unresolved secrets must
+    not block write commands that touch unrelated targets.
+    """
+
+    monkeypatch.delenv("UNSET_FOR_HOSTLENS_TEST", raising=False)
+    cfg_path = tmp_path / "targets.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": "1",
+                "targets": [
+                    {
+                        "name": "prod-web",
+                        "type": "ssh",
+                        "host": "10.0.0.5",
+                        "user": "alice",
+                        "password": "${UNSET_FOR_HOSTLENS_TEST}",
+                    }
+                ],
+            }
+        )
+    )
+    cfg = load_targets_config(cfg_path, expand_env=False)
+    entry = cfg.targets[0]
+    assert isinstance(entry, SSHEntry)
+    assert entry.password is None

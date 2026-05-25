@@ -62,7 +62,8 @@ from hostlens.cli._doctor_schema import (
 from hostlens.core.config import Settings, load_settings
 from hostlens.core.exceptions import ConfigError, TargetError
 from hostlens.core.logging import configure_logging
-from hostlens.targets.config import load_targets_config
+from hostlens.targets.base import ExecutionTarget
+from hostlens.targets.config import TargetEntry, load_targets_config
 from hostlens.targets.registry import build_registry_from_config
 
 __all__ = [
@@ -212,7 +213,7 @@ def _read_raw_entries(path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
-async def _probe_target(target: Any) -> tuple[TargetConnectivity, str | None]:
+async def _probe_target(target: ExecutionTarget) -> tuple[TargetConnectivity, str | None]:
     """Run a single lightweight ``echo`` probe.
 
     Returns ``("ok", None)`` on a successful probe, ``("failed",
@@ -290,7 +291,7 @@ def _check_targets(settings: Settings) -> list[TargetHealth]:
     raw_entries = _read_raw_entries(settings.targets_config_path)
 
     rows: list[TargetHealth] = []
-    enabled_entries: list[tuple[Any, Any, TargetCredentialSource]] = []
+    enabled_entries: list[tuple[TargetEntry, ExecutionTarget, TargetCredentialSource]] = []
     for entry in registry.list_entries():
         target = registry.get(entry.name)
         credential_source = _detect_credential_source(
@@ -336,7 +337,7 @@ def _check_targets(settings: Settings) -> list[TargetHealth]:
 
 
 async def _probe_enabled_targets(
-    targets: list[Any],
+    targets: list[ExecutionTarget],
 ) -> list[tuple[TargetConnectivity, str | None]]:
     """Probe a batch of enabled targets on one event loop.
 
