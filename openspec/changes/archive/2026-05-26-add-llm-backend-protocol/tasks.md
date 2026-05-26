@@ -144,8 +144,8 @@
 
 ## 19. Git 工作流与归档准备
 
-- [ ] 19.1 完成所有上述任务后 commit 到 feature branch `feat/add-llm-backend-protocol`；commit message 含 OpenSpec change name 引用
-- [ ] 19.2 commit 后、push 前跑对抗性 review（CLAUDE.md §5.3）：默认 `/review-loop-codex`，APPROVE/CLEAR 才 push；若跳过 review 必须在 PR 描述说明理由
-- [ ] 19.3 push branch + 开 PR 到 main；PR 描述含 spec 引用（`openspec/changes/add-llm-backend-protocol/`）与 Demo Path
-- [ ] 19.4 等 CI 全绿 + review 通过后 squash merge：`\gh pr merge <num> --squash --delete-branch`
-- [ ] 19.5 准备归档：跑 `openspec-cn validate add-llm-backend-protocol` 确认变更可归档；后续运行 `/opsx:archive` 推进到 `openspec/specs/llm-backend-protocol/` 与 `openspec/specs/core-services/`（合并 core-services delta）
+- [x] 19.1 完成所有上述任务后 commit 到 feature branch `feat/add-llm-backend-protocol`；commit message 含 OpenSpec change name 引用
+- [x] 19.2 commit 后、push 前跑对抗性 review（CLAUDE.md §5.3）：默认 `/review-loop-codex`，APPROVE/CLEAR 才 push；若跳过 review 必须在 PR 描述说明理由
+- [x] 19.3 push branch + 开 PR 到 main；PR 描述含 spec 引用（`openspec/changes/add-llm-backend-protocol/`）与 Demo Path
+- [x] 19.4 等 CI 全绿 + review 通过后 squash merge：`\gh pr merge <num> --squash --delete-branch`
+- [x] 19.5 准备归档：跑 `openspec-cn validate add-llm-backend-protocol` 确认变更可归档；后续运行 `/opsx:archive` 推进到 `openspec/specs/llm-backend-protocol/` 与 `openspec/specs/core-services/`（合并 core-services delta）
