@@ -101,8 +101,8 @@
 - [x] 11.1 commit 实现 + spec delta 到 feature branch（**不要** push 到 main）：`git add src/hostlens/reporting src/hostlens/cli/inspect.py src/hostlens/inspectors/result.py src/hostlens/tools/schemas/run_inspector.py tests/ docs/operations/inspect.md examples/m1-report/ openspec/changes/add-report-data-model/`；conventional commit message：`feat(M1.6+M1.7): Report data model + render_markdown/json + hostlens inspect CLI`；验收：`git log --oneline -1` 显示新 commit
 - [x] 11.2 跑对抗性 review（CLAUDE.md §5.3）：`/review-loop-codex`（默认）或 `/review-loop`；验收：结论 APPROVE / CLEAR
 - [x] 11.3 push feature branch + 开 PR：`git push -u origin feat/add-report-data-model && \gh pr create --base main --title "feat(M1.6+M1.7): add-report-data-model — Report 数据模型 + 渲染器 + hostlens inspect CLI" --body "..."`；PR body 含 spec 引用（`openspec/changes/add-report-data-model/`）+ Demo Path 引用 + 退出码语义 4 行；验收：PR 链接返回 → PR #18 https://github.com/HerbertGao/hostlens/pull/18
-- [ ] 11.4 等 CI 全绿（mypy + ruff + pytest 全过）；验收：`\gh pr checks <num>` 显示全绿
-- [ ] 11.5 squash merge：`\gh pr merge <num> --squash --delete-branch`；验收：`git log --oneline` main 上含新 squash commit；feature branch 已删除
+- [x] 11.4 等 CI 全绿（mypy + ruff + pytest 全过）；验收：`\gh pr checks <num>` 显示全绿
+- [x] 11.5 squash merge：`\gh pr merge <num> --squash --delete-branch`；验收：`git log --oneline` main 上含新 squash commit；feature branch 已删除
 
 ## 12. OpenSpec archive
 
