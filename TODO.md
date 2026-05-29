@@ -179,7 +179,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 **对应 OpenSpec changes / proposal**：
 - [`add-tool-registry-capability-layer`](openspec/changes/archive/2026-05-25-add-tool-registry-capability-layer/) ✓ archived（M2 前置；M1 阶段已落地）
 - [`add-llm-backend-protocol`](openspec/changes/archive/2026-05-26-add-llm-backend-protocol/) ✓ archived（§2.1a + §2.1b + §2.1c — LLMBackend Protocol + AnthropicAPIBackend / FakeBackend / PlaybackBackend）
-- `add-agent-loop-skeleton`（§2.2 后续）
+- [`add-agent-loop-skeleton`](openspec/changes/archive/2026-05-29-add-agent-loop-skeleton/) ✓ archived（§2.2 — 手写 tool-use loop + `LoopResult`；含 `agent-tool-adapter` delta：dispatch output-schema 失败改 raise `ToolError`）
 - `add-planner-agent`（§2.4 后续）
 - `add-llm-cassette-testing`（PlaybackBackend 录制工具未来独立 proposal）
 
@@ -220,13 +220,13 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
     - [x] cassette 回放下 token usage 也能正确回放（不调真 API；`Usage` 字段 None→0 兼容 SDK 非缓存响应）
     - [ ] 新增测试 case 时跑一次 record 即可（HOSTLENS_LLM_MODE=record）—— **录制工具未来独立 proposal 落地**，M2 用手写 cassette
     - [x] `BackendCapabilities.prompt_caching=False` 的 backend 上，Agent loop 不注入 `cache_control` block（**Agent loop 端检查 capability**，不是 backend 自己丢；backend 检测到不一致必须 raise `BackendCapabilityViolation`）
-- [ ] **2.2 Tool-use loop 核心（消费 LLMBackend，不直接 import anthropic）**
-  - [ ] `agent/loop.py`：`AgentLoop(backend, tool_adapter, settings)`，**backend 是私有依赖，不进 ToolContext**（ADR-008）
-  - [ ] 跑 `while not stop_reason == "end_turn"`；工具调用并行（同 turn 内多个 tool_use 并行执行）
-  - [ ] 单次 loop 的 token 预算上限（从 `settings.agent.token_budget_*` 读取）
-  - [ ] 最大 turn 数兜底（默认 20）
-  - [ ] 在调 backend 前根据 `backend.capabilities.prompt_caching` 决定是否注入 `cache_control`
-  - [ ] **重要**：代码必须可读、注释 WHY，让面试官能快速读懂
+- [x] **2.2 Tool-use loop 核心（消费 LLMBackend，不直接 import anthropic）**（已交付，archived `add-agent-loop-skeleton`）
+  - [x] `agent/loop.py`：`AgentLoop(backend, tool_adapter, settings, *, system=None)`，**backend 是私有依赖，不进 ToolContext**（ADR-008）
+  - [x] 多轮 `while` 按 6 个 `stop_reason` 穷举推进；工具调用并行（同 turn 内多个 tool_use 并行执行，fail-loud 时取消 sibling）
+  - [x] 单次 run 的 token 预算上限（per-run 硬上限，逐轮收缩 `max_tokens` 为剩余预算）
+  - [x] 最大 turn 数兜底（默认 20）
+  - [x] 在调 backend 前根据 `backend.capabilities.prompt_caching` 决定是否注入 `cache_control`
+  - [x] **重要**：代码必须可读、注释 WHY，让面试官能快速读懂
 - [ ] **2.3 Tool Registry（双层 capability 模型；详见 CLAUDE.md §4.10）**
   - [ ] `tools/base.py`：`ToolSpec`（含 surfaces / side_effects / requires_approval / permissions / sensitive_output / target_constraints / tags 等 policy 字段）+ `ToolContext`（依赖注入容器）
   - [ ] `tools/registry.py`：`register` / `list_for(surface)` / `dispatch`；dispatch 前强制校验 surfaces 与 policy gate（surface 不匹配 → `ToolPolicyViolation`）

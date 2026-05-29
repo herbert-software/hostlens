@@ -19,7 +19,7 @@
 - [x] 3.3 `stop_reason` 穷举（D-8）：`end_turn`（有内容→`ok` / 空→`empty_response`）、`tool_use`（→§4）、`refusal`→`empty_response`、`max_tokens`→`degraded_token_budget`、`stop_sequence`/`pause_turn`→raise `UnexpectedStopReason`
 - [x] 3.4 `tool_use` 分支：并行 dispatch（见 §4）→ 追加 assistant 消息 + tool_result user 消息 → continue
 - [x] 3.5 下一轮发起前的兜底闸：超 token 预算 → `degraded_token_budget`；达 max_turns → `degraded_max_turns`（先收尾，绝不再调用）
-- [ ] 3.6 (PR-review) token_budget_output 是 per-run 硬上限：守卫改 `>=`；`_call_with_retry` 加 `max_tokens` 参数，run() 传剩余预算 `token_budget_output - usage.output_tokens`（≥1），不再每轮传完整 budget；`max_tokens` stop_reason 分支补 `final_text=self._join_text(response)`（保留截断前部分文本）
+- [x] 3.6 (PR-review) token_budget_output 是 per-run 硬上限：守卫改 `>=`；`_call_with_retry` 加 `max_tokens` 参数，run() 传剩余预算 `token_budget_output - usage.output_tokens`（≥1），不再每轮传完整 budget；`max_tokens` stop_reason 分支补 `final_text=self._join_text(response)`（保留截断前部分文本）
 
 ## 4. 并行 tool dispatch 与错误分流（按 `dispatch` 真实契约，D-5）
 
@@ -55,11 +55,11 @@
 - [x] 6.10 LoopResult schema：terminal_status 越界 ValidationError；usage_totals 多轮累加正确
 - [x] 6.11 output-contract fail-loud：advertise 工具的 handler 返回非 output_schema 类型 → dispatch raise `ToolError` → `run()` 原样上抛（不回灌）；同时在 `tests/agent/test_tools_adapter_error_handling.py` 加 adapter 层单测（handler 返回错误类型 → raise `ToolError`，不是 `TypeError`/envelope）
 - [x] 6.12 并行 sibling 取消测试：一个工具 fail-loud（如 `ToolError`）+ 一个长跑 handler（`await asyncio.Event().wait()`），断言 `run()` 抛原异常类型，且长跑 handler 被 cancel（未跑完，用标志/CancelledError 捕获验证）
-- [ ] 6.13 (PR-review) 预算收缩 + 部分文本：① `_ScriptedBackend` 记 `last_max_tokens`，断言第二轮 `max_tokens == budget - 第一轮 output`；② `max_tokens` stop_reason 含 text block → `LoopResult.final_text` 保留该文本
+- [x] 6.13 (PR-review) 预算收缩 + 部分文本：① `_ScriptedBackend` 记 `last_max_tokens`，断言第二轮 `max_tokens == budget - 第一轮 output`；② `max_tokens` stop_reason 含 text block → `LoopResult.final_text` 保留该文本
 
 ## 7. 收尾
 
 - [x] 7.1 `mypy --strict src/hostlens/agent/loop.py` 与 `tests/agent/test_loop.py` 0 错误，无裸 `Any`（项目门禁 `mypy --strict src/` 全量 56 文件 0 错误；test_loop.py 自身 0 错误）
 - [x] 7.2 `ruff check` + `pytest -m 'not live'` 全绿（ruff 全量 pass；pytest 1187 passed / 12 skipped(SSH opt-in) / 1 deselected(live)）
-- [ ] 7.3 对抗性 review（CLAUDE.md §5.3：含运行时行为的新代码，应跑 `/review-loop-codex`）→ APPROVE/CLEAR 后开 PR
-- [ ] 7.4 PR `feat/add-agent-loop-skeleton` → main，描述含 spec 引用与 Demo Path
+- [x] 7.3 对抗性 review（CLAUDE.md §5.3：含运行时行为的新代码，应跑 `/review-loop-codex`）→ APPROVE/CLEAR 后开 PR
+- [x] 7.4 PR `feat/add-agent-loop-skeleton` → main，描述含 spec 引用与 Demo Path
