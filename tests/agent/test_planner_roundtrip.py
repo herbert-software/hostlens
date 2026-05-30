@@ -26,10 +26,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from support.cassette_recording import _ACTIVE_CASSETTE_PATHS, RecordingBackend
 
 from hostlens.agent.backends.playback import CassetteMiss, PlaybackBackend
 from hostlens.agent.planner import PlannerAgent, PlannerResult
-from tests.support.cassette_recording import _ACTIVE_CASSETTE_PATHS, RecordingBackend
 
 from ._scenario import (
     SCENARIO_INTENT,

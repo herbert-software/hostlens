@@ -187,11 +187,12 @@ def llm_cassette() -> Iterator[Callable[..., LLMBackend]]:
             return AnthropicAPIBackend(api_key=api_key)
 
         # mode == "record"
-        from hostlens.agent.backends.anthropic_api import AnthropicAPIBackend
-        from tests.support.cassette_recording import (
+        from support.cassette_recording import (
             RecordingBackend,
             guard_record_targets,
         )
+
+        from hostlens.agent.backends.anthropic_api import AnthropicAPIBackend
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:

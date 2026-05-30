@@ -258,7 +258,7 @@ async def regenerate_committed_cassette(*, cassette_path: Path | None = None) ->
     scenarios that need genuine Claude behaviour (M2.8+).
     """
 
-    from tests.support.cassette_recording import _ACTIVE_CASSETTE_PATHS, RecordingBackend
+    from support.cassette_recording import _ACTIVE_CASSETTE_PATHS, RecordingBackend
 
     out_path = cassette_path or COMMITTED_CASSETTE_PATH
     out_path.parent.mkdir(parents=True, exist_ok=True)

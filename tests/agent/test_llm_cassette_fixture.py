@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import _CASSETTES_DIR, _resolve_llm_mode
 
 from hostlens.agent.backend import create_backend
 from hostlens.agent.backends.anthropic_api import AnthropicAPIBackend
@@ -28,7 +29,6 @@ from hostlens.agent.backends.playback import PlaybackBackend
 from hostlens.core.config import BackendSettings, Settings
 from hostlens.targets.config import LocalEntry, SSHEntry, TargetsConfig
 from hostlens.targets.registry import build_registry_from_config
-from tests.conftest import _CASSETTES_DIR, _resolve_llm_mode
 
 # A name guaranteed to have a committed cassette in the repo.
 _EXISTING_CASSETTE_NAME = "list_inspectors_demo"
