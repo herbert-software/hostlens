@@ -51,7 +51,7 @@ dev = [
     "mypy>=1.10",
     "pre-commit>=3.7",
     "pytest-docker>=3.1,<4",
-    "pytest-rerunfailures>=14.0,<16",
+    "pytest-rerunfailures>=14.0,<17",
     "psutil>=5.9",
     "syrupy>=4.6,<5",
     "types-PyYAML",
