@@ -53,7 +53,7 @@ dev = [
     "pytest-docker>=3.1,<4",
     "pytest-rerunfailures>=14.0,<16",
     "psutil>=5.9",
-    "syrupy>=4.6,<5",
+    "syrupy>=4.6,<6",
     "types-PyYAML",
 ]
 mcp = []
