@@ -314,6 +314,16 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
   - [ ] `reporting/diff.py`：两份报告对比，输出 `added` / `resolved` / `changed_severity`
   - [ ] CLI: `hostlens reports diff <run_id_a> <run_id_b>`
   - [ ] 也作为定时巡检报告里的一个 section（M5 用到）
+- [ ] **3.6 extended-thinking 支持（独立提案 `support-extended-thinking`；M2 显式不支持，见 backend.py 注释「M3+ Diagnostician」）**
+
+  > **触发背景**：M2.6 用 DeepSeek 做 live 测试时发现 `deepseek-v4-pro/flash` 经其 anthropic 兼容端点**强制返回 `type="thinking"` 块**，撞 M2 `MessageResponse` 只建模 `text`/`tool_use` 的 scope → 解析崩。Diagnostician（3.1）若用推理模型也会受益。**reference memory**：`deepseek-v4-thinking-incompatible-live-test`。
+
+  - [ ] **支柱①** `MessageResponse.content` 的 `ContentBlock` 联合新增 `ThinkingBlock{type,thinking,signature}` + `RedactedThinkingBlock{type,data}`（按 `type=="thinking"` 过滤会丢 redacted_thinking → 破多轮协议，务必两者都建模）
+  - [ ] **支柱②** `LLMBackend.messages_create` + Protocol 加 `thinking` 参数（`{type:enabled,budget_tokens}` / `disabled` / `adaptive`）+ `BackendCapabilities.extended_thinking=True`（对应 backend）
+  - [ ] **支柱③** Agent loop 工具多轮**原样保留并按序回传 thinking 块**（signature 不变、顺序不变、不可省略——Anthropic/DeepSeek 带工具时省略→400）；cache_control 断点**不能打在 thinking 块上**（「pass unchanged」要求，断点挪到末尾 tool_use/text）
+  - [ ] **支柱④（关键，与 M2.6 协同）** cassette keying 必须**归一化掉 thinking/redacted_thinking 块再 hash**（thinking 文本与 signature 都**非确定**，否则 record→replay 永不命中）；cassette 仍**存完整响应**（含 thinking 供回放回传），只在 `request_key_for_payload` 投影 messages 时 drop thinking 块——是加归一化前置步，**不**改 keying 算法形状
+  - [ ] **近期兜底（可并入本提案）**：在 extended_thinking=False 时，backend adapter 对默认开 thinking 的 provider（如 DeepSeek）发 `thinking:{type:"disabled"}`（需实测生效）；意外收到 thinking 块时 `MessageResponse` 解析给清晰 `BackendError(kind="unsupported_content_block")` 而非裸 `ValidationError`
+  - [ ] 验收：真 Anthropic key 开 thinking 跑通工具多轮 + cassette record→replay 命中；DeepSeek v4 经 anthropic 端点跑通
 
 ---
 
