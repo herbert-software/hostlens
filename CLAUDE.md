@@ -283,7 +283,11 @@ class LLMBackend(Protocol):
 
 ### 5.1 Git 分支与 PR 工作流（强制）
 
-`main` 分支已设 **branch protection**，**禁止直接 push**。任何代码 / 文档 / 配置改动必须走：
+`main` 分支由 GitHub **ruleset**（名为 `main`，active）保护：合并须经 **PR**、**CI 必须绿**（required status checks：`lint + type + test (py3.11)` + `(py3.12)`）、**squash-only**（仅允许 squash merge）、禁删除 / 禁 force-push、push 时 Copilot review。**注意**：ruleset 对 **Admin（repo owner）是 `bypass_mode: always`**，所以「直推 main 必被 GitHub 拒绝」对 admin **并不成立**（见下方例外）——走 PR 是**团队约定**，不是对 owner 的硬拦截。
+
+**默认**：任何代码 / 行为 / 配置改动必须走下面的 feature branch + PR 流程。**唯一例外**：**纯文档移动 / 机械变更**（OpenSpec `archive`：把 change 目录 mv 到 `openspec/changes/archive/` + 把 delta 合进 `openspec/specs/`，**无 `src/` 代码改动**）经用户授权可由 admin **直推 main**（admin bypass + 本地 settings 放行 `git push origin main`）；其余一律走 PR。
+
+PR 流程：
 
 1. **从最新 main 切 feature branch**：
    ```bash
@@ -315,7 +319,7 @@ class LLMBackend(Protocol):
 
 **反模式**：
 
-- ❌ **直接 push 到 main**（branch protection 在 push 阶段拒绝，触发 fatal error；注意 git 分布式，本地 commit 永远不会被拒，但 `git push origin main` 必失败 —— 必须走 feature branch + PR）
+- ❌ **直接 push 代码 / 行为变更到 main** —— 必须走 feature branch + PR + CI 绿 + squash。**例外**：上文「纯文档移动 / 机械变更」经授权可 admin 直推（ruleset admin bypass + 本地放行）。注意：因 admin `bypass_mode: always`，对 owner 而言「直推必失败」不成立，这是**约定**不是硬拦截 —— 别拿「反正能直推」当借口绕过代码变更的 PR 流程
 - ❌ 一个 branch 同时改两个不相关提案（拆分 PR）
 - ❌ commit message 与 branch 名 / OpenSpec change name 不对齐（让 PR 历史可追溯）
 - ❌ PR 不写 spec 引用 / Demo Path（reviewer 无法快速验证）
