@@ -32,6 +32,6 @@ repos:
           - jinja2>=3.1,<4
           - jsonschema>=4.20,<5
           - simpleeval>=1.0,<2
-          - pyyaml>=6.0,<7
+          - pyyaml>=6.0.3,<7
           - types-PyYAML
           - anthropic>=0.45,<2
