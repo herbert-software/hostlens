@@ -980,6 +980,7 @@ class AgentLoop:
 
 - 系统 prompt + Tool Registry 概览：标记 `cache_control: ephemeral`
 - 每次新调用先看上一次 `cache_read_input_tokens` 是否 > 0，作为单测断言
+- 两层断点（静态前缀 A + 滚动对话前缀 B）的完整策略、前缀顺序图与命中时序详见 [docs/agent-cache-strategy.md](agent-cache-strategy.md)
 
 ### 安全网
 

@@ -236,7 +236,7 @@ class AgentLoop:
                 observer.on_event(TurnStarted(turn=turns + 1))
             outcome = await self._call_with_retry(
                 system=self._inject_cache_control(self._system, self._backend.capabilities),
-                messages=messages,
+                messages=self._roll_message_cache_breakpoint(messages, self._backend.capabilities),
                 tools=tools,
                 max_tokens=remaining_output,
             )
@@ -515,13 +515,29 @@ class AgentLoop:
         system: list[dict[str, Any]] | str,
         capabilities: BackendCapabilities,
     ) -> list[dict[str, Any]] | str:
-        """Inject ``cache_control: ephemeral`` only when capability allows it.
+        """Inject breakpoint A (static prefix) when capability allows it.
 
         The decision lives in the loop (CLAUDE.md §4.8 / §4.11 rule #2): the
         backend must never silently drop a ``cache_control`` block, so the
-        loop must not emit one when ``prompt_caching`` is False. M2.2 only
-        marks the last system block; choosing WHAT to cache is M2.5's job
-        (design.md D-2).
+        loop must not emit one when ``prompt_caching`` is False.
+
+        WHAT this breakpoint caches (design.md D-1): the Anthropic prompt-cache
+        prefix order is ``tools → system → messages``, so a single breakpoint on
+        the last ``system`` block caches the whole ``tools + system`` static
+        prefix — the ``system`` breakpoint naturally swallows the ``tools`` array
+        that precedes it. Hostlens renders both ``tools`` and ``system`` byte-
+        stable across runs (M2.4), making ``tools + system`` one contiguous
+        stable prefix that a single breakpoint fully covers.
+
+        The ``tools`` array is therefore **deliberately not** marked separately:
+        breakpoint A already covers it. A second breakpoint on ``tools`` would
+        only create a redundant ``tools``-alone cache entry, burning one of the
+        ≤4 breakpoint budget slots and an extra cache-write for no gain (that
+        split only helps when ``tools`` is stable but ``system`` varies, which
+        is not Hostlens's case).
+
+        ``system`` as a bare string or empty list has nowhere to mark → skip A
+        (no error); breakpoint B on the rolling messages may still apply.
         """
         if not capabilities.prompt_caching:
             return system
@@ -532,6 +548,60 @@ class AgentLoop:
         last["cache_control"] = {"type": "ephemeral"}
         marked[-1] = last
         return marked
+
+    @staticmethod
+    def _roll_message_cache_breakpoint(
+        messages: list[dict[str, Any]],
+        capabilities: BackendCapabilities,
+    ) -> list[dict[str, Any]]:
+        """Inject the rolling conversation-prefix breakpoint B (design.md D-2/D-3).
+
+        Each ``messages_create`` marks **only** the last content block of the
+        last message, so the request carries at most one breakpoint B regardless
+        of turn count. Combined with the API's longest-prefix match (with ~20
+        block look-back), marking only the newest tail still lets turn N hit the
+        shorter conversation prefix written on turn N-1 — no need to retain
+        historical breakpoints.
+
+        Snapshot invariant (WHY we never mutate stored ``messages``): the loop
+        appends to and re-uses the ``messages`` list across turns. Writing the
+        mark back into a stored dict would dirty the conversation state between
+        turns and let historical breakpoints accumulate (request breakpoint
+        count would grow past the API's limit of 4). So injection operates on a
+        shallow copy and only shallow-copies the marked tail message + its tail
+        block — stored ``messages`` and every dict inside stay untouched.
+
+        Because the stored ``messages`` are therefore guaranteed never to carry
+        ``cache_control``, there is no historical breakpoint to clear: a "clear
+        all previous breakpoints" pass would be defending an impossible branch
+        (CLAUDE.md §6), so it is deliberately omitted. The ``[1, 2, 2, …]``
+        breakpoint-count structural test guards this invariant.
+
+        Degrade (D-2): when the last message ``content`` is not a non-empty
+        block list (e.g. a bare ``str`` such as the turn-1 ``intent``), there is
+        no block to mark → skip B (no coercion to list, to avoid changing wire
+        semantics); breakpoint A still applies.
+        """
+        # The three skip paths return the original ``messages`` reference
+        # (zero-copy): they emit no cache_control, and the caller (run) treats
+        # the result as a read-only request snapshot — safe under the loop's
+        # sequential, single-coroutine call structure.
+        if not capabilities.prompt_caching:
+            return messages
+        if not messages:
+            return messages
+        last_content = messages[-1].get("content")
+        if not isinstance(last_content, list) or not last_content:
+            return messages
+        rolled = list(messages)
+        last_msg = dict(rolled[-1])
+        content = list(last_content)
+        last_block = dict(content[-1])
+        last_block["cache_control"] = {"type": "ephemeral"}
+        content[-1] = last_block
+        last_msg["content"] = content
+        rolled[-1] = last_msg
+        return rolled
 
     @staticmethod
     def _is_error_envelope(result: dict[str, Any]) -> bool:
