@@ -33,8 +33,6 @@ from typing import Any
 import pytest
 import structlog
 from _harness import (
-    CASSETTES_DIR,
-    FIXTURES_DIR,
     SNAPSHOTS_DIR,
     build_authored_responses,
     build_incident_planner,
@@ -46,6 +44,7 @@ from support.cassette_recording import RecordingBackend
 
 from hostlens.agent.backends.fake import FakeBackend
 from hostlens.core.config import AgentSettings, Settings
+from hostlens.demo.assets import source_tree_path
 from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.targets.base import Capability, ExecResult
@@ -149,15 +148,19 @@ async def _build_fixture(scenario: IncidentScenario) -> None:
         "commands": commands,
         "files": {},
     }
-    FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
-    fixture_path = FIXTURES_DIR / f"{scenario.key}.json"
+    # Writer #1: write the committed asset in the source tree (NOT an as_file
+    # read-only temp copy). basename is now ``<key>/fixture.json`` (design D2).
+    fixture_path = source_tree_path(scenario.key, "fixture")
+    fixture_path.parent.mkdir(parents=True, exist_ok=True)
     fixture_path.write_text(
         json.dumps(fixture, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
 
 async def _record_cassette_and_snapshot(scenario: IncidentScenario) -> None:
-    cassette_path = CASSETTES_DIR / f"incident_{scenario.key}.jsonl"
+    # Writer #1 (cassette half): source-tree path, now ``<key>/cassette.jsonl``.
+    cassette_path = source_tree_path(scenario.key, "cassette")
+    cassette_path.parent.mkdir(parents=True, exist_ok=True)
     recorder = RecordingBackend(
         cassette_path=cassette_path,
         inner=FakeBackend(responses=build_authored_responses(scenario)),  # type: ignore[arg-type]

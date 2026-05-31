@@ -15,6 +15,7 @@ import sys
 import click
 import typer
 
+from hostlens.cli.demo import app as demo_app
 from hostlens.cli.doctor import run_doctor
 from hostlens.cli.inspect import inspect_cmd
 from hostlens.cli.inspectors import app as inspectors_app
@@ -69,6 +70,7 @@ def doctor_cmd(
 
 app.add_typer(target_app, name="target")
 app.add_typer(inspectors_app, name="inspectors")
+app.add_typer(demo_app, name="demo")
 app.command("inspect")(inspect_cmd)
 
 

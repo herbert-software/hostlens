@@ -39,15 +39,18 @@ Any other value fails fast naming the legal set; record/live without
 `ANTHROPIC_API_KEY` calls `pytest.fail` rather than returning a backend
 that would only 401 on first call.
 
-## `incident_*.jsonl` — generated, not record-mode
+## incident-pack cassettes — migrated out of this directory
 
-The incident-pack cassettes (`incident_<scenario>.jsonl`) are **not** produced
-by `HOSTLENS_LLM_MODE=record`. They are generated offline (no API key) by the
+The 8 incident-pack cassettes no longer live here. They were migrated to the
+product package as `src/hostlens/demo/scenarios/<scenario>/cassette.jsonl`
+(SOT for both the `hostlens demo` command and the `tests/incidents` snapshot
+tests; see add-demo-cli). They are **not** produced by
+`HOSTLENS_LLM_MODE=record`: they are generated offline (no API key) by the
 incident generator, which drives the real Planner pipeline with a
 `RecordingBackend` wrapping a scripted `FakeBackend` over a `ReplayTarget`. To
-refresh them, see
-[tests/incidents/README.md](../../incidents/README.md). The file format and
-lint below apply to them identically.
+refresh them, see [tests/incidents/README.md](../../incidents/README.md). The
+file format and lint below apply to them identically — note `cassette_lint.py`
+scans the migrated location too.
 
 ## Recording flow (`HOSTLENS_LLM_MODE=record`)
 

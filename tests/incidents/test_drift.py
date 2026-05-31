@@ -20,13 +20,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 from _harness import (
-    FIXTURES_DIR,
     build_incident_planner_over_fixture,
 )
 from _scenarios import SCENARIOS_BY_KEY
 
 from hostlens.agent.backends.playback import CassetteMiss
 from hostlens.core.exceptions import ReplayMiss
+from hostlens.demo.assets import source_tree_path
 from hostlens.targets.replay import ReplayTarget
 
 if TYPE_CHECKING:
@@ -59,7 +59,7 @@ async def test_command_drift_trips_strict_consumption(
     # Start from the committed cpu_saturation fixture and drop the load_avg
     # main command — i.e. an Inspector command "changed" without re-recording
     # the fixture. Probes are kept so the drift is on the main command only.
-    original = json.loads((FIXTURES_DIR / "cpu_saturation.json").read_text(encoding="utf-8"))
+    original = json.loads(source_tree_path("cpu_saturation", "fixture").read_text(encoding="utf-8"))
     drifted_commands = [c for c in original["commands"] if "loadavg" not in c["cmd"]]
     assert len(drifted_commands) == len(original["commands"]) - 1, "expected to drop one command"
     drifted = {**original, "commands": drifted_commands}

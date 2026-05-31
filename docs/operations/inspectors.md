@@ -320,7 +320,7 @@ version: "1"
 targets:
   - name: incident-host
     type: replay
-    fixture: ./tests/fixtures/incident_pack/cpu_saturation.json
+    fixture: ./src/hostlens/demo/scenarios/cpu_saturation/fixture.json
 ```
 
 fixture JSON 结构：

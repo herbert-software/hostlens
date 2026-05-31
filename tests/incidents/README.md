@@ -21,7 +21,7 @@ PlannerAgent → AgentLoop → ToolsAdapter → run_inspector → InspectorRunne
    LLM layer                                              execution layer
         │                                                        │
   PlaybackBackend ← cassette                          ReplayTarget ← fixture
-  (tests/fixtures/cassettes/incident_*.jsonl)   (tests/fixtures/incident_pack/*.json)
+  (src/hostlens/demo/scenarios/<key>/cassette.jsonl)  (src/hostlens/demo/scenarios/<key>/fixture.json)
 ```
 
 Everything runs under a **frozen clock** (`_harness.FROZEN_DT`) so the one
@@ -38,8 +38,8 @@ commands the `ReplayTarget` can match.
 | `test_<scenario>.py` ×8 | one snapshot test per scenario (replay only) |
 | `test_drift.py` | strict-consumption + unit-level `ReplayMiss` drift guards |
 | `snapshots/<scenario>.md` ×8 | committed deterministic projection baselines |
-| `../fixtures/incident_pack/<scenario>.json` ×8 | ReplayTarget command fixtures |
-| `../fixtures/cassettes/incident_<scenario>.jsonl` ×8 | PlaybackBackend cassettes |
+| `../../src/hostlens/demo/scenarios/<scenario>/fixture.json` ×8 | ReplayTarget command fixtures (migrated to product package; SOT) |
+| `../../src/hostlens/demo/scenarios/<scenario>/cassette.jsonl` ×8 | PlaybackBackend cassettes (migrated to product package; SOT) |
 
 ## What the snapshot compares
 

@@ -20,6 +20,7 @@ exercised end-to-end.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -29,6 +30,7 @@ import pytest
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.demo.assets import reader_path, source_tree_path
 from hostlens.inspectors.registry import (
     InspectorRegistry,
     build_registry_from_search_paths,
@@ -48,7 +50,29 @@ if TYPE_CHECKING:
 # never nodeid-derived).
 _CASSETTES_DIR = Path(__file__).parent / "fixtures" / "cassettes"
 
+# Incident cassettes migrated into the demo package (single SOT, design D1):
+# the 9 call sites still pass ``incident_<key>``; the ``incident_`` prefix is
+# stripped HERE to the bare key and resolved through the asset bridge. Non-
+# incident cassettes (planner_health_check / list_inspectors_demo / deepseek_*)
+# keep living under ``tests/fixtures/cassettes/`` unchanged.
+_INCIDENT_PREFIX = "incident_"
+
 _VALID_LLM_MODES = ("replay", "record", "live")
+
+
+def _cassette_record_path(name: str) -> Path:
+    """Resolve the write target for record mode (writer #2, design D2).
+
+    ``incident_<key>`` names write the committed asset in the SOURCE TREE via
+    ``source_tree_path`` (never an ``as_file`` read-only temp copy — that would
+    silently drop a re-recording). Non-incident names keep their flat path under
+    ``tests/fixtures/cassettes/``. Pure (no side effects) so a path-only test can
+    assert the incident branch lands in ``src/hostlens/demo/scenarios``.
+    """
+
+    if name.startswith(_INCIDENT_PREFIX):
+        return source_tree_path(name[len(_INCIDENT_PREFIX) :], "cassette")
+    return _CASSETTES_DIR / f"{name}.jsonl"
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -153,19 +177,27 @@ def llm_cassette(request: pytest.FixtureRequest) -> Iterator[Callable[..., LLMBa
     """Return a factory producing an ``LLMBackend`` selected by the current mode.
 
     Usage: ``llm_cassette("planner_health_check", target_registry=<registry>)``
-    maps the explicit semantic ``name`` to
-    ``tests/fixtures/cassettes/<name>.jsonl`` (design.md D-6: never nodeid-
-    derived) and dispatches on ``_resolve_llm_mode()``:
+    maps the explicit semantic ``name`` to a cassette path (design.md D-6: never
+    nodeid-derived) and dispatches on ``_resolve_llm_mode()``. ``incident_<key>``
+    names are migrated into the demo package: the ``incident_`` prefix is
+    stripped HERE (the 9 call sites are unchanged) and resolved through the asset
+    bridge — replay reads via ``reader_path`` (as_file, zip-safe), record writes
+    via ``source_tree_path`` (source tree, design D2). Non-incident names keep
+    their flat ``tests/fixtures/cassettes/<name>.jsonl`` path.
 
     - **replay** → ``PlaybackBackend`` over the cassette file; a missing file
-      raises with the expected path. ``target_registry`` is ignored.
+      raises with the expected path. ``target_registry`` is ignored. For
+      ``incident_`` names the ``reader_path`` ``as_file`` context is held in an
+      ``ExitStack`` for the whole test (the temp path must outlive the call —
+      design D2 lifecycle).
     - **record** → wraps a live ``AnthropicAPIBackend`` in ``RecordingBackend``.
       Requires ``ANTHROPIC_API_KEY`` and ``target_registry`` (both ``pytest.fail``
       when absent). BEFORE returning the recorder the factory calls
       ``guard_record_targets`` so the assembly-layer real-target gate is
       structurally enforced (spec §需求:record 模式必须由 fixture 强制...拒绝真实
       target — never a "test author calls a helper" downgrade). Each recorder is
-      ``flush()``ed at teardown.
+      ``flush()``ed at teardown. ``incident_`` names write to the source tree via
+      ``_cassette_record_path`` (never an as_file temp copy).
     - **live** → a raw ``AnthropicAPIBackend`` (no cassette written).
 
     The whole mode dispatch lives here, never in production ``create_backend``
@@ -173,16 +205,24 @@ def llm_cassette(request: pytest.FixtureRequest) -> Iterator[Callable[..., LLMBa
     """
 
     recorders: list[object] = []
+    # Holds each replay-mode ``reader_path`` as_file context for the whole test
+    # so the materialized temp cassette outlives the ``_make`` call.
+    reader_stack = contextlib.ExitStack()
 
     def _make(name: str, target_registry: TargetRegistry | None = None) -> LLMBackend:
         # Resolve mode lazily on each call so a test that ``monkeypatch``es
         # ``HOSTLENS_LLM_MODE`` in its body (after fixture setup) is honored.
         mode = _resolve_llm_mode()
-        cassette_path = _CASSETTES_DIR / f"{name}.jsonl"
+        is_incident = name.startswith(_INCIDENT_PREFIX)
 
         if mode == "replay":
             from hostlens.agent.backends.playback import PlaybackBackend
 
+            if is_incident:
+                key = name[len(_INCIDENT_PREFIX) :]
+                cassette_path = reader_stack.enter_context(reader_path(key, "cassette"))
+            else:
+                cassette_path = _CASSETTES_DIR / f"{name}.jsonl"
             if not cassette_path.exists():
                 raise FileNotFoundError(
                     f"cassette not found for replay: expected {cassette_path} "
@@ -190,6 +230,8 @@ def llm_cassette(request: pytest.FixtureRequest) -> Iterator[Callable[..., LLMBa
                     f"HOSTLENS_LLM_MODE=record."
                 )
             return PlaybackBackend(cassette_path=cassette_path)
+
+        cassette_path = _cassette_record_path(name)
 
         if mode == "live":
             from hostlens.agent.backends.anthropic_api import AnthropicAPIBackend
@@ -236,6 +278,9 @@ def llm_cassette(request: pytest.FixtureRequest) -> Iterator[Callable[..., LLMBa
         return recorder
 
     yield _make
+
+    # Release every replay-mode ``reader_path`` temp file now the test is done.
+    reader_stack.close()
 
     # Teardown: persist each recorder built this test ONLY if the test passed.
     # A single test may ``_make`` multiple scenarios. If the test failed/errored,

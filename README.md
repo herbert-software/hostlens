@@ -23,6 +23,30 @@
 > 下面的"快速开始"、"定时巡检"、"MCP Server"等章节展示的是 **目标 UX 与规划中的命令形态**，是为了让架构和路线图有具体的"我们要造什么"的参照系，不是当前可用的功能。
 >
 > 实现进度按 [TODO.md](TODO.md) 的 M0-M10 路线推进，每期开始前先用 [OpenSpec](openspec/) 起 proposal。
+>
+> **唯一例外 —— 已可离线跑的 `hostlens demo`**：M2.9 已落地一条无需 SSH / 付费 API key / 任何配置就能在干净机器上跑通的离线 demo（见下方「立即试用」），让你不配真实环境也能看到 Agent 推理诊断的全过程。
+
+## 立即试用（离线 demo，无需 API key）
+
+干净 macOS / Linux 上，**无需 SSH、无需付费 Anthropic API key、无需任何用户配置**，
+一条命令离线 reproduce 一份带根因假设的报告（底层走 M2.8 双回放层，零 token / 零 API
+调用 / 亚秒级完成；「5 分钟」是 README 上限）：
+
+```bash
+pip install -e ".[dev]"
+hostlens demo list                  # 列出 8 个可选故障场景
+hostlens demo run cpu_saturation    # 或 cpu-saturation（kebab 纯归一化 -→_）
+#   stderr: 实时展示 Planner Agent 调度 Inspector → 收集 finding → 生成 narrative
+#   stdout: 完整 markdown 报告（narrative 含量化根因假设 + findings 列表 + 一行遥测）
+hostlens demo run cpu_saturation --quiet -o report.md   # 关进度流，报告写文件
+```
+
+8 个场景（`cpu_saturation` / `memory_oom` / `disk_inode` / `systemd_failed` /
+`error_burst` / `fd_exhaustion` / `dependency_unreachable` / `tls_expiry`）的逐个
+说明、期望输出片段、以及「想真实复现故障」的手动指引见
+[examples/README.md](examples/README.md)。
+
+> 终端演示 GIF 录制为 follow-up（暂未录制），不阻塞使用。
 
 ## 为什么需要 Hostlens
 

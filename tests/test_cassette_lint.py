@@ -56,10 +56,42 @@ def _write_cassette(tmp_path: Path, record: dict[str, object]) -> Path:
 
 
 def test_existing_cassettes_pass_scan_mode() -> None:
-    """The cassettes committed under ``tests/fixtures/cassettes/`` must be clean."""
+    """The committed cassettes must pass the no-arg default scan (as CI runs it).
+
+    The default scan covers BOTH ``tests/fixtures/cassettes/*.jsonl`` and the
+    migrated incident cassettes at
+    ``src/hostlens/demo/scenarios/**/cassette.jsonl`` — the no-arg call here must
+    match ``ci.yml`` exactly so the migrated cassettes cannot silently escape the
+    secret gate.
+    """
 
     result = _run_lint([])
     assert result.returncode == 0, f"stderr={result.stderr!r} stdout={result.stdout!r}"
+
+
+def test_default_scan_covers_migrated_incident_cassettes() -> None:
+    """The migrated incident cassettes are inside the no-arg default scan set.
+
+    Guards the migration's CI-gate reversal (task 2.8): the incident cassettes
+    moved out of ``tests/fixtures/cassettes/`` into the demo package, so the
+    default scan MUST still reach ``src/hostlens/demo/scenarios/**/cassette.jsonl``
+    or they fall out of the secret gate while becoming public wheel content.
+    """
+
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        import cassette_lint
+    finally:
+        sys.path.pop(0)
+
+    default_files = {p.resolve() for p in cassette_lint.iter_default_cassette_files()}
+    scenarios_dir = REPO_ROOT / "src" / "hostlens" / "demo" / "scenarios"
+    migrated = {p.resolve() for p in scenarios_dir.glob("*/cassette.jsonl")}
+    assert migrated, "no migrated incident cassettes found — migration incomplete?"
+    assert migrated <= default_files, (
+        "migrated incident cassettes not covered by default scan: "
+        f"{sorted(str(p) for p in migrated - default_files)}"
+    )
 
 
 def test_scan_rejects_anthropic_api_key(tmp_path: Path) -> None:

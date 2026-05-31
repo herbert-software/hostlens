@@ -17,6 +17,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from hostlens.demo.registry import get_scenario
+
+
+def _intent(key: str) -> str:
+    """Return the scenario intent from the demo registry (intent SOT, design D1).
+
+    The demo registry is the single source of truth for ``intent``; the
+    snapshot tests must replay the exact recorded intent (it feeds the cassette
+    request key), so a missing key here is a hard failure rather than a silent
+    empty string.
+    """
+
+    scenario = get_scenario(key)
+    if scenario is None:
+        raise KeyError(f"demo registry has no scenario {key!r}")
+    return scenario.intent
+
 
 @dataclass(frozen=True)
 class InspectorCall:
@@ -44,7 +61,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 1. CPU saturation -----------------------------------------------------
     IncidentScenario(
         key="cpu_saturation",
-        intent="这台机器 CPU 为什么飙高? 帮我排查 CPU 饱和的原因.",
+        intent=_intent("cpu_saturation"),
         narrative=(
             "这台主机 CPU 处于饱和状态: mysqld (pid 4242) 正占用 97.5% CPU, "
             "且 1 分钟负载 16.40 已达 4 核的约 4 倍. 建议排查 mysqld 的慢查询或失控线程."
@@ -65,7 +82,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 2. Memory pressure / OOM ---------------------------------------------
     IncidentScenario(
         key="memory_oom",
-        intent="这台机器内存是不是快爆了? 最近有没有进程被 OOM 杀掉?",
+        intent=_intent("memory_oom"),
         narrative=(
             "内存严重不足: 当前可用内存仅 2.0%, 且内核 OOM-killer 最近触发过一次, "
             "杀掉了 mysqld (pid 4242). 建议立刻扩容或排查内存泄漏进程."
@@ -88,7 +105,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 3. Disk full / inode exhaustion --------------------------------------
     IncidentScenario(
         key="disk_inode",
-        intent="磁盘是不是满了? 帮我看看哪个分区快撑不住了, inode 有没有问题.",
+        intent=_intent("disk_inode"),
         narrative=(
             "根分区 / (/dev/sda1) 已用 98%, 接近写满; /var (/dev/sdb1) 也到了 88%. "
             "同时根分区 inode 使用率达 96%. 建议清理日志与临时文件."
@@ -109,7 +126,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 4. systemd failed units ----------------------------------------------
     IncidentScenario(
         key="systemd_failed",
-        intent="系统服务有没有挂掉的? 帮我列一下 failed 的 systemd 单元.",
+        intent=_intent("systemd_failed"),
         narrative=(
             "有 2 个 systemd 单元处于 failed 状态: nginx.service 与 mysql.service. "
             "建议查看各自的 journal 日志定位启动失败原因."
@@ -125,7 +142,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 5. Recent error burst (sampling_window) ------------------------------
     IncidentScenario(
         key="error_burst",
-        intent="最近几分钟日志里是不是错误突然变多了? 帮我看看错误日志量.",
+        intent=_intent("error_burst"),
         narrative=(
             "最近 5 分钟内出现了 247 条 error 级别日志, 明显高于正常水位. "
             "建议结合具体服务日志定位错误突增的根因."
@@ -141,7 +158,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 6. File-descriptor exhaustion ----------------------------------------
     IncidentScenario(
         key="fd_exhaustion",
-        intent="是不是文件描述符快用光了? 帮我看看 fd 分配情况.",
+        intent=_intent("fd_exhaustion"),
         narrative=(
             "系统级文件描述符已分配 950272/1048576, 达上限的约 91%, 接近耗尽. "
             "建议排查是否有进程泄漏 fd 或调高内核上限."
@@ -157,7 +174,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 7. Dependency connectivity (parameterized — Option E) ----------------
     IncidentScenario(
         key="dependency_unreachable",
-        intent="帮我检查下游依赖 database:5432 和 cache:6379 还连得上吗?",
+        intent=_intent("dependency_unreachable"),
         narrative=(
             "下游依赖探测: database:5432 已不可达, cache:6379 正常. "
             "建议优先排查 database 的网络连通与进程存活."
@@ -176,7 +193,7 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
     # 8. TLS certificate expiry (parameterized — Option E) -----------------
     IncidentScenario(
         key="tls_expiry",
-        intent="帮我检查 payments:443 的 TLS 证书还有多久过期.",
+        intent=_intent("tls_expiry"),
         narrative=(
             "payments:443 的 TLS 证书将在 3 天后过期, 已进入紧急区间. "
             "建议立即续期, 避免下游握手失败."

@@ -3,7 +3,7 @@
 The "double replay layer" in one place:
 
 - execution layer → ``ReplayTarget`` (canned command output from a committed
-  ``tests/fixtures/incident_pack/<key>.json`` fixture),
+  ``src/hostlens/demo/scenarios/<key>/fixture.json`` fixture),
 - LLM layer → a backend the caller supplies (``PlaybackBackend`` over a
   committed cassette in the snapshot tests; a ``RecordingBackend`` wrapping a
   scripted ``FakeBackend`` in the generator).
@@ -38,6 +38,7 @@ from hostlens.agent.backend import (
 )
 from hostlens.agent.planner import PlannerAgent
 from hostlens.core.config import AgentSettings, Settings
+from hostlens.demo.assets import source_tree_path
 from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.targets.config import ReplayEntry, TargetsConfig
 from hostlens.targets.registry import build_registry_from_config
@@ -64,9 +65,6 @@ def frozen_clock() -> datetime:
 # `incident-host` matches the ExecutionTarget name regex (`^[a-z][a-z0-9_\-]{0,63}$`).
 INCIDENT_TARGET_NAME = "incident-host"
 
-_TESTS_DIR = Path(__file__).parent.parent
-FIXTURES_DIR = _TESTS_DIR / "fixtures" / "incident_pack"
-CASSETTES_DIR = _TESTS_DIR / "fixtures" / "cassettes"
 SNAPSHOTS_DIR = Path(__file__).parent / "snapshots"
 
 SEVERITY_RANK = {"critical": 0, "warning": 1, "info": 2}
@@ -77,9 +75,15 @@ def build_incident_planner(
     *,
     fixture_name: str,
 ) -> tuple[PlannerAgent, ReplayTarget]:
-    """Assemble a ``PlannerAgent`` over the committed fixture for ``fixture_name``."""
+    """Assemble a ``PlannerAgent`` over the committed fixture for ``fixture_name``.
+
+    The fixture now lives under ``src/hostlens/demo/scenarios/<key>/fixture.json``
+    (the demo package is the single SOT). ``source_tree_path`` returns the real
+    source-tree path — safe here because ``_harness`` only runs from the source
+    tree / editable install, never from an installed wheel.
+    """
     return build_incident_planner_over_fixture(
-        backend, fixture_path=FIXTURES_DIR / f"{fixture_name}.json"
+        backend, fixture_path=source_tree_path(fixture_name, "fixture")
     )
 
 

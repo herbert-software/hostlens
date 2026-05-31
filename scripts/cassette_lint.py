@@ -3,8 +3,11 @@
 
 Two modes, mutually exclusive:
 
-1. Scan (default): walk every ``tests/fixtures/cassettes/*.jsonl`` file,
-   validate each record's ``response`` field against ``MessageResponse``,
+1. Scan (default): walk every committed cassette — the flat
+   ``tests/fixtures/cassettes/*.jsonl`` files AND the migrated incident
+   cassettes under ``src/hostlens/demo/scenarios/**/cassette.jsonl`` (now public
+   wheel content, so the secret-scan matters more, not less). Each record's
+   ``response`` field is validated against ``MessageResponse``,
    and reject any line whose raw string matches an extended set of
    sensitive-data patterns (Anthropic / generic ``sk-`` keys, Bearer
    tokens, JWTs, ``password=`` / ``api_key=`` assignments, absolute home
@@ -46,6 +49,10 @@ from hostlens.core.redact import detect_sensitive_text, redact_text
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CASSETTE_DIR = REPO_ROOT / "tests" / "fixtures" / "cassettes"
+# The migrated incident cassettes live under the demo package as
+# ``<key>/cassette.jsonl`` (design D2). Default scan covers this scoped subtree
+# in addition to the flat fixtures dir — NOT a blind repo-root walk.
+DEFAULT_DEMO_SCENARIOS_DIR = REPO_ROOT / "src" / "hostlens" / "demo" / "scenarios"
 
 
 class LintError(Exception):
@@ -63,11 +70,30 @@ class LintError(Exception):
 
 
 def iter_cassette_files(directory: Path) -> Iterator[Path]:
-    """Yield every ``*.jsonl`` file under ``directory`` in sorted order."""
+    """Yield every ``*.jsonl`` file directly under ``directory`` in sorted order."""
 
     if not directory.is_dir():
         return
     yield from sorted(directory.glob("*.jsonl"))
+
+
+def iter_default_cassette_files() -> Iterator[Path]:
+    """Yield every committed cassette the default (no-arg) scan must cover.
+
+    Two scoped roots, deduplicated and globally sorted: the flat
+    ``tests/fixtures/cassettes/*.jsonl`` and the migrated incident cassettes at
+    ``src/hostlens/demo/scenarios/**/cassette.jsonl``. This is the set CI runs
+    with no args — keeping the migrated incident cassettes inside the secret
+    gate. It is NOT a blind repo-root walk.
+    """
+
+    seen: set[Path] = set()
+    for path in iter_cassette_files(DEFAULT_CASSETTE_DIR):
+        seen.add(path)
+    if DEFAULT_DEMO_SCENARIOS_DIR.is_dir():
+        for path in DEFAULT_DEMO_SCENARIOS_DIR.glob("*/cassette.jsonl"):
+            seen.add(path)
+    yield from sorted(seen)
 
 
 def scan_line_for_sensitive_substrings(line: str) -> str | None:
@@ -239,8 +265,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cassette-dir",
         type=Path,
-        default=DEFAULT_CASSETTE_DIR,
-        help="Directory containing *.jsonl cassette files.",
+        default=None,
+        help=(
+            "Scan only this directory's flat *.jsonl files. Omit to scan the "
+            "default committed set (tests/fixtures/cassettes + "
+            "src/hostlens/demo/scenarios/**/cassette.jsonl)."
+        ),
     )
     parser.add_argument(
         "--check-schema-drift",
@@ -262,8 +292,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_argument_parser()
     args = parser.parse_args(argv)
 
-    cassette_dir: Path = args.cassette_dir
-    files = list(iter_cassette_files(cassette_dir))
+    cassette_dir: Path | None = args.cassette_dir
+    if cassette_dir is None:
+        files = list(iter_default_cassette_files())
+    else:
+        files = list(iter_cassette_files(cassette_dir))
 
     if args.check_schema_drift:
         if args.current_tools_hash is None:
