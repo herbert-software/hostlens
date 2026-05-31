@@ -11,6 +11,12 @@ dist/
 .eggs/
 pip-wheel-metadata/
 
+# uv lockfile — not committed: this is a pip-installable library (deps
+# constrained via pyproject ranges), CI uses pip, and there is no [tool.uv]
+# adoption. Remove this entry if the project deliberately standardizes on uv
+# (CI → uv sync + [tool.uv] + docs).
+uv.lock
+
 # Virtual environments
 .venv/
 venv/
