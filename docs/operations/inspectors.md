@@ -274,3 +274,78 @@ AcceptEnv HOSTLENS_*
 
 **永远不要**把 secret 拼进命令字符串（`export PGPASSWORD=value; psql ...`），
 那样 secret 会进入远端 `ps` 输出与 shell history。
+
+## `collect.sampling_window` 时窗采集
+
+适合「过去 N 分钟的错误数」这类需要时间窗口的采集（如 `log.tail.error_burst`）。
+
+```yaml
+collect:
+  command: |
+    count=$(journalctl --since "{{ window_start }}" --until "{{ window_end }}" -p err --no-pager -q 2>/dev/null | wc -l)
+    printf 'error_count=%s\nwindow_seconds=%s\n' "$count" "{{ window_seconds }}"
+  sampling_window:
+    duration_seconds: 300
+```
+
+声明 `sampling_window` 后，runner 基于**可注入时钟**计算并注入三个变量到
+**命令渲染上下文**与 **Finding DSL 求值上下文**：
+
+| 变量 | 类型 | 含义 |
+|---|---|---|
+| `window_start` | str | `now - duration_seconds`，`YYYY-MM-DD HH:MM:SS`（UTC） |
+| `window_end` | str | `now`，同格式 |
+| `window_seconds` | int | 等于 `duration_seconds` |
+
+约定与注意：
+
+- 时间格式刻意用 `YYYY-MM-DD HH:MM:SS`（UTC）而非带 `T`/时区偏移的 ISO 形式 ——
+  journalctl `--since/--until` 对前者解析稳定。命令统一假定 Linux 目标。
+- `window_start` / `window_end` / `window_seconds` 是**保留注入变量名**：manifest
+  的 `parameters` 若声明同名字段，loader 拒绝加载。
+- 省略 `sampling_window` 时三个变量都不注入，行为与既有 Inspector 完全一致。
+- runner 的时钟可注入（默认真实 UTC）；测试 / 回放注入固定时钟，使渲染命令逐字节
+  稳定 —— 这是 `ReplayTarget` 能精确匹配窗口命令的前提。
+
+## 离线回放：ReplayTarget
+
+`ReplayTarget` 是执行层的回放目标（LLM 层 `PlaybackBackend` 的对称物），按渲染后的
+命令字符串匹配 fixture 中预录的 `ExecResult`，让 Inspector 在 CI 上无需真实故障主机
+即可走完整 `target → collect → parse → findings` 路径。
+
+`targets.yaml` 用 `type: replay` 接入：
+
+```yaml
+version: "1"
+targets:
+  - name: incident-host
+    type: replay
+    fixture: ./tests/fixtures/incident_pack/cpu_saturation.json
+```
+
+fixture JSON 结构：
+
+```json
+{
+  "impersonate": "local",
+  "capabilities": ["shell"],
+  "commands": [
+    {"cmd": "command -v ps", "stdout": "/usr/bin/ps\n", "exit_code": 0},
+    {"cmd": "<完整渲染后的主命令>", "stdout": "<故障态输出>", "exit_code": 0}
+  ],
+  "files": {}
+}
+```
+
+要点：
+
+- `impersonate`（`local`/`ssh`，默认 `local`）决定运行时 `.type`，使 runner preflight
+  的 `target.type in manifest.targets` 透明通过 —— 不新增 target 枚举。
+- `commands[]` **必须**预录全部 preflight 探测命令（`command -v <binary>`）与渲染后的
+  主命令；命令按「逐行 rstrip 后 SHA256」匹配。
+- 未命中即抛 `ReplayMiss`（继承 `HostlensError` 而非 `TargetError`），并记入
+  `target.misses` —— 绝不回落真实 shell。
+- 只读，无写路径，不受 EUID==0 写约束。
+
+incident-pack 的 8 个场景就用「ReplayTarget fixture + PlaybackBackend cassette + 冻结
+时钟」做离线确定性回放，详见 [tests/incidents/README.md](../../tests/incidents/README.md)。

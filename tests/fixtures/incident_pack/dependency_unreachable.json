@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v nc",
+      "stdout": "/usr/bin/nc\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "printf '{\"results\":['\nsep=\"\"\nfor ep in database:5432 cache:6379; do\n  host=${ep%%:*}; port=${ep##*:}\n  if nc -z -w 3 \"$host\" \"$port\" 2>/dev/null; then\n    reachable=true\n  else\n    reachable=false\n  fi\n  printf '%s{\"endpoint\":\"%s\",\"reachable\":%s}' \"$sep\" \"$ep\" \"$reachable\"\n  sep=\",\"\ndone\nprintf ']}'",
+      "stdout": "{\"results\":[{\"endpoint\":\"database:5432\",\"reachable\":false},{\"endpoint\":\"cache:6379\",\"reachable\":true}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

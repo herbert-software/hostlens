@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v openssl",
+      "stdout": "/usr/bin/openssl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "printf '{\"results\":['\nsep=\"\"\nfor ep in payments:443; do\n  host=${ep%%:*}\n  end=$(echo | openssl s_client -servername \"$host\" -connect \"$ep\" 2>/dev/null \\\n        | openssl x509 -noout -enddate | cut -d= -f2)\n  days=$(( ( $(date -u -d \"$end\" +%s) - $(date -u +%s) ) / 86400 ))\n  printf '%s{\"endpoint\":\"%s\",\"days_until_expiry\":%d}' \"$sep\" \"$ep\" \"$days\"\n  sep=\",\"\ndone\nprintf ']}'",
+      "stdout": "{\"results\":[{\"endpoint\":\"payments:443\",\"days_until_expiry\":3}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

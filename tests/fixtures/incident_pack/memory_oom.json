@@ -1,0 +1,37 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2}\n     END{printf \"mem_total_kb=%d\\nmem_avail_kb=%d\\navail_pct=%.1f\\n\", t, a, (t>0 ? a/t*100 : 0)}' /proc/meminfo",
+      "stdout": "mem_total_kb=16384000\nmem_avail_kb=327680\navail_pct=2.0\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v dmesg",
+      "stdout": "/usr/bin/dmesg\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "dmesg 2>/dev/null | awk '\n  /Out of memory: Killed process/ || /invoked oom-killer/ {\n    line=$0; gsub(/\"/, \"\\\\\\\"\", line);\n    printf \"%s{\\\"event\\\":\\\"%s\\\"}\", (n++ ? \",\" : \"\"), line\n  }\n  END { } ' > /tmp/.hostlens_oom_$$ || true\nprintf '{\"oom_events\":['\ncat /tmp/.hostlens_oom_$$ 2>/dev/null || true\nprintf ']}'\nrm -f /tmp/.hostlens_oom_$$",
+      "stdout": "{\"oom_events\":[{\"event\":\"Out of memory: Killed process 4242 (mysqld)\"}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

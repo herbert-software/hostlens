@@ -1,0 +1,37 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v df",
+      "stdout": "/usr/bin/df\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v tr",
+      "stdout": "/usr/bin/tr\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "df -P -x tmpfs -x devtmpfs --output=source,pcent,target 2>/dev/null \\\n  | tail -n +2 | tr -d '%'",
+      "stdout": "/dev/sda1 98 /\n/dev/sdb1 88 /var\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "df -P -i -x tmpfs -x devtmpfs --output=source,ipcent,target 2>/dev/null \\\n  | tail -n +2 | tr -d '%'",
+      "stdout": "/dev/sda1 96 /\n/dev/sdb1 40 /var\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

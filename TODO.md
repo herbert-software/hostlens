@@ -256,19 +256,19 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
   - [x] `hostlens inspect <target> --intent "<自然语言>"`
   - [x] 实时流式输出 Agent 思考与工具调用（Rich live display）
   - [x] 输出最终报告
-- [ ] **2.8 最小可用 Incident Pack（M2 收尾前必须能诊断这 8 个真实场景）**
+- [x] **2.8 最小可用 Incident Pack（M2 收尾前必须能诊断这 8 个真实场景）** —— OpenSpec change `add-incident-pack`（11 Inspector + ReplayTarget + 双回放层 snapshot 测试）
 
   > **目标**：M2 结束时不仅能跑通"Agent 能调 Inspector"的管线，还能针对真实运维场景输出有用诊断。架构再漂亮，"你能诊断的第一个真实故障"才是用户和面试官判断这个项目的标尺。
 
-  - [ ] CPU 饱和：`linux.cpu.top_processes` + `linux.system.load_avg`
-  - [ ] 内存压力 / OOM：`linux.memory.pressure` + `linux.kernel.oom_killer`
-  - [ ] 磁盘满 / inode 耗尽：`linux.disk.usage` + `linux.fs.inode_pressure`
-  - [ ] systemd 失败单元：`linux.systemd.failed_units`
-  - [ ] 最近错误突增：`log.tail.error_burst`（通用 tail 探针）
-  - [ ] 文件描述符耗尽：`linux.process.fd_usage`
-  - [ ] 依赖服务连通性：`net.dependency.tcp_check`（按配置探测下游 host:port）
-  - [ ] TLS 证书过期：`net.tls.cert_expiry`（按 SNI 列表探测）
-  - [ ] 验收：每个场景有 fixture cassette + snapshot 测试 + 能离线 demo（参见 2.9）
+  - [x] CPU 饱和：`linux.cpu.top_processes` + `linux.system.load_avg`
+  - [x] 内存压力 / OOM：`linux.memory.pressure` + `linux.kernel.oom_killer`
+  - [x] 磁盘满 / inode 耗尽：`linux.disk.usage` + `linux.fs.inode_pressure`
+  - [x] systemd 失败单元：`linux.systemd.failed_units`
+  - [x] 最近错误突增：`log.tail.error_burst`（通用 tail 探针）
+  - [x] 文件描述符耗尽：`linux.process.fd_usage`
+  - [x] 依赖服务连通性：`net.dependency.tcp_check`（按配置探测下游 host:port）
+  - [x] TLS 证书过期：`net.tls.cert_expiry`（按 SNI 列表探测）
+  - [x] 验收：每个场景有 ReplayTarget fixture + cassette + snapshot 测试，离线确定性回放（`tests/incidents/`）；面向人类的 `hostlens demo` CLI 留给 M2.9 `add-demo-cli`（2.9）
 
 - [ ] **2.9 Demo 路径（5 分钟内本地 reproduce 出报告）**
   - [ ] `examples/local-cpu-spike/`：本地可复现的 CPU 飙高场景（stress-ng 或 yes >/dev/null）

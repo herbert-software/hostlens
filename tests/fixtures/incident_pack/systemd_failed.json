@@ -1,0 +1,31 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell",
+    "systemd"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v systemctl",
+      "stdout": "/usr/bin/systemctl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "systemctl list-units --type=service --state=failed --no-legend --plain 2>/dev/null \\\n  | awk '{ unit=$1; if (unit != \"\") { printf \"%s{\\\"unit\\\":\\\"%s\\\"}\", (n++ ? \",\" : \"\"), unit } }' \\\n  > /tmp/.hostlens_failed_$$ || true\nprintf '{\"failed\":['\ncat /tmp/.hostlens_failed_$$ 2>/dev/null || true\nprintf ']}'\nrm -f /tmp/.hostlens_failed_$$",
+      "stdout": "{\"failed\":[{\"unit\":\"nginx.service\"},{\"unit\":\"mysql.service\"}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

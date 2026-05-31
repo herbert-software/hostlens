@@ -1,0 +1,44 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v ps",
+      "stdout": "/usr/bin/ps\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "ps -eo pid,pcpu,pmem,comm --sort=-pcpu --no-headers | head -n 10",
+      "stdout": "4242 97.5 12.3 mysqld\n4310 64.2 3.1 python3\n1180 12.0 1.0 nginx\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v nproc",
+      "stdout": "/usr/bin/nproc\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "read -r l1 l5 l15 _ < /proc/loadavg\nprintf 'load1=%s\\nload5=%s\\nload15=%s\\nncpu=%s\\n' \"$l1\" \"$l5\" \"$l15\" \"$(nproc)\"",
+      "stdout": "load1=16.40\nload5=12.10\nload15=8.00\nncpu=4\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

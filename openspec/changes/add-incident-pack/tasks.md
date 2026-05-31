@@ -34,17 +34,20 @@
 
 ## 4. 双回放层 fixtures / cassettes / snapshot 测试
 
-> 每场景：ReplayTarget fixture（人造故障数据，注释标来源）+ LLM cassette（`HOSTLENS_LLM_MODE=record` 录）+ snapshot 基线 + 测试。
+> 每场景：ReplayTarget fixture（人造故障数据）+ LLM cassette（生成器确定性录制）+ snapshot 基线 + 测试。
+> **实现期路径调整**（对齐既有布局）：cassette 落 `tests/fixtures/cassettes/incident_<scenario>.jsonl`（复用 conftest `llm_cassette` fixture + `cassette_lint`），非 `tests/cassettes/`。
 
-- [ ] 4.1 `tests/fixtures/incident_pack/<scenario>.json` ×8：构造各场景"故障态"命令输出（CPU 95% / OOM 事件 / 磁盘 98% / inode 满 / failed unit / 错误突增计数 / FD 接近上限 / 依赖不可达 / 证书 3 天到期）；**每个 fixture 必须含 `impersonate` + `capabilities`（systemd 场景含 `"systemd"`、几乎都含 `"shell"`）+ 预录全部 preflight 探测命令（`command -v <binary>` 等）+ 主命令**；故障数据字节稳定（无真实 hostname/IP/时间戳）
-- [ ] 4.2 `tests/cassettes/incident_<scenario>.jsonl` ×8：各场景意图录制 Planner cassette（复用 M2.6 基建）
-- [ ] 4.3 测试内确定性投影 helper + `tests/incidents/snapshots/<scenario>.md` ×8：helper 渲染 `final_text` + `PlannerResult.findings` 取真实字段 `(severity, message, tags)` 按 `(severity_rank, message)` 稳定排序投影（`severity_rank={critical:0,warning:1,info:2}`，**不引用不存在的 `inspector_name`/`title`**），**排除 duration_s / Rich 装饰 / run_id / 时间戳**；冻结时钟下生成基线
-- [ ] 4.4 `tests/incidents/test_<scenario>.py` ×8：`ReplayTarget` + `PlaybackBackend` + 冻结时钟驱动 `--intent` 管线 → 断言确定性投影逐字节等于 snapshot；断言 `target.misses == []`（strict-consumption）；断言 Agent tool_use 序列含该场景核心 Inspector + 报告含对应 severity finding。**不**比对 `render_planner_result` Rich 输出
-- [ ] 4.5 漂移测试：改某 Inspector 命令不重录 fixture → 经完整管线后 `target.misses != []`，对 `target.misses == []` 的断言失败（验证 strict-consumption 响亮失败；不依赖 ReplayMiss 异常冒泡，因 loop.py 会吞）；另在单元层断言 `ReplayTarget.exec(<未录命令>)` 直接抛 `ReplayMiss`
+- [x] 4.0a 生产接线（Option C，Codex 评审，见 design D5）：`tools/default_tools.py` 抽出 `build_run_inspector_spec(handler)`；`run_inspector_handler` 加可选 `clock`；`register_default_tools(registry, *, clock=None)` 传入时注册 clock-bound `run_inspector`。`ToolContext` 六字段不变。
+- [x] 4.0b 生产接线（Option E，Codex 评审，见 design D6）：`inspectors/runner.py` 的 `_coerce_parameters` 对 array/object 声明的 string 值 `json.loads`，失败留原值由 jsonschema 拒。`dict[str,str]` tool schema 不变。
+- [x] 4.1 `tests/fixtures/incident_pack/<scenario>.json` ×8：生成器经 `_CaptureTarget` 跑真实 Inspector 捕获 preflight 探测 + 渲染主命令（不手算命令串）；含 `impersonate` + `capabilities` + 故障态 stdout；字节稳定（无 IP/FQDN/home 路径，端点用单标签服务名）
+- [x] 4.2 `tests/fixtures/cassettes/incident_<scenario>.jsonl` ×8：生成器以 `RecordingBackend(inner=FakeBackend(手写 responses))` 跑真实 Planner 管线确定性录制（零 API key），request 与回放字节一致；过 `cassette_lint` secret-scan
+- [x] 4.3 确定性投影 helper（`_harness.project_planner_result`）+ `tests/incidents/snapshots/<scenario>.md` ×8：渲染 `narrative` + `PlannerResult.findings` 取 `(severity, message, tags)` 按 `(severity_rank, message)` 排序，排除 duration/Rich/run_id/时间戳；冻结时钟下生成
+- [x] 4.4 `tests/incidents/test_<scenario>.py` ×8：`ReplayTarget` + `PlaybackBackend` + 冻结时钟驱动 `--intent` 管线 → 投影逐字节等于 snapshot + `target.misses == []` + tool_use 序列含核心 Inspector + 报告含对应 severity finding（不比对 Rich 输出）
+- [x] 4.5 漂移测试（`tests/incidents/test_drift.py`）：drifted fixture（删一条主命令）经完整管线后 `target.misses != []`（strict-consumption，不依赖 ReplayMiss 冒泡）；单元层断言 `ReplayTarget.exec(<未录命令>)` 直抛 `ReplayMiss` 并记入 `misses`
 
 ## 5. 文档与校验
 
-- [ ] 5.1 `tests/cassettes/README.md` / `tests/incidents/README.md`：写清「双回放层」与 cassette + ReplayTarget fixture 的重录步骤
-- [ ] 5.2 `docs/operations/inspectors.md`：补 `collect.sampling_window` 字段说明 + ReplayTarget 用法
-- [ ] 5.3 勾掉 `TODO.md` M2.8 的 8 个场景 checkbox
-- [ ] 5.4 `openspec-cn validate add-incident-pack`（positional，非 `--change`）通过；`mypy --strict` + `ruff` + `pytest -m 'not live'` 全绿
+- [x] 5.1 `tests/incidents/README.md`（双回放层 + 生成器重录步骤）+ `tests/fixtures/cassettes/README.md` 补 `incident_*` 由生成器产出的指针（cassette 实际落 `tests/fixtures/cassettes/`）
+- [x] 5.2 `docs/operations/inspectors.md`：补 `collect.sampling_window` 字段说明 + ReplayTarget 用法
+- [x] 5.3 勾掉 `TODO.md` M2.8 的 8 个场景 checkbox
+- [x] 5.4 `openspec-cn validate add-incident-pack`（positional）通过；`mypy --strict` + `ruff` + `pytest -m 'not live'` 全绿

@@ -114,7 +114,7 @@ findings:
 - **命令漂移（fixture 没重录）**：`ReplayTarget.exec` 抛 `ReplayMiss`（继承 `HostlensError`，语义=infra 错误）。但 runner（`except TargetError`）与 `ToolsAdapter.dispatch`（blanket `except Exception`）两层都会吞它，所以管线里 ReplayMiss **不冒泡成测试红**，drift 表现为模型多走一轮 → `CassetteMiss`。**响亮失败的主保障是 strict-consumption**：`ReplayTarget` 记录每次 miss 到 `self.misses`，snapshot 测试断言 `target.misses == []` —— 无论异常被哪层吞，drift 都让该断言红。降级：绝不回落真实 shell。
 - **报告含非确定字段**：snapshot 比对**确定性投影**（`final_text` + findings 排序投影，排除 duration/Rich/run_id/时间戳），不比对 `render_planner_result` 的 Rich 终端输出（其面板含 `duration_s` + Rich 宽度相关换行）。降级：若实施者误比对 Rich/markdown 输出 → snapshot flaky，design D4 已显式禁止并规定确定性 helper。
 - **跨平台 `date` 不可移植**：TLS 的 `date -d`（GNU）与 `error_burst` 的 journalctl 时间格式在 macOS/BSD 不成立，开发者本机录制会失败。降级：fixture 录制与真机运行假定 Linux 目标（与 Inspector `targets:[local,ssh]` + Linux 故障域一致）；design Risks 已承认，命令用 `date -u` 并标注 Linux-only。
-- **CassetteMiss（LLM 漂移）**：Planner prompt / tools schema 变更 → `CassetteMiss`。降级：测试红 + M2.6 `--current-tools-hash` lint 提前预警，绝不回落真实 API。
+- **CassetteMiss（LLM 漂移）**：model 名 / `messages`（intent、tool_use 输入、tool_result）/ `tools_count` 变更 → `CassetteMiss`（绝不回落真实 API）。**注意**：request key **不含** `system` 与 tools schema 内容（design `add-llm-cassette-testing` D-6），故 Planner system prompt 改写、向后兼容的 tools schema-content 漂移（`tools_count` 不变）**不**触发 `CassetteMiss` —— 后者需 `cassette_lint.py --check-schema-drift --current-tools-hash`（opt-in + 仅告警；CI 默认模式不跑该 flag）检出或靠重录纪律。
 - **冻结时钟缺失**：含 `sampling_window` 的 Inspector 在测试中未注入固定时钟 → 渲染命令含漂移时间戳 → `ReplayMiss`。降级：测试红（暴露缺陷），不静默通过。
 - **table parse 列漂移**：`ps`/`df` 因 locale/内核差异列错位。降级：command 用固定 `-o`/`--output` 锁列序；解析失败 Inspector status=exception 而非崩整个 run。
 - **fixture 数据失真**：人造故障数据与真实分布偏差 → 报告判定与真机不符。降级：fixture 注释标注构造依据；M2.9/M6 接真机校正。

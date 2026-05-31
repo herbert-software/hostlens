@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v journalctl",
+      "stdout": "/usr/bin/journalctl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v wc",
+      "stdout": "/usr/bin/wc\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "count=$(journalctl --since \"2026-01-02 11:55:00\" --until \"2026-01-02 12:00:00\" -p err --no-pager -q 2>/dev/null | wc -l)\nprintf 'error_count=%s\\nwindow_seconds=%s\\n' \"$count\" \"300\"",
+      "stdout": "error_count=247\nwindow_seconds=300\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

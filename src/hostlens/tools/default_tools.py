@@ -17,6 +17,7 @@ non-idempotent: a duplicate call on the same registry raises
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -24,7 +25,7 @@ from pydantic import BaseModel
 from hostlens.core.exceptions import InspectorError, ToolError
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.targets.base import Capability
-from hostlens.tools.base import ToolContext
+from hostlens.tools.base import ToolContext, ToolSpec
 from hostlens.tools.decorators import tool
 from hostlens.tools.registry import ToolRegistry
 from hostlens.tools.schemas.list_inspectors import (
@@ -57,8 +58,19 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-async def run_inspector_handler(args: RunInspectorInput, ctx: ToolContext) -> RunInspectorOutput:
+async def run_inspector_handler(
+    args: RunInspectorInput,
+    ctx: ToolContext,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> RunInspectorOutput:
     """Dispatch one Inspector run against one target via `InspectorRunner`.
+
+    `clock` is normally `None` (production) → `InspectorRunner` uses its
+    real-UTC default. The test/replay assembly threads a frozen clock here via
+    `register_default_tools(clock=...)` (incident-pack Option C) so
+    `sampling_window` inspectors render byte-stable commands for ReplayTarget
+    matching; `ToolContext` stays at its locked six-field set (ADR-008).
 
     Caller-side programming errors (unknown target name / unknown inspector
     name) raise `ToolError` so the agent loop surfaces the misuse instead
@@ -105,11 +117,19 @@ async def run_inspector_handler(args: RunInspectorInput, ctx: ToolContext) -> Ru
         raise
 
     # ---- 3. Build runner + dispatch ---------------------------------- #
-    runner = InspectorRunner(
-        ctx.target_registry,
-        settings=ctx.config,
-        logger=ctx.logger,
-    )
+    if clock is None:
+        runner = InspectorRunner(
+            ctx.target_registry,
+            settings=ctx.config,
+            logger=ctx.logger,
+        )
+    else:
+        runner = InspectorRunner(
+            ctx.target_registry,
+            settings=ctx.config,
+            logger=ctx.logger,
+            clock=clock,
+        )
     result = await runner.run(
         manifest,
         target,
@@ -340,26 +360,37 @@ async def list_targets_handler(args: ListTargetsInput, ctx: ToolContext) -> List
 _BroadHandler = Callable[[BaseModel, Any], Awaitable[BaseModel]]
 
 
-run_inspector = tool(
-    name="run_inspector",
-    version="1.0.0",
-    input_schema=RunInspectorInput,
-    output_schema=RunInspectorOutput,
-    agent_description=(
-        "Run one inspector against one target and return the inspector's "
-        "findings. Use this after picking a target with `list_targets` and "
-        "an inspector with `list_inspectors`."
-    ),
-    mcp_description=(
-        "Run one read-only inspector against one target. Output may "
-        "contain process / port / connection metadata."
-    ),
-    cli_help=None,
-    surfaces={"agent"},
-    side_effects="read",
-    sensitive_output=True,
-    timeout=30.0,
-)(cast(_BroadHandler, run_inspector_handler))
+def build_run_inspector_spec(handler: _BroadHandler) -> ToolSpec:
+    """Build the `run_inspector` ToolSpec around `handler`.
+
+    Factored out so `register_default_tools(clock=...)` can register a
+    clock-bound handler closure (incident-pack Option C) that shares the exact
+    same policy metadata as the default module-level spec — only the handler's
+    clock injection varies, never the surface / side_effects / sensitivity.
+    """
+    return tool(
+        name="run_inspector",
+        version="1.0.0",
+        input_schema=RunInspectorInput,
+        output_schema=RunInspectorOutput,
+        agent_description=(
+            "Run one inspector against one target and return the inspector's "
+            "findings. Use this after picking a target with `list_targets` and "
+            "an inspector with `list_inspectors`."
+        ),
+        mcp_description=(
+            "Run one read-only inspector against one target. Output may "
+            "contain process / port / connection metadata."
+        ),
+        cli_help=None,
+        surfaces={"agent"},
+        side_effects="read",
+        sensitive_output=True,
+        timeout=30.0,
+    )(handler)
+
+
+run_inspector = build_run_inspector_spec(cast(_BroadHandler, run_inspector_handler))
 
 
 list_inspectors = tool(
@@ -413,14 +444,35 @@ list_targets = tool(
 # ---------------------------------------------------------------------------
 
 
-def register_default_tools(registry: ToolRegistry) -> None:
+def register_default_tools(
+    registry: ToolRegistry,
+    *,
+    clock: Callable[[], datetime] | None = None,
+) -> None:
     """Register the M2 first-batch ToolSpecs into `registry`.
 
     Non-idempotent: calling twice on the same registry raises
     `ToolError` because `ToolRegistry.register` rejects duplicate names.
     Callers that need a clean state must allocate a fresh
     `ToolRegistry()`.
+
+    `clock` is normally `None` (production) and the default module-level
+    `run_inspector` spec is registered. When a clock is supplied (incident-pack
+    Option C: the offline snapshot / replay assembly), a clock-bound
+    `run_inspector` spec is registered instead so `sampling_window` inspectors
+    render byte-stable commands under a frozen clock. The clock rides on this
+    assembly boundary, not on `ToolContext` — keeping the DI container at its
+    locked six-field set (ADR-008).
     """
-    registry.register(run_inspector)
+    if clock is None:
+        registry.register(run_inspector)
+    else:
+
+        async def _clock_bound_run_inspector(
+            args: RunInspectorInput, ctx: ToolContext
+        ) -> RunInspectorOutput:
+            return await run_inspector_handler(args, ctx, clock=clock)
+
+        registry.register(build_run_inspector_spec(cast(_BroadHandler, _clock_bound_run_inspector)))
     registry.register(list_inspectors)
     registry.register(list_targets)

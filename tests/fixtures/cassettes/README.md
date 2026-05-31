@@ -39,6 +39,16 @@ Any other value fails fast naming the legal set; record/live without
 `ANTHROPIC_API_KEY` calls `pytest.fail` rather than returning a backend
 that would only 401 on first call.
 
+## `incident_*.jsonl` — generated, not record-mode
+
+The incident-pack cassettes (`incident_<scenario>.jsonl`) are **not** produced
+by `HOSTLENS_LLM_MODE=record`. They are generated offline (no API key) by the
+incident generator, which drives the real Planner pipeline with a
+`RecordingBackend` wrapping a scripted `FakeBackend` over a `ReplayTarget`. To
+refresh them, see
+[tests/incidents/README.md](../../incidents/README.md). The file format and
+lint below apply to them identically.
+
 ## Recording flow (`HOSTLENS_LLM_MODE=record`)
 
 There is a real recorder (`tests/support/cassette_recording.py`

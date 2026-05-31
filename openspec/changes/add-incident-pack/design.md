@@ -9,7 +9,7 @@
 - Inspector schema（M1）已支持 `parameters`（带 pattern 防注入）/ `raw`·`table`·`json`·`kv` 四种 parse format / Finding DSL；**未**支持 `collect.sampling_window`、`hook.py`、`sql_result`。
 - 本提案只用 Planner Agent 出报告（无 Diagnostician 根因章节）。
 
-核心张力：要离线、确定性地证明「Agent 能诊断 8 个真实故障」，必须补齐**执行层回放**，与 LLM 层回放对称，形成「双回放层」。
+核心张力：要离线、确定性地证明「离线回放管线能复现 8 个真实故障场景的 findings」（model 轮次为脚本化回放，验证的是 Inspector + DSL 诊断与管线串联，**非**证明 Agent 自主决策），必须补齐**执行层回放**，与 LLM 层回放对称，形成「双回放层」。
 
 ## Goals / Non-Goals
 
@@ -99,13 +99,31 @@
 - **findings**：从 `PlannerResult.findings`（扁平 `list[Finding]`）取**真实字段** `(severity, message, tags)`，按 `(severity_rank, message)` **稳定排序**后渲染（`severity_rank = {critical:0, warning:1, info:2}` 显式映射 —— 因 `Severity(str, Enum)` 默认按字符串字面比较会得到反直觉的 `critical/info/warning` 字母序，事故报告按严重度降序更可读；映射后仍完全确定）。**注意**：`Finding` 模型只有 `severity`/`message`/`evidence`/`tags` —— **无 `title`、无 `inspector_name`**（condensation 时 `inspector_name` 在 `RunInspectorOutput` 顶层、不在每个 Finding 上，已被 `findings.extend(...)` 丢弃）；投影**不要**引用这两个不存在的字段。投影端这一次显式排序使 snapshot **不依赖** Inspector 内部 finding 顺序（= fixture stdout 行序）或管线收集顺序 —— 实施时**不要**在管线中途排序/重排，统一在投影 helper 里排。"哪个 Inspector 被调用"由 step 5 的 tool_use 序列断言单独覆盖，不靠 findings 投影
 - **token**（可选）：`loop_result.usage_totals.input_tokens` / `.output_tokens`（`LoopResult.usage_totals: LoopUsage`，字段名是 `input_tokens`/`output_tokens`，**非** `usage.tokens_in/out`；来自 cassette usage，确定）
 
-> 注：不依赖 Rich 输出 = 测得的是「Agent 诊断内容」而非「终端排版」，正是本提案要验证的东西。若未来想测 Rich 渲染本身，另起测试并固定 `Console(width=..., no_color=True, force_terminal=False)`。
+> 注：不依赖 Rich 输出 = 测得的是「回放出的报告内容（findings + 叙事）」而非「终端排版」，正是本提案要验证的东西。若未来想测 Rich 渲染本身，另起测试并固定 `Console(width=..., no_color=True, force_terminal=False)`。
 
 录制流程：用 M2.6 `HOSTLENS_LLM_MODE=record` + 真 key 录 cassette；ReplayTarget fixture 通过**跑一遍真实 Inspector 捕获其实际 exec 的全部命令**（preflight 探测 + 主命令）采集，避免人工漏录。**录制须在 Linux 目标上进行**（见 Risks 的 `date` 跨平台条）。
 
+### D5 — 冻结时钟经工具装配边界注入（实现期决策，Codex 评审）
+
+D2 要求 `sampling_window` 命令在回放下确定性，需把冻结时钟注入到 `InspectorRunner`。但 group 1 只给 `InspectorRunner.__init__` 加了 `clock` 参数，未接线到 Agent 路径：`run_inspector_handler` 在 tool dispatch 内部构造 runner，`ToolContext` 是 ADR-008 锁定的六字段集（禁止扩字段）。
+
+**决策**：给 `register_default_tools(registry, *, clock=None)` 加可选时钟参数；传入时注册一个 clock-bound 的 `run_inspector` ToolSpec（handler 闭包把时钟透传给 `InspectorRunner`），默认（`clock=None`）注册既有 module-level spec、行为不变。时钟经**工具装配边界**注入，`ToolContext` 字段集不变。
+
+**否决的替代**：(a) 给 `ToolContext` 加第 7 个 `clock` 字段 —— 动了 §4.10 锁定的六字段集 + 需 tool-registry-capability-layer spec delta（超出本提案声明的 affected specs）；(b) 测试内 monkeypatch runner 模块的 `datetime` —— 与本项目「时钟可注入而非 patch」纪律相悖，且 `datetime` 是不可变 C 类型、runner 用 `self._clock()` 而非模块级 `datetime.now`，patch 在 Agent 路径根本不生效。Option C 不碰锁定契约、留在 inspector-plugin-system scope，胜出。
+
+### D6 — Agent 表面数组参数经 JSON 编码字符串传入（实现期决策，Codex 评审）
+
+`net.dependency.tcp_check` / `net.tls.cert_expiry` 的 `endpoints` 是数组参数，但 Agent 表面 `RunInspectorInput.parameters` 是 M2-locked 的 `dict[str, str]` —— 数组值穿不过 `ToolsAdapter.dispatch` 的 `model_validate`，单字符串又被 runner 的 `jsonschema.validate`（`type: array`）拒，2/8 网络场景经 Agent 路径无法产出 finding。
+
+**决策**：在 runner 的 `_coerce_parameters` 增加分支 —— 对 manifest 声明为 `array`/`object` 的 string 值尝试 `json.loads`，成功且类型一致则采用，否则保留原值由 jsonschema 拒（与既有 int/float/bool coercion 同一 permissive-coerce-then-validate 不变式）。cassette 里手写的 model 响应将 `endpoints` 作为 JSON 编码字符串传入。`dict[str, str]` tool schema **不变**。
+
+**安全**：解码后 `jsonschema.validate` 仍按 `items.pattern`（`^[a-zA-Z0-9.-]+:[0-9]+$`）逐项校验，坏字符（`;` / `$()` 等）被拒；通过校验的端点经 `| sh`（`shlex.quote`）渲染。无任何路径让未校验值到达 `target.exec`（Codex 审计确认）。
+
+**否决的替代**：(a) 把 tool schema 改 `dict[str, Any]` —— 动 M2-locked 契约 + 需 tool-registry spec delta，超出 proposal「tool schema 无变更」承诺；(b) 网络场景延后只做 6 个 —— 削弱 M2.8「8 场景」退出条件。Option E 保留契约字面、留在 inspector-plugin-system scope，胜出。
+
 ## Risks / Trade-offs
 
-- **fixture / cassette drift**：Inspector 命令或 tools schema 变更需重录。响亮失败手段：(1) tools schema 变 → `CassetteMiss`（playback.py 硬 raise，无 fallback）；(2) 命令变 → `target.misses != []` strict-consumption 断言失败（**不**靠 `ReplayMiss` 冒泡，它在管线里被 tools_adapter 吞，见 D1）。缓解：README 写清重录步骤；CI 用 M2.6 的 `--current-tools-hash` lint 提前抓 schema 漂移。
+- **fixture / cassette drift**：Inspector 命令或 tools schema 变更需重录。响亮失败手段：(1) 命令变 → ReplayTarget miss → tool_result 偏移 → 下一轮 `CassetteMiss`，且 `target.misses != []` strict-consumption 断言红（**不**靠 `ReplayMiss` 冒泡，它在管线里被 tools_adapter 吞，见 D1）；(2) tools 数量变（增删工具）或 schema 改动使已录 tool_use 输入失效（dispatch `model_validate` 报错 → is_error tool_result → message 偏移）→ `CassetteMiss`。**重要纠正**：request key 只 hash `{model, messages, tools_count}`（**排除** `system` 与 tools schema 内容，design `add-llm-cassette-testing` D-6），故 (a) Planner system prompt 改写、(b) **向后兼容的 tools schema-content 漂移**（如改 description / 加可选字段，`tools_count` 不变且不使已录输入失效）**都不会**触发 `CassetteMiss`。后者只能由 `cassette_lint.py --check-schema-drift --current-tools-hash <hex>` 检出，而该检查是 **opt-in 且仅告警**（返回 0）；**CI 当前只跑默认模式**（secret-scan + MessageResponse schema + 重复键），不传 drift flag。缓解：README 写清重录步骤；tools schema 变更后靠重录纪律或手动跑 drift lint（CI 不强制）。
 - **ReplayTarget 精确匹配脆弱**：命令含未冻结的易变 token（时间戳）会 miss。缓解：D2 冻结时钟；manifest 命令尽量单行、派生值在 command 内算定。
 - **场景数据真实性**：canned 输出是人造的，可能与真实分布有偏差。缓解：fixture 注释标注数据来源/构造依据；M2.9/M6 接真机时校正。
 - **table parse 的列健壮性**：`ps`/`df` 列因 locale/内核版本有差异。缓解：command 用固定 `-o`/`--output` 字段列表锁定列序，不依赖默认格式。

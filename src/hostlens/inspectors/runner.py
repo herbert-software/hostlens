@@ -909,8 +909,12 @@ def _coerce_parameters(params: dict[str, Any], schema: dict[str, Any]) -> dict[s
     string in place; validation rejects the integer field; the runner surfaces
     ``parameter_validation_failed`` and never reaches ``target.exec``.
 
-    Returns a new dict; never mutates the input. One-level walk over ``properties``;
-    arrays / nested objects are not coerced (out of M1 scope).
+    Returns a new dict; never mutates the input. One-level walk over ``properties``.
+    String values whose manifest-declared type is ``array`` / ``object`` are
+    JSON-decoded (the Agent surface ``RunInspectorInput.parameters`` is locked to
+    ``dict[str, str]``, so a structured parameter can only arrive as a JSON-encoded
+    string); a non-JSON string or a decoded value that does not match the declared
+    container type is left untouched for ``jsonschema.validate`` to reject.
     """
 
     coerced = dict(params)
@@ -939,7 +943,24 @@ def _coerce_parameters(params: dict[str, Any], schema: dict[str, Any]) -> dict[s
             elif value in ("false", "0"):
                 coerced[prop_name] = False
             # else: leave as-is; jsonschema rejects.
-        # string / array / object / null: no coercion.
+        elif declared_type in ("array", "object"):
+            # The Agent passes structured parameters as a JSON-encoded string
+            # (``parameters`` is ``dict[str, str]``). Decode it so a manifest
+            # declaring e.g. ``endpoints: {type: array}`` is reachable from the
+            # Agent surface. Adopt the decoded value ONLY when it matches the
+            # declared container type; a non-JSON string or a type mismatch is
+            # left untouched so ``jsonschema.validate`` below rejects it — the
+            # same permissive-coerce-then-validate invariant as the scalar
+            # branches. The per-item ``pattern`` + the ``| sh`` shellquote
+            # filter remain the injection defense; this branch never reaches
+            # ``target.exec`` with an unvalidated value.
+            with contextlib.suppress(json.JSONDecodeError, ValueError):
+                decoded = json.loads(value)
+                if (declared_type == "array" and isinstance(decoded, list)) or (
+                    declared_type == "object" and isinstance(decoded, dict)
+                ):
+                    coerced[prop_name] = decoded
+        # string / null: no coercion.
     return coerced
 
 
