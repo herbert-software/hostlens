@@ -59,7 +59,7 @@ from hostlens.inspectors.registry import InspectorRegistry, build_registry_from_
 from hostlens.inspectors.result import InspectorResult
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.inspectors.schema import CollectSpec, InspectorManifest
-from hostlens.reporting import render_json, render_markdown
+from hostlens.reporting import ReportStore, render_json, render_markdown
 from hostlens.reporting.models import Report
 from hostlens.targets.base import ExecutionTarget
 from hostlens.targets.config import load_targets_config
@@ -377,6 +377,31 @@ def _build_report(
         raise typer.Exit(code=3) from exc
 
 
+def _persist_report(report: Report) -> bool:
+    """Save ``report`` to the default ``ReportStore`` for ``--persist``.
+
+    Returns ``True`` when the report degraded to an orphan file (main store
+    unwritable) so the caller can raise a non-zero exit while still having
+    the report on disk; ``False`` on a clean insert. Writing the **local**
+    store is not a remote-state change, so no ``--yes`` / approval gate
+    applies (range note in the report-persistence spec).
+
+    The store path resolves ``$XDG_DATA_HOME/hostlens/reports.db`` (default
+    ``~/.local/share/hostlens/reports.db``) — the same knob ``hostlens
+    reports`` reads, so a persisted run is immediately listable.
+    """
+
+    result = asyncio.run(ReportStore().save(report))
+    if result.stored_as_orphan:
+        typer.echo(
+            f"warning: report store unavailable; wrote orphan file "
+            f"{result.orphan_path} (run_id={result.run_id})",
+            err=True,
+        )
+        return True
+    return False
+
+
 def _compute_exit_code(inspector_result: InspectorResult) -> int:
     """Map ``InspectorResult`` to the closed 4-value exit code set.
 
@@ -644,6 +669,15 @@ def inspect_cmd(
             "Default: respect manifest value."
         ),
     ),
+    persist: bool = typer.Option(
+        False,
+        "--persist",
+        help=(
+            "Persist the rendered Report to the local SQLite store so "
+            "`hostlens reports list/show/diff` can consume it. Only valid "
+            "with --inspector (the --intent Agent path produces no Report)."
+        ),
+    ),
 ) -> None:
     """Run one Inspector against one target and render a Report.
 
@@ -690,6 +724,17 @@ def inspect_cmd(
                     "hostlens inspect: --timeout has no effect with --intent; ignored",
                     err=True,
                 )
+            # --persist is an --inspector-only flag: the Agent path produces a
+            # PlannerResult (no Report), and fabricating a Report to persist is
+            # out of scope (add-diagnostician-agent). Reject as a usage error
+            # rather than silently dropping it.
+            if persist:
+                typer.echo(
+                    "hostlens inspect: --persist is not supported with --intent "
+                    "(Agent-path persistence is a future proposal)",
+                    err=True,
+                )
+                raise typer.Exit(code=3)
             _run_intent(target, intent, fmt, output)
             return
 
@@ -764,6 +809,30 @@ def inspect_cmd(
         # ---- 3. Build Report ------------------------------------------- #
         report = _build_report(target, inspector_result, started_at, finished_at)
 
+        # ---- 3b. Persist (opt-in, --inspector path only) --------------- #
+        # Save before rendering so the report is on disk even if a later
+        # render/emit step fails. A persist failure / orphan degradation
+        # escalates the exit code to 2 only when the inspector-derived code is
+        # 0 — a critical finding's exit 1 is preserved (see step 5) — and never
+        # drops the report.
+        persist_failed = False
+        orphaned = False
+        try:
+            orphaned = _persist_report(report) if persist else False
+        except Exception as exc:
+            # CLI boundary catch — same documented pattern as the inspector
+            # dispatch / intent paths. The store re-raises when both the SQLite
+            # db and the orphan dir are unwritable (`OSError`), surfaces a
+            # corrupt / programming `sqlite3.Error` it deliberately won't
+            # masquerade as an orphan (a damaged `reports.db` makes
+            # `PRAGMA journal_mode=WAL` raise `sqlite3.DatabaseError`), or any
+            # other failure. Translate all of them to a single stderr line so
+            # no Python traceback reaches the user; escalate to exit 2 below
+            # without clobbering a non-zero business code.
+            kind = type(exc).__name__
+            typer.echo(f"internal: failed to persist report: {kind}: {exc}", err=True)
+            persist_failed = True
+
         # ---- 4. Render + emit ------------------------------------------ #
         _maybe_warn_large_report(report)
         rendered = _render_report(report, fmt)
@@ -771,6 +840,8 @@ def inspect_cmd(
 
         # ---- 5. Exit ---------------------------------------------------- #
         exit_code = _compute_exit_code(inspector_result)
+        if (orphaned or persist_failed) and exit_code == 0:
+            exit_code = 2
         if exit_code != 0:
             raise typer.Exit(code=exit_code)
     finally:

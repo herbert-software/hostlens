@@ -107,7 +107,7 @@ def test_inspect_hello_echo_json_to_file_exit_0(
     """Demo step 5: ``--format json --output <tmp>``.
 
     Spec §场景:test_inspect_hello_echo_json_to_file_exit_0 通过. Asserts
-    the file exists, ``json.loads`` succeeds, ``schema_version == "1.0"``,
+    the file exists, ``json.loads`` succeeds, ``schema_version == "1.1"``,
     stdout is empty (no duplicate report leak), exit 0.
     """
 
@@ -130,7 +130,7 @@ def test_inspect_hello_echo_json_to_file_exit_0(
     assert stdout == ""
     assert out_path.exists()
     payload = json.loads(out_path.read_text())
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "1.1"
 
 
 def test_inspect_nonexistent_inspector_exit_3(

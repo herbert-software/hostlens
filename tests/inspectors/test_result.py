@@ -45,7 +45,28 @@ class TestFinding:
 
     def test_extra_field_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            Finding(severity="info", message="x", id="abc")  # type: ignore[call-arg]
+            Finding(severity="info", message="x", not_a_field="abc")  # type: ignore[call-arg]
+
+    def test_identity_fields_default_to_none(self) -> None:
+        # `id` / `inspector_name` / `inspector_version` are M3 add-only
+        # identity fields that default to None on direct M1/M2 construction;
+        # `Report.from_inspector_results` populates them on the flattened copies.
+        f = Finding(severity="info", message="x")
+        assert f.id is None
+        assert f.inspector_name is None
+        assert f.inspector_version is None
+
+    def test_identity_fields_accepted_when_set(self) -> None:
+        f = Finding(
+            severity="info",
+            message="x",
+            id="deadbeef",
+            inspector_name="linux.memory.pressure",
+            inspector_version="1.0.0",
+        )
+        assert f.id == "deadbeef"
+        assert f.inspector_name == "linux.memory.pressure"
+        assert f.inspector_version == "1.0.0"
 
     def test_instance_is_immutable(self) -> None:
         f = Finding(severity="info", message="x")

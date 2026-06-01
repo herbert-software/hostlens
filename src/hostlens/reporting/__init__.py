@@ -18,11 +18,15 @@ from __future__ import annotations
 from hostlens.reporting.models import Evidence, Finding, Report, Severity
 from hostlens.reporting.render_json import render as render_json
 from hostlens.reporting.render_markdown import render as render_markdown
+from hostlens.reporting.store import ReportStore, RunIndexRow, SaveResult
 
 __all__ = [
     "Evidence",
     "Finding",
     "Report",
+    "ReportStore",
+    "RunIndexRow",
+    "SaveResult",
     "Severity",
     "render_json",
     "render_markdown",

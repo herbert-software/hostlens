@@ -132,6 +132,23 @@ def _default_inspector_registry() -> InspectorRegistry:
     return build_registry_from_search_paths([], settings=Settings()).registry
 
 
+@pytest.fixture(autouse=True)
+def _isolate_structlog_config() -> Iterator[None]:
+    """Reset structlog's global config after every test.
+
+    CLI commands (and the tests that invoke them) call
+    `hostlens.core.logging.configure_logging`, which mutates structlog's
+    *global* configuration (processor chain + `wrapper_class`). Left in
+    place, that leaks into later tests and breaks
+    `structlog.testing.capture_logs`-based assertions (e.g.
+    `tests/inspectors/test_runner_log_redaction.py`) depending on suite
+    collection order. Resetting to defaults after each test makes
+    structlog-capturing tests order-independent.
+    """
+    yield
+    structlog.reset_defaults()
+
+
 @pytest.fixture
 def tool_registry() -> ToolRegistry:
     """A fresh `ToolRegistry` with the M2 default ToolSpec batch

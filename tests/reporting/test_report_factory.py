@@ -45,7 +45,14 @@ def test_flatten_findings_across_inspector_results() -> None:
         started_at=_t(),
         finished_at=_t(),
     )
+    # Content and order are preserved (no dedup / sort).
     assert [f.message for f in r.findings] == ["a", "b", "c"]
+    assert [f.severity for f in r.findings] == ["info", "warning", "critical"]
+    # The factory fills each flattened finding's identity fields from its
+    # source InspectorResult (inspector_name / inspector_version / id).
+    assert [f.inspector_name for f in r.findings] == ["a", "a", "b"]
+    assert {f.inspector_version for f in r.findings} == {"1.0.0"}
+    assert all(f.id is not None for f in r.findings)
 
 
 def test_flatten_does_not_deduplicate() -> None:
@@ -85,7 +92,7 @@ def test_report_id_is_unique_across_calls() -> None:
 def test_schema_version_locked() -> None:
     ir = _make_ir("a", [])
     r = Report.from_inspector_results("t", [ir], started_at=_t(), finished_at=_t())
-    assert r.schema_version == "1.0"
+    assert r.schema_version == "1.1"
 
 
 def test_empty_inspector_results_raises_value_error() -> None:

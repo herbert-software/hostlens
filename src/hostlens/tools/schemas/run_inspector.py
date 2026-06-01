@@ -10,7 +10,9 @@ import path while letting the underlying schema track the canonical
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 from hostlens.reporting.models import Finding
 
@@ -47,3 +49,19 @@ class RunInspectorOutput(BaseModel):
     target_name: str
     inspector_name: str
     findings: list[FindingSummary]
+
+    @field_serializer("findings")
+    def _serialize_findings(self, findings: list[Finding]) -> list[dict[str, Any]]:
+        # The M3 `add-report-persistence-and-diff` proposal added
+        # `id`/`inspector_name`/`inspector_version` to `Finding` (add-only). They
+        # belong to the persistence/diff layer, not the Agent's view of the world:
+        # the proposal's §对外契约 promises the agent-facing tool projection takes
+        # only the necessary fields and does NOT widen the Agent-visible surface.
+        # Excluding them here keeps the LLM-facing tool_result byte-for-byte
+        # identical to the M2 shape (severity/message/evidence/tags only), so the
+        # request-key hash over `messages` is unchanged and all existing
+        # incident/demo/planner replay cassettes still hit without re-recording.
+        return [
+            finding.model_dump(exclude={"id", "inspector_name", "inspector_version"})
+            for finding in findings
+        ]

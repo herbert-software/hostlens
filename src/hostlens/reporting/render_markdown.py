@@ -20,7 +20,13 @@ from io import StringIO
 from typing import TYPE_CHECKING
 
 from hostlens.reporting._redact import redact_report_for_render
-from hostlens.reporting.models import Evidence, Finding, Report, Severity
+from hostlens.reporting.models import (
+    Evidence,
+    Finding,
+    Report,
+    RootCauseHypothesis,
+    Severity,
+)
 
 if TYPE_CHECKING:
     from hostlens.inspectors.result import InspectorResult
@@ -158,6 +164,24 @@ def _render_findings(findings: list[Finding], buf: StringIO) -> None:
                 buf.write("</details>\n\n")
 
 
+def _render_hypotheses(hypotheses: list[RootCauseHypothesis], buf: StringIO) -> None:
+    """Render the root-cause section. Empty (M3: always) → placeholder."""
+    buf.write("## 根因假设\n\n")
+    if not hypotheses:
+        buf.write("_暂无根因假设_\n\n")
+        return
+    for h in hypotheses:
+        buf.write(f"### {h.description}\n\n")
+        buf.write(f"- **Confidence:** {h.confidence}\n")
+        if h.supporting_findings:
+            buf.write(f"- **Supporting findings:** {', '.join(h.supporting_findings)}\n")
+        if h.suggested_actions:
+            buf.write("- **Suggested actions:**\n")
+            for action in h.suggested_actions:
+                buf.write(f"  - {action}\n")
+        buf.write("\n")
+
+
 def _render_inspector_results(
     results: list[InspectorResult],
     buf: StringIO,
@@ -191,5 +215,6 @@ def render(report: Report) -> str:
     _render_meta_table(redacted, buf)
     _render_summary(redacted.findings, buf)
     _render_findings(redacted.findings, buf)
+    _render_hypotheses(redacted.hypotheses, buf)
     _render_inspector_results(redacted.inspector_results, buf)
     return buf.getvalue()

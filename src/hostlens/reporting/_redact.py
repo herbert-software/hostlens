@@ -23,7 +23,13 @@ from __future__ import annotations
 from typing import Any
 
 from hostlens.core.redact import is_sensitive_key, redact_text
-from hostlens.reporting.models import Evidence, Finding, Report
+from hostlens.reporting.models import (
+    Evidence,
+    Finding,
+    Report,
+    ReportMeta,
+    RootCauseHypothesis,
+)
 
 __all__ = ["redact_report_for_render"]
 
@@ -104,11 +110,20 @@ def _redact_finding(finding: Finding) -> Finding:
     # future redact rule mangled a tag string the redacted value would
     # violate the pattern constraint and `Finding(tags=...)` here would
     # raise ValidationError, breaking the renderer.
+    # `id` / `inspector_name` / `inspector_version` are passed through
+    # verbatim: `id` is a sha256 fingerprint and the inspector name /
+    # version are identifiers, none of which carry secrets. They must be
+    # threaded through this reconstruction or the redacted copy would
+    # silently drop the M3 identity fields (breaking diff and
+    # hypothesis-reference anchors downstream).
     return Finding(
         severity=finding.severity,
         message=redact_text(finding.message),
         evidence=[_redact_evidence(e) for e in finding.evidence],
         tags=list(finding.tags),
+        id=finding.id,
+        inspector_name=finding.inspector_name,
+        inspector_version=finding.inspector_version,
     )
 
 
@@ -134,12 +149,66 @@ def _redact_inspector_result(ir: Any) -> Any:
     )
 
 
+def _redact_meta(meta: ReportMeta) -> ReportMeta:
+    """Return a new `ReportMeta` with its free-text string fields redacted.
+
+    Top-level string fields that can carry user-supplied content
+    (`target_name` / `intent` / `target_id` / `schedule_name`) pass through
+    `redact_text`. Each `inspectors_used[].name` / `.version` is redacted for
+    parity with `inspector_results[].name` / `.version` (a no-op for normal
+    identifiers like `linux.cpu` / `1.0.0`; only fires on secret-pattern
+    names). Numeric / enum / nested-model fields (`status`, `token_usage`,
+    `duration_seconds`, `timestamp`, `baseline_ref`) are passed through
+    unchanged — they are machine values, not secret-bearing free text.
+    """
+    return meta.model_copy(
+        update={
+            "target_name": redact_text(meta.target_name),
+            "target_id": redact_text(meta.target_id),
+            "intent": redact_text(meta.intent) if meta.intent is not None else None,
+            "schedule_name": (
+                redact_text(meta.schedule_name) if meta.schedule_name is not None else None
+            ),
+            "inspectors_used": [
+                run.model_copy(
+                    update={
+                        "name": redact_text(run.name),
+                        "version": redact_text(run.version),
+                    }
+                )
+                for run in meta.inspectors_used
+            ],
+        }
+    )
+
+
+def _redact_hypothesis(hypothesis: RootCauseHypothesis) -> RootCauseHypothesis:
+    """Return a new `RootCauseHypothesis` with free-text strings redacted.
+
+    `description` and each entry of `suggested_actions` pass through
+    `redact_text`. `confidence` (enum) and `supporting_findings` (finding
+    `id` hashes) are passed through unchanged.
+    """
+    return hypothesis.model_copy(
+        update={
+            "description": redact_text(hypothesis.description),
+            "suggested_actions": [redact_text(a) for a in hypothesis.suggested_actions],
+        }
+    )
+
+
 def redact_report_for_render(report: Report) -> Report:
     """Return a redacted deep-copy of `report` suitable for rendering.
 
     The source `report` is not modified. The returned `Report` has the
     same `report_id` / `schema_version` / timestamps as the source, and
     redacted strings on every other path enumerated in the spec.
+
+    `meta` and `hypotheses` are threaded through (and their free-text
+    string fields redacted). The redacted copy **must** preserve `meta`
+    when the source carries one — otherwise `render_json` would drop it
+    and a round-trip through `ReportStore` would lose the report's run
+    metadata. `meta is None` (legacy schema-1.0) stays None.
     """
     return Report(
         report_id=report.report_id,
@@ -151,4 +220,6 @@ def redact_report_for_render(report: Report) -> Report:
         started_at=report.started_at,
         finished_at=report.finished_at,
         metadata={k: redact_text(v) for k, v in report.metadata.items()},
+        meta=_redact_meta(report.meta) if report.meta is not None else None,
+        hypotheses=[_redact_hypothesis(h) for h in report.hypotheses],
     )

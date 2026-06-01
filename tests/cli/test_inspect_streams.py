@@ -198,7 +198,7 @@ def test_inspect_output_flag_json_writes_file_and_stdout_silent(
     )
     assert exit_code == 0
     payload = json.loads(out_path.read_text())
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "1.1"
     assert stdout == ""
 
 

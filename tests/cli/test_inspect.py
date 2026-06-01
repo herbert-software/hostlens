@@ -496,7 +496,7 @@ def test_inspect_hello_echo_md_to_stdout_exit_0(
     assert exit_code == 0
     assert "# Hostlens Inspection Report" in stdout
     assert "schema_version" in stdout
-    assert "1.0" in stdout
+    assert "1.1" in stdout
 
 
 def test_inspect_hello_echo_json_to_file_exit_0(
@@ -530,7 +530,7 @@ def test_inspect_hello_echo_json_to_file_exit_0(
     assert exit_code == 0
     assert stdout == ""
     payload = json.loads(out_path.read_text())
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "1.1"
 
 
 def test_inspect_output_write_failure_exits_3(
