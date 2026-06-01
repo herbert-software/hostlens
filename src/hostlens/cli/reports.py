@@ -36,10 +36,12 @@ from typing import NoReturn
 
 import click
 import typer
+from pydantic import ValidationError
 
 import hostlens.inspectors.result  # noqa: F401  (triggers Report.model_rebuild)
 from hostlens.reporting import render_json, render_markdown
 from hostlens.reporting.diff import RegressionDiff, compute_diff
+from hostlens.reporting.models import Report
 from hostlens.reporting.store import ReportStore, RunIndexRow
 
 __all__ = ["reports_app"]
@@ -146,7 +148,10 @@ def show_cmd(
     Python traceback.
     """
 
-    report = asyncio.run(_store().get_run(run_id))
+    try:
+        report = asyncio.run(_store().get_run(run_id))
+    except ValidationError as exc:
+        _invalid_report(run_id, exc)
     if report is None:
         _run_not_found(run_id)
 
@@ -160,6 +165,43 @@ def _run_not_found(run_id: str) -> NoReturn:
         err=True,
     )
     raise typer.Exit(code=3)
+
+
+def _invalid_report(run_id: str, exc: Exception) -> NoReturn:
+    # A stored `report_json` blob that is damaged / manually edited / written by
+    # an incompatible schema makes `get_run`'s `Report.model_validate_json`
+    # raise `ValidationError`. Surface it as a single stderr line + exit 3 (the
+    # report is present but unusable), never a raw Python traceback. A pydantic
+    # `ValidationError`'s `str()` is multi-line, so only the type name is
+    # embedded — the full validation detail is not actionable for the user.
+    typer.echo(f"stored report is invalid or corrupt: {run_id} ({type(exc).__name__})", err=True)
+    raise typer.Exit(code=3)
+
+
+async def _load_report(store: ReportStore, run_id: str) -> Report:
+    """Load a persisted report, mapping a corrupt/invalid blob
+    (`ValidationError`) and a missing run to single stderr lines + exit 3 —
+    never a traceback. Shared by `reports show` / `diff` (explicit + auto).
+    """
+    try:
+        report = await store.get_run(run_id)
+    except ValidationError as exc:
+        _invalid_report(run_id, exc)
+    if report is None:
+        _run_not_found(run_id)
+    return report
+
+
+def _compute_diff_or_exit(baseline: Report, current: Report, *, force: bool) -> RegressionDiff:
+    """Run `compute_diff`, mapping its cross-target `ValueError` (rule 1 —
+    reachable in auto mode too via a corrupt index/blob `target_id` mismatch)
+    to a single stderr line + exit 3 instead of a traceback.
+    """
+    try:
+        return compute_diff(baseline, current, force=force)
+    except ValueError as exc:
+        typer.echo(f"hostlens reports diff: {exc}", err=True)
+        raise typer.Exit(code=3) from exc
 
 
 # --------------------------------------------------------------------------- #
@@ -227,21 +269,9 @@ def _usage_error(message: str) -> NoReturn:
 
 async def _diff_explicit(run_id_a: str, run_id_b: str, *, force: bool) -> None:
     store = _store()
-    baseline_report = await store.get_run(run_id_a)
-    if baseline_report is None:
-        _run_not_found(run_id_a)
-    current_report = await store.get_run(run_id_b)
-    if current_report is None:
-        _run_not_found(run_id_b)
-
-    try:
-        diff = compute_diff(baseline_report, current_report, force=force)
-    except ValueError as exc:
-        # Cross-target diff is rejected by `compute_diff` (report-regression-diff
-        # rule 1). Surface as a single stderr line + exit 3, never a traceback.
-        typer.echo(f"hostlens reports diff: {exc}", err=True)
-        raise typer.Exit(code=3) from exc
-    _render_diff(diff)
+    baseline_report = await _load_report(store, run_id_a)
+    current_report = await _load_report(store, run_id_b)
+    _render_diff(_compute_diff_or_exit(baseline_report, current_report, force=force))
 
 
 async def _diff_auto(target: str, *, force: bool) -> None:
@@ -251,23 +281,17 @@ async def _diff_auto(target: str, *, force: bool) -> None:
         typer.echo(f"无可比基线: {target} 无任何历史 run")
         return
 
-    current = await store.get_run(latest[0].run_id)
-    # The index row was just listed; a missing report here would be a store
-    # inconsistency, not a user-supplied not-found — surface as exit 3.
-    if current is None:
-        _run_not_found(latest[0].run_id)
+    # The index row was just listed; a missing/corrupt report here is a store
+    # inconsistency — `_load_report` surfaces both as exit 3, not a traceback.
+    current = await _load_report(store, latest[0].run_id)
 
     baseline_ref = await store.latest_ok_baseline(target, before_run_id=latest[0].run_id)
     if baseline_ref is None:
         typer.echo(f"无可比基线: {target} 在当前 run 之前没有 ok 基线")
         return
 
-    baseline_report = await store.get_run(baseline_ref.run_id)
-    if baseline_report is None:
-        _run_not_found(baseline_ref.run_id)
-
-    diff = compute_diff(baseline_report, current, force=force)
-    _render_diff(diff)
+    baseline_report = await _load_report(store, baseline_ref.run_id)
+    _render_diff(_compute_diff_or_exit(baseline_report, current, force=force))
 
 
 def _render_diff(diff: RegressionDiff) -> None:

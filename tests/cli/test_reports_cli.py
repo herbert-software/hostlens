@@ -170,6 +170,42 @@ def test_reports_show_unknown_run_exits_3(
     assert len(stderr.strip().splitlines()) == 1
 
 
+def test_reports_show_corrupt_blob_exits_3_no_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    xdg_home: Path,
+) -> None:
+    """A damaged / manually edited ``report_json`` row (run_id still present)
+    makes ``get_run``'s ``Report.model_validate_json`` raise ``ValidationError``.
+    ``reports show`` / ``diff`` must surface it as a single stderr line + exit 3,
+    never a Python traceback.
+    """
+    run_id = _seed_report(xdg_home)
+    # Corrupt the stored blob in place (valid run_id, invalid report_json).
+    db = xdg_home / "hostlens" / "reports.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("UPDATE runs SET report_json = ? WHERE run_id = ?", ("{not valid", run_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+    show_code, show_out, show_err = _run_main(["reports", "show", run_id], capsys, monkeypatch)
+    assert show_code == 3
+    assert show_out == ""
+    assert "invalid or corrupt" in show_err
+    assert "Traceback" not in show_err
+    assert len(show_err.strip().splitlines()) == 1
+
+    # The diff read-path loads via the same helper — also no traceback.
+    diff_code, _diff_out, diff_err = _run_main(
+        ["reports", "diff", run_id, run_id], capsys, monkeypatch
+    )
+    assert diff_code == 3
+    assert "invalid or corrupt" in diff_err
+    assert "Traceback" not in diff_err
+
+
 # --------------------------------------------------------------------------- #
 # reports list — empty history → exit 0
 # --------------------------------------------------------------------------- #
