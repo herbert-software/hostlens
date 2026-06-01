@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from typing import NoReturn
 
 import click
@@ -99,7 +100,10 @@ def list_cmd(
     ``finding_count``).
     """
 
-    rows = asyncio.run(_store().list_runs(target))
+    try:
+        rows = asyncio.run(_store().list_runs(target))
+    except (ValueError, sqlite3.Error) as exc:
+        _store_unavailable(exc)
 
     if json_output:
         payload = [row.model_dump(mode="json") for row in rows]
@@ -152,6 +156,8 @@ def show_cmd(
         report = asyncio.run(_store().get_run(run_id))
     except ValidationError as exc:
         _invalid_report(run_id, exc)
+    except sqlite3.Error as exc:
+        _store_unavailable(exc)
     if report is None:
         _run_not_found(run_id)
 
@@ -175,6 +181,14 @@ def _invalid_report(run_id: str, exc: Exception) -> NoReturn:
     # `ValidationError`'s `str()` is multi-line, so only the type name is
     # embedded — the full validation detail is not actionable for the user.
     typer.echo(f"stored report is invalid or corrupt: {run_id} ({type(exc).__name__})", err=True)
+    raise typer.Exit(code=3)
+
+
+def _store_unavailable(exc: Exception) -> NoReturn:
+    # A corrupt index row (`ReportStatus(...)` / `datetime.fromisoformat(...)` →
+    # `ValueError`) or a damaged / unreadable db (connect / PRAGMA WAL →
+    # `sqlite3.Error`). Single stderr line + exit 3, never a raw traceback.
+    typer.echo(f"reports: store unavailable or corrupt: {type(exc).__name__}", err=True)
     raise typer.Exit(code=3)
 
 
@@ -252,14 +266,20 @@ def diff_cmd(
             _usage_error(
                 f"unsupported --baseline value: {baseline!r} (M3 supports only 'last_success')"
             )
-        asyncio.run(_diff_auto(target, force=force))
+        try:
+            asyncio.run(_diff_auto(target, force=force))
+        except (sqlite3.Error, ValueError, ValidationError) as exc:
+            _store_unavailable(exc)
         return
 
     if not explicit:
         _usage_error("provide two run ids (`reports diff <a> <b>`) or `--target <t>`")
 
     assert run_id_a is not None and run_id_b is not None
-    asyncio.run(_diff_explicit(run_id_a, run_id_b, force=force))
+    try:
+        asyncio.run(_diff_explicit(run_id_a, run_id_b, force=force))
+    except (sqlite3.Error, ValueError, ValidationError) as exc:
+        _store_unavailable(exc)
 
 
 def _usage_error(message: str) -> NoReturn:

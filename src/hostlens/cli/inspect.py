@@ -339,6 +339,7 @@ def _redirect_structlog_to_stderr() -> None:
 
 def _build_report(
     target_name: str,
+    target_type: str,
     inspector_result: InspectorResult,
     started_at: datetime,
     finished_at: datetime,
@@ -368,6 +369,7 @@ def _build_report(
             intent=None,
             started_at=started_at,
             finished_at=finished_at,
+            target_type=target_type,
         )
     except ValidationError as exc:
         typer.echo(f"internal: report validation failed: {exc}", err=True)
@@ -807,7 +809,7 @@ def inspect_cmd(
         finished_at = datetime.now(UTC)
 
         # ---- 3. Build Report ------------------------------------------- #
-        report = _build_report(target, inspector_result, started_at, finished_at)
+        report = _build_report(target, target_obj.type, inspector_result, started_at, finished_at)
 
         # ---- 3b. Persist (opt-in, --inspector path only) --------------- #
         # Save before rendering so the report is on disk even if a later

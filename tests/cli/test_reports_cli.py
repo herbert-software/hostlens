@@ -206,6 +206,35 @@ def test_reports_show_corrupt_blob_exits_3_no_traceback(
     assert "Traceback" not in diff_err
 
 
+def test_reports_list_corrupt_index_row_exits_3_no_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    xdg_home: Path,
+) -> None:
+    """An index row whose ``status`` is not a valid ``ReportStatus`` makes
+    ``_list_runs_sync``'s ``RunIndexRow`` construction raise ``ValueError``.
+    ``reports list`` must surface it as a single stderr line + exit 3, never a
+    Python traceback (parity with the corrupt-blob ``show`` / ``diff`` path).
+    """
+    _seed_report(xdg_home)
+    db = xdg_home / "hostlens" / "reports.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("UPDATE runs SET status = ?", ("not-a-status",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    list_code, list_out, list_err = _run_main(
+        ["reports", "list", "local-host"], capsys, monkeypatch
+    )
+    assert list_code == 3
+    assert list_out == ""
+    assert "store unavailable or corrupt" in list_err
+    assert "Traceback" not in list_err
+    assert len(list_err.strip().splitlines()) == 1
+
+
 # --------------------------------------------------------------------------- #
 # reports list — empty history → exit 0
 # --------------------------------------------------------------------------- #

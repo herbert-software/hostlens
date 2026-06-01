@@ -347,9 +347,38 @@ def test_build_report_empty_inspector_results_exits_3(
     with pytest.raises(typer.Exit) as exc_info:
         _build_report(
             "t",
+            "local",
             ir,
             datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
             datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
         )
 
     assert exc_info.value.exit_code == 3
+
+
+def test_build_report_propagates_target_type() -> None:
+    """The resolved target type must reach ``meta.target_type`` (Copilot:
+    a hard-coded ``"local"`` default mislabels ssh/docker/k8s persisted
+    reports). ``target_id`` stays equal to the target name (M3 contract).
+    """
+    from datetime import datetime
+
+    from hostlens.cli.inspect import _build_report
+
+    ir = InspectorResult(
+        name="x.y",
+        version="1.0.0",
+        status="ok",
+        target_name="h",
+        duration_seconds=0.0,
+        output={},
+        findings=[],
+        error=None,
+        missing=[],
+    )
+    ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    report = _build_report("h", "ssh", ir, ts, ts)
+
+    assert report.meta.target_type == "ssh"
+    assert report.meta.target_id == "h"
