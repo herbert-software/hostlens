@@ -41,3 +41,6 @@ jobs:
 
       - name: Pytest with coverage
         run: pytest --cov=hostlens --cov-report=term
+
+      - name: Dependency vulnerability audit (pip-audit)
+        run: pip-audit --skip-editable

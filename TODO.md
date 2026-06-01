@@ -14,7 +14,7 @@
 |---|---|---|---|
 | M0 | 项目脚手架 | 可跑 `hostlens doctor` 的空骨架 | ✅ |
 | M1 | Core 抽象 + 最小管线 | `hostlens inspect localhost --inspector hello` 跑通 | ✅ |
-| M2 | 手写 Agent loop | 自然语言意图 → Agent 自选 Inspector → 出 markdown 报告 | ⬜ |
+| M2 | 手写 Agent loop | 自然语言意图 → Agent 自选 Inspector → 出 markdown 报告 | ✅ |
 | M3 | Diagnostician + 报告体系 | 跨信号关联 + 根因假设 + regression diff | ⬜ |
 | M4 | Scheduler | cron 定时跑 + 历史 run 持久化 | ⬜ |
 | M5 | Notifier 抽象 + Telegram + 飞书 | 定时报告自动推送到 TG / 飞书 | ⬜ |
@@ -180,12 +180,17 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 - [`add-tool-registry-capability-layer`](openspec/changes/archive/2026-05-25-add-tool-registry-capability-layer/) ✓ archived（M2 前置；M1 阶段已落地）
 - [`add-llm-backend-protocol`](openspec/changes/archive/2026-05-26-add-llm-backend-protocol/) ✓ archived（§2.1a + §2.1b + §2.1c — LLMBackend Protocol + AnthropicAPIBackend / FakeBackend / PlaybackBackend）
 - [`add-agent-loop-skeleton`](openspec/changes/archive/2026-05-29-add-agent-loop-skeleton/) ✓ archived（§2.2 — 手写 tool-use loop + `LoopResult`；含 `agent-tool-adapter` delta：dispatch output-schema 失败改 raise `ToolError`）
-- `add-planner-agent`（§2.4 后续）
-- `add-llm-cassette-testing`（PlaybackBackend 录制工具未来独立 proposal）
+- [`add-planner-agent`](openspec/changes/archive/2026-05-29-add-planner-agent/) ✓ archived（§2.4 — Planner Agent + `agent/prompts/planner.md` 提示词）
+- [`add-prompt-cache-strategy`](openspec/changes/archive/2026-05-30-add-prompt-cache-strategy/) ✓ archived（§2.5 — 两层 prompt cache 策略 + `docs/agent-cache-strategy.md`）
+- [`add-intent-cli`](openspec/changes/archive/2026-05-30-add-intent-cli/) ✓ archived（§2.7 — `hostlens inspect --intent` + RichLiveObserver 流式输出）
+- [`add-llm-cassette-testing`](openspec/changes/archive/2026-05-30-add-llm-cassette-testing/) ✓ archived（§2.6 — cassette 工具链 + `HOSTLENS_LLM_MODE` 三态 + `llm_cassette` fixture）
+- [`add-backend-disable-thinking`](openspec/changes/archive/2026-05-31-add-backend-disable-thinking/) ✓ archived（M3.6 兜底前移 — `disable_thinking` 开关，支持 thinking 默认开的 anthropic 兼容端点）
+- [`add-incident-pack`](openspec/changes/archive/2026-05-31-add-incident-pack/) ✓ archived（§2.8 — 11 Inspector + `ReplayTarget` + 8 场景双回放 snapshot）
+- [`add-demo-cli`](openspec/changes/archive/2026-05-31-add-demo-cli/) ✓ archived（§2.9 — `hostlens demo run/list` 离线回放）
 
 **退出条件**：
 1. `hostlens inspect prod-web-01 --intent "检查这台机器的健康状况"` 能让 Agent 自主决定调用哪些 Inspector，跑完后输出 markdown 报告；同样的意图在 cassette 回放下结果稳定
-2. `hostlens demo cpu-spike --replay` 能在本地 5 分钟内 reproduce 出一份带根因假设的报告（**无需 SSH、无需付费 API、无需真实生产访问**）
+2. `hostlens demo run cpu_saturation` 能在本地 5 分钟内 reproduce 出一份带根因假设的报告（**无需 SSH、无需付费 API、无需真实生产访问**）
 3. 「最小可用 incident pack」的 8 个真实场景每个都有 fixture 与 snapshot 测试
 
 ### 任务
@@ -218,7 +223,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
     - [x] CI 默认 replay 模式，不消耗 API 额度（`@pytest.mark.live` + `addopts = "-m 'not live'"`）
     - [x] FakeBackend 与 PlaybackBackend 跑通 Agent loop 单测（M2.2 Agent loop 实施时直接消费）
     - [x] cassette 回放下 token usage 也能正确回放（不调真 API；`Usage` 字段 None→0 兼容 SDK 非缓存响应）
-    - [ ] 新增测试 case 时跑一次 record 即可（HOSTLENS_LLM_MODE=record）—— **录制工具未来独立 proposal 落地**，M2 用手写 cassette
+    - [x] 新增测试 case 时跑一次 record 即可（HOSTLENS_LLM_MODE=record）—— **已由 `add-llm-cassette-testing`（PR #37）落地**
     - [x] `BackendCapabilities.prompt_caching=False` 的 backend 上，Agent loop 不注入 `cache_control` block（**Agent loop 端检查 capability**，不是 backend 自己丢；backend 检测到不一致必须 raise `BackendCapabilityViolation`）
 - [x] **2.2 Tool-use loop 核心（消费 LLMBackend，不直接 import anthropic）**（已交付，archived `add-agent-loop-skeleton`）
   - [x] `agent/loop.py`：`AgentLoop(backend, tool_adapter, settings, *, system=None)`，**backend 是私有依赖，不进 ToolContext**（ADR-008）
@@ -246,12 +251,12 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
   - [x] 系统 prompt + Inspector registry 概览：`cache_control: ephemeral`
   - [x] 单测验证：第二次调用的 `cache_read_input_tokens > 0`
   - [x] 文档：`docs/agent-cache-strategy.md`（简短即可）
-- [ ] **2.6 LLM cassette 测试基础设施（与 2.1 的 PlaybackBackend 配套；构建 cassette 工具链与示例）**
-  - [ ] cassette 格式定义（请求 hash 算法 + 响应序列化 schema）
-  - [ ] `tests/cassettes/` 目录约定（按测试名分组）
-  - [ ] env 切换：`HOSTLENS_LLM_MODE=record|replay|live`（record 走 AnthropicAPIBackend + 写盘；replay 走 PlaybackBackend；live 走 AnthropicAPIBackend）
-  - [ ] pytest fixture：`llm_cassette()` 自动选 backend + cassette 文件
-  - [ ] 验收：CI 默认 replay 模式，不消耗 API 额度；新增测试 case 时跑一次 record 即可
+- [x] **2.6 LLM cassette 测试基础设施（与 2.1 的 PlaybackBackend 配套；构建 cassette 工具链与示例）** —— 已交付，archived `add-llm-cassette-testing`（PR #37）
+  - [x] cassette 格式定义（请求 hash 算法 + 响应序列化 schema）—— `agent/cassette_key.py` 单一来源
+  - [x] `tests/fixtures/cassettes/` 目录约定（按测试名分组）
+  - [x] env 切换：`HOSTLENS_LLM_MODE=record|replay|live`（record 走 AnthropicAPIBackend + 写盘；replay 走 PlaybackBackend；live 走 AnthropicAPIBackend）
+  - [x] pytest fixture：`llm_cassette()` 自动选 backend + cassette 文件（`tests/conftest.py`）
+  - [x] 验收：CI 默认 replay 模式，不消耗 API 额度；新增测试 case 时跑一次 record 即可
 - [x] **2.7 CLI: --intent 模式**（已交付，archived `add-intent-cli`）
   - [x] `hostlens inspect <target> --intent "<自然语言>"`
   - [x] 实时流式输出 Agent 思考与工具调用（Rich live display）
@@ -270,13 +275,13 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
   - [x] TLS 证书过期：`net.tls.cert_expiry`（按 SNI 列表探测）
   - [x] 验收：每个场景有 ReplayTarget fixture + cassette + snapshot 测试，离线确定性回放（`tests/incidents/`）；面向人类的 `hostlens demo` CLI 留给 M2.9 `add-demo-cli`（2.9）
 
-- [ ] **2.9 Demo 路径（5 分钟内本地 reproduce 出报告）**
-  - [ ] `examples/local-cpu-spike/`：本地可复现的 CPU 飙高场景（stress-ng 或 yes >/dev/null）
-  - [ ] `examples/disk-full-warning/`、`examples/oom-killed-process/` 等覆盖 2.8 的其余核心场景
-  - [ ] CLI: `hostlens demo <scenario> [--replay]`，`--replay` 模式用 cassette 走完整管线，**无需 SSH、无需付费 API、无需真实生产访问**
-  - [ ] `examples/README.md`：每个场景一段说明 + 一行启动命令 + 期望输出片段
-  - [ ] 录一段 GIF 放仓库 README 顶部（面试现场或快速 demo 用）
-  - [ ] 验收：在干净 macOS / Linux 上 `pip install -e ".[dev]" && hostlens demo cpu-spike --replay` 能在 5 分钟内出报告
+- [x] **2.9 Demo 路径（5 分钟内本地 reproduce 出报告）** —— 已交付，archived `add-demo-cli`（PR #44）。实现采 **scenario-registry + PlaybackBackend** 方案（`hostlens demo run/list`），替代原计划的 `examples/` 多目录散列：场景资产作 package-data 进 `src/hostlens/demo/scenarios/`，单一 SOT 避免第二份场景清单（已在 `demo-cli-command` spec 固化）
+  - [x] `src/hostlens/demo/scenarios/<key>/`：8 套打包 incident replay 资产（`fixture.json` + `cassette.jsonl`），由 `demo run` 消费
+  - [x] 覆盖 8 场景：`cpu_saturation` / `memory_oom` / `disk_inode` / `systemd_failed` / `error_burst` / `fd_exhaustion` / `dependency_unreachable` / `tls_expiry`
+  - [x] CLI: `hostlens demo run <scenario>` / `hostlens demo list`（默认离线 replay，**无 `--replay` flag**；kebab→snake 归一化；**无需 SSH、无需付费 API、无需真实生产访问**）
+  - [ ] `examples/README.md` 逐场景说明（装饰性 follow-up，非阻塞）
+  - [ ] 录一段 GIF 放仓库 README 顶部（装饰性 follow-up，非阻塞）
+  - [x] 验收：干净 macOS / Linux 上 `pip install -e ".[dev]" && hostlens demo run cpu_saturation` 秒级出带根因报告（实测 <0.1s）
 
 ---
 
@@ -434,7 +439,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 | 运行时（Go） | goroutine count / heap from pprof | — | go.goroutines, go.heap |
 | 日志 | error burst / exception 突增 | log.tail.error_burst | log.exception_burst |
 
-> 说明：「M2 计划基线」列只列 §M2.8 实际计划的 Inspector（项目尚未实施，未"已交付"）；M6 在此基础上按域扩充。每个 Inspector 落地时必须勾上覆盖矩阵对应单元格。
+> 说明：「M2 计划基线」列列出 §M2.8 **已交付**的 Inspector（见 `src/hostlens/inspectors/builtin/`，PR #38/#42）；M6 在此基础上按域扩充。每个 Inspector 落地时必须勾上覆盖矩阵对应单元格。
 
 ### 实施任务（按域）
 

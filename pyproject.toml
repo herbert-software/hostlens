@@ -55,6 +55,7 @@ dev = [
     "psutil>=5.9",
     "syrupy>=4.6,<6",
     "types-PyYAML",
+    "pip-audit>=2.7",
 ]
 mcp = []
 docs = []
