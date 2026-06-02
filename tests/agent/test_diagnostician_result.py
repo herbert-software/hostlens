@@ -172,3 +172,48 @@ def test_redact_preserves_secret_shaped_tag_without_validation_error() -> None:
     assert "sk-deadbeefcafef00d1234567890ABCDEF" not in redacted.findings[0].message
     # Source untouched.
     assert result.findings[0].message == secret_msg
+
+
+def test_redact_preserves_finding_identity_and_hypothesis_cross_reference() -> None:
+    """Identifier fields must survive redaction verbatim (parity with `_redact_finding`).
+
+    `redact_diagnostician_result_for_render` must NOT run `redact_text` over
+    `Finding.id` / `inspector_name` / `inspector_version` or over
+    `RootCauseHypothesis.supporting_findings` ids — otherwise an identifier that
+    matched a redact pattern would either fail validation or silently break the
+    hypothesis→finding cross-reference (evidence-link contract). Regression for
+    the Cursor Bugbot finding; locks parity with the typed Report-path redactors.
+    """
+    from hostlens.reporting._redact import redact_diagnostician_result_for_render
+
+    stamped = _stamped_finding("load spike")
+    hypo = RootCauseHypothesis(
+        description="leak sk-deadbeefcafef00d1234567890ABCDEF in description",
+        confidence="high",
+        supporting_findings=[stamped.id or ""],
+        suggested_actions=["restart sk-deadbeefcafef00d1234567890ABCDEF"],
+    )
+    result = DiagnosticianResult(
+        narrative="n",
+        findings=[stamped],
+        hypotheses=[hypo],
+        status=ReportStatus.OK,
+        planner_result=_planner_result(),
+        diagnostician_loop=_loop_result(),
+    )
+
+    redacted = redact_diagnostician_result_for_render(result)
+
+    # Identity fields preserved verbatim.
+    assert redacted.findings[0].id == stamped.id
+    assert redacted.findings[0].inspector_name == "linux.load"
+    assert redacted.findings[0].inspector_version == "1.0.0"
+    # Cross-reference intact: supporting_findings still points at a present id.
+    assert redacted.hypotheses[0].supporting_findings == [stamped.id]
+    assert redacted.hypotheses[0].supporting_findings[0] == redacted.findings[0].id
+    # Free-text in the hypothesis is still redacted.
+    assert "sk-deadbeefcafef00d1234567890ABCDEF" not in redacted.hypotheses[0].description
+    assert all(
+        "sk-deadbeefcafef00d1234567890ABCDEF" not in a
+        for a in redacted.hypotheses[0].suggested_actions
+    )

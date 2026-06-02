@@ -234,36 +234,85 @@ def redact_report_for_render(report: Report) -> Report:
     )
 
 
+def _redact_tool_invocation(inv: Any) -> Any:
+    """Redact a `ToolInvocation`'s model-controlled surfaces (loop telemetry).
+
+    `tool_name` (model-controlled — a hallucinated name can be free text) passes
+    through `redact_text`; the `input` / `output` / `error` dicts (which carry raw
+    `run_inspector` output = findings + evidence) go through `_redact_structured`.
+    `tool_use_id` is an SDK identifier, preserved. The `output` xor `error`
+    invariant is kept (only the populated one is updated). Typed `Any` to avoid a
+    module-load import of `agent.loop` (mirrors `_redact_inspector_result`).
+    """
+    update: dict[str, Any] = {
+        "tool_name": redact_text(inv.tool_name),
+        "input": _redact_structured(inv.input),
+    }
+    if inv.output is not None:
+        update["output"] = _redact_structured(inv.output)
+    if inv.error is not None:
+        update["error"] = _redact_structured(inv.error)
+    return inv.model_copy(update=update)
+
+
+def _redact_loop_result(loop_result: Any) -> Any:
+    """Redact a `LoopResult`'s free-text + telemetry; preserve machine fields.
+
+    `final_text` (model narrative) is redacted; `tool_invocations` are redacted
+    per-invocation. `turns` / `terminal_status` / `usage_totals` / `stop_reason`
+    are loop/SDK-controlled enums/counts, preserved unchanged.
+    """
+    return loop_result.model_copy(
+        update={
+            "final_text": redact_text(loop_result.final_text),
+            "tool_invocations": [_redact_tool_invocation(i) for i in loop_result.tool_invocations],
+        }
+    )
+
+
+def _redact_planner_result(planner_result: Any) -> Any:
+    """Redact a `PlannerResult`: narrative + intent + typed findings + loop."""
+    return planner_result.model_copy(
+        update={
+            "narrative": redact_text(planner_result.narrative),
+            "intent": redact_text(planner_result.intent),
+            "findings": [_redact_finding(f) for f in planner_result.findings],
+            "loop_result": _redact_loop_result(planner_result.loop_result),
+        }
+    )
+
+
 def redact_diagnostician_result_for_render(
     result: DiagnosticianResult,
 ) -> DiagnosticianResult:
     """Return a redacted deep-copy of `result` suitable for rendering.
 
-    The source `result` is not mutated. Every string field anywhere in the
-    `DiagnosticianResult` graph (top-level findings / hypotheses + the nested
-    `planner_result` / `diagnostician_loop` loop telemetry, whose
-    `tool_invocations` carry raw inspector output) passes through the
-    `core/redact` boundary — bringing the `--intent` path to the same redaction
-    standard as the `Report` render path. Non-string scalars survive unchanged
-    via the `model_dump()` → `_redact_structured` → `model_validate()` round-trip.
-
-    `Finding.tags` are preserved verbatim (parity with `_redact_finding`): a tag
-    is constrained to `^[a-z][a-z0-9_-]*$`, so a `redact_text` rewrite of a
-    secret-shaped tag (e.g. `sk-…` → `sk-d...CDEF`) would violate that pattern
-    and make `model_validate` raise `ValidationError`, breaking the renderer.
-    Tags carry no secrets, so skipping them loses nothing. The restore only
-    targets the two typed `Finding` lists (top-level `findings` and
-    `planner_result.findings`); tag strings inside `tool_invocations` dicts stay
-    redacted but are harmless there (those are `dict[str, Any]`, not re-validated
-    against the `Tag` constraint).
+    The source `result` is not mutated. This brings the `--intent` path to the
+    same redaction standard as the `Report` render path **by reusing the same
+    typed redactors** (`_redact_finding` / `_redact_hypothesis`): free-text
+    string fields pass through the `core/redact` boundary, while **identifier
+    fields are preserved verbatim** — `Finding.id` / `inspector_name` /
+    `inspector_version` / `tags` (via `_redact_finding`) and
+    `RootCauseHypothesis.supporting_findings` (via `_redact_hypothesis`). This is
+    deliberate: those are content fingerprints / identifiers, not secrets, and
+    running `redact_text` over them would either break the `Tag` pattern
+    constraint (→ `ValidationError`) or silently corrupt the hypothesis→finding
+    cross-reference (`supporting_findings` no longer matching `findings[*].id`),
+    breaking the evidence-link contract. The genuinely untyped loop telemetry
+    (`planner_result` / `diagnostician_loop` and their `tool_invocations` dicts,
+    which carry raw inspector output) is redacted via `_redact_structured`.
     """
     from hostlens.agent.diagnostician import DiagnosticianResult
 
-    redacted = _redact_structured(result.model_dump())
-    # Restore original tags on the typed Finding lists (model_dump preserves
-    # list order, so index alignment with the source is guaranteed).
-    for i, finding in enumerate(result.findings):
-        redacted["findings"][i]["tags"] = list(finding.tags)
-    for i, finding in enumerate(result.planner_result.findings):
-        redacted["planner_result"]["findings"][i]["tags"] = list(finding.tags)
-    return DiagnosticianResult.model_validate(redacted)
+    return DiagnosticianResult(
+        narrative=redact_text(result.narrative),
+        findings=[_redact_finding(f) for f in result.findings],
+        hypotheses=[_redact_hypothesis(h) for h in result.hypotheses],
+        status=result.status,
+        planner_result=_redact_planner_result(result.planner_result),
+        diagnostician_loop=(
+            _redact_loop_result(result.diagnostician_loop)
+            if result.diagnostician_loop is not None
+            else None
+        ),
+    )
