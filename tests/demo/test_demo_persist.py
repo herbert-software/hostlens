@@ -30,7 +30,7 @@ import pytest
 from hostlens.cli import main
 from hostlens.reporting.diff import compute_diff
 from hostlens.reporting.models import Report
-from hostlens.reporting.store import SaveResult
+from hostlens.reporting.store import ReportStore, SaveResult
 
 
 def _run_main(
@@ -282,7 +282,7 @@ def test_demo_persist_save_raises_exit_2_internal(
     async def _boom(self: object, report: object) -> object:
         raise OSError("disk on fire")
 
-    monkeypatch.setattr("hostlens.reporting.store.ReportStore.save", _boom)
+    monkeypatch.setattr(ReportStore, "save", _boom)
 
     code, _stdout, stderr = _run_main(
         ["demo", "run", "cpu_saturation", "--persist", "--quiet"], capsys, monkeypatch
@@ -318,7 +318,7 @@ def test_demo_persist_orphan_degrade_exit_2_warning(
             orphan_path="/tmp/demo-orphan.json",
         )
 
-    monkeypatch.setattr("hostlens.reporting.store.ReportStore.save", _orphan_save)
+    monkeypatch.setattr(ReportStore, "save", _orphan_save)
 
     code, stdout, stderr = _run_main(
         ["demo", "run", "cpu_saturation", "--persist", "--quiet"], capsys, monkeypatch
@@ -357,7 +357,7 @@ def test_demo_persist_critical_plus_orphan_escalates_to_exit_2(
             orphan_path="/tmp/demo-orphan.json",
         )
 
-    monkeypatch.setattr("hostlens.reporting.store.ReportStore.save", _orphan_save)
+    monkeypatch.setattr(ReportStore, "save", _orphan_save)
 
     code, stdout, stderr = _run_main(
         ["demo", "run", "cpu_saturation", "--persist", "--quiet"], capsys, monkeypatch
