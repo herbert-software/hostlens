@@ -292,14 +292,14 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 **对应 OpenSpec proposal**：
 - `add-diagnostician-agent`（3.1，后续 —— 消费已落地的 `Report.hypotheses` 字段 + `ReportStatus` degraded_* 值）
 - [`add-report-persistence-and-diff`](openspec/changes/archive/2026-06-01-add-report-persistence-and-diff/) ✓ archived（3.2 schema + 3.3 持久化 + 3.5 diff 引擎 + `reports` CLI + `inspect --persist`；PR #46。提案 7 轮 + 代码 3 轮对抗 review APPROVE）
-- `add-intent-report-persistence`（3.1 持久化半边 —— `--intent --persist` 现产忠实 `Report` 入库：从 per-run `InspectorResultCollector` 快照组装 + hypotheses/narrative 投影进 `Report`，`reports show`/`diff` 可消费。**后续缺口**：demo wiring 与 hypothesis-level diff）
+- `add-intent-report-persistence`（3.1 持久化半边 —— `--intent --persist` 现产忠实 `Report` 入库：从 per-run `InspectorResultCollector` 快照组装 + hypotheses/narrative 投影进 `Report`，`reports show`/`diff` 可消费。demo wiring 已交付（`wire-demo-to-report`：`demo run` 全链 Planner→Diagnostician→Report + `--persist`）。**后续缺口**：hypothesis-level diff）
 
 **退出条件**：报告中能看到 "📌 根因假设" 章节（占位已就位，内容待 3.1 Diagnostician 填充），包含证据链接；对同一 target 跑两次能输出 "本次相对上次新增了 X、消失了 Y" 的 diff（**已可**，见 `hostlens reports diff`）。持久化部分达成：`--intent --persist` 落库的 `Report` 含 hypotheses，`reports show`/`diff` 可取回并做 finding 级对比。
 
 ### 任务
 
 - [x] **3.1 Diagnostician Agent** —— `add-diagnostician-agent`（消费 `Report.hypotheses` 形状 + `ReportStatus` degraded_* 值；`--intent` stdout 渲染「## 根因假设」章节含证据链接）
-  - [x] **持久化半边** —— `add-intent-report-persistence`：`--intent --persist` 现产忠实 `Report` 入库（per-run `InspectorResultCollector` 快照组装 + hypotheses/narrative 投影；`--intent --format json` BREAKING 改输出 `Report`），`reports show` 取回含 hypotheses 的 `Report`，`reports diff` 对两次 `--intent` run 做 finding 级 added/resolved；no-result（collector 真空）不入库。**后续**：demo run 持久化 wiring + hypothesis-level diff（diff 现仍只比 finding，hypotheses 入库但不参与对比）。
+  - [x] **持久化半边** —— `add-intent-report-persistence`：`--intent --persist` 现产忠实 `Report` 入库（per-run `InspectorResultCollector` 快照组装 + hypotheses/narrative 投影；`--intent --format json` BREAKING 改输出 `Report`），`reports show` 取回含 hypotheses 的 `Report`，`reports diff` 对两次 `--intent` run 做 finding 级 added/resolved；no-result（collector 真空）不入库。demo run 持久化 wiring 已交付（`wire-demo-to-report`：`demo run` 走 `run_diagnosis_pipeline` 产忠实 `Report` + `--persist` 入库）。**后续**：hypothesis-level diff（diff 现仍只比 finding，hypotheses 入库但不参与对比）。
   - [x] `agent/diagnostician.py`：输入 = findings 列表 + intent，输出 = 带根因假设的 `DiagnosticianResult`（含 narrative / findings(canonical, 带 id) / hypotheses / reconcile 后的 status）
   - [x] 暴露的工具：`correlate_findings`（序号标签引用，纯结构化输出通道）/ `request_more_inspection(inspector_name)`（复用 `InspectorRunner` 补查，target 闭包固定）
   - [x] 提示词在 `agent/prompts/diagnostician.md`

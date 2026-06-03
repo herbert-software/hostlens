@@ -11,12 +11,16 @@ plumbing the demo exit codes ride on. ``capsys`` is non-TTY, so
 ``RichLiveObserver`` auto-degrades to plain output — exactly the pipeline/CI
 posture the spec requires (progress to stderr, never stdout).
 
-The seam these tests replace is ``hostlens.cli.demo.build_demo_planner`` (or
-``asset_exists`` for the pre-flight branches): the unit under test is the CLI's
-exception → exit-code mapping + stream routing, not the assembly itself, so the
-error paths (corrupt cassette / runtime drift / missing asset) are induced by
-monkeypatching that one boundary. The happy paths run the *real* assembly over
-the committed packaged assets — no mock of ``PlannerAgent`` / ``AgentLoop``.
+After ``wire-demo-to-report`` the demo CLI drives two distinct seams (no longer
+the single ``build_demo_planner``): ``build_demo_pipeline`` (assembly: returns
+the 4-tuple) and ``run_diagnosis_pipeline`` (the full-chain run, where a runtime
+``CassetteMiss`` now surfaces inside the *second* loop). The error paths are
+induced by monkeypatching the relevant seam: assembly-phase ``ValueError``
+(corrupt cassette) at ``build_demo_pipeline`` / ``PlaybackBackend``, runtime
+drift (``CassetteMiss``) by handing the assembly an always-missing cassette, and
+missing-asset at ``asset_exists`` (pre-flight). The happy paths run the *real*
+assembly + pipeline over the committed packaged assets — no mock of
+``PlannerAgent`` / ``DiagnosticianAgent`` / ``AgentLoop``.
 
 ``asyncio_mode = "auto"`` (pyproject) — no markers; every backend is a
 ``PlaybackBackend`` so nothing hits the network.
@@ -24,7 +28,6 @@ the committed packaged assets — no mock of ``PlannerAgent`` / ``AgentLoop``.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,10 +36,10 @@ import pytest
 
 import hostlens.cli.demo as demo_mod
 from hostlens.cli import main
+from hostlens.reporting.models import Report
 
 if TYPE_CHECKING:
-    from hostlens.agent.planner import PlannerAgent
-    from hostlens.targets.replay import ReplayTarget
+    from contextlib import ExitStack
 
 
 def _run_main(
@@ -140,9 +143,9 @@ def test_demo_run_md_and_json_same_exit_code(
 ) -> None:
     """``-f md`` and ``-f json`` exit identically (code is format-independent).
 
-    Spec §场景:json 与 md 退出码一致 — the code derives from terminal_status +
-    finding severity, never the render format. The json branch must also emit a
-    parseable ``PlannerResult`` on stdout.
+    Spec §场景:json 与 md 退出码一致 — the code derives from ``Report.meta.status``
+    + finding severity, never the render format. The json branch must emit a
+    round-trippable ``Report`` on stdout (``Report.model_validate_json``).
     """
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -153,9 +156,13 @@ def test_demo_run_md_and_json_same_exit_code(
     )
 
     assert code_md == code_json == 1
-    payload = json.loads(out_json)
-    assert payload["loop_result"]["terminal_status"] == "ok"
-    assert payload["findings"]
+    # json is a faithful, round-trippable Report (NOT a PlannerResult): status is
+    # read off ``meta.status`` and the assembled findings / hypotheses are present.
+    report = Report.model_validate_json(out_json)
+    assert report.meta is not None
+    assert report.meta.status == "ok"
+    assert report.findings
+    assert report.hypotheses
 
 
 # --------------------------------------------------------------------------- #
@@ -367,14 +374,15 @@ def test_demo_run_corrupt_cassette_assembly_value_error_exit_2(
     Spec §场景:装配期资产损坏退出 2 — the asset is *present* (pre-flight passes)
     but corrupt, so ``PlaybackBackend`` construction raises ``ValueError`` during
     assembly. That is an assembly-phase failure (exit 2), distinct from the
-    missing-asset pre-flight (exit 3). Induced at the ``build_demo_planner`` seam
-    with the exact phrasing the real loader emits.
+    missing-asset pre-flight (exit 3). Re-pointed (wire-demo-to-report) to the
+    ``build_demo_pipeline`` seam — the assembly entry the CLI now calls — with the
+    exact phrasing the real loader emits.
     """
 
     def _raise_value_error(_key: str, *, exit_stack: object) -> object:
         raise ValueError("invalid cassette format at line 1")
 
-    monkeypatch.setattr(demo_mod, "build_demo_planner", _raise_value_error)
+    monkeypatch.setattr(demo_mod, "build_demo_pipeline", _raise_value_error)
 
     code, stdout, stderr = _run_main(["demo", "run", "cpu_saturation"], capsys, monkeypatch)
 
@@ -394,25 +402,30 @@ def test_demo_run_runtime_cassette_miss_exit_2(
 
     Spec §场景:运行期 cassette miss 退出 2 — distinct from corrupt-asset (an
     assembly ``ValueError``): here assembly *succeeds* but the model request key
-    finds no matching record at run time. We run the real assembly, then swap in
-    an empty-cassette ``PlaybackBackend`` so the first ``messages_create`` misses
-    — the genuine runtime-drift path. The CLI wraps it as one
+    finds no matching record at run time inside ``run_diagnosis_pipeline``. We run
+    the real assembly, then substitute an empty-cassette ``PlaybackBackend`` into
+    the returned 4-tuple so ``messages_create`` misses at run time — the genuine
+    runtime-drift path now living inside the pipeline (after wire-demo-to-report
+    the assembly no longer owns a ``PlannerAgent``, so we swap the *backend* the
+    pipeline runs, not a planner attribute). The CLI wraps it as one
     ``internal: CassetteMiss: ...`` line, never a traceback.
     """
 
     from hostlens.agent.backends.playback import PlaybackBackend
 
-    real_build = demo_mod.build_demo_planner
+    real_build = demo_mod.build_demo_pipeline
     empty = tmp_path / "empty.jsonl"
     empty.write_text("")
 
-    def _build_then_break(key: str, *, exit_stack: object) -> tuple[PlannerAgent, ReplayTarget]:
-        planner, target = real_build(key, exit_stack=exit_stack)  # type: ignore[arg-type]
-        # Replace the matched backend with one whose cassette always misses.
-        planner._loop._backend = PlaybackBackend(cassette_path=empty)
-        return planner, target
+    def _build_then_break(
+        key: str, *, exit_stack: ExitStack
+    ) -> tuple[object, object, object, object]:
+        _backend, context_factory, target, settings = real_build(key, exit_stack=exit_stack)
+        # Substitute a backend whose cassette always misses: assembly succeeded,
+        # but the very first ``messages_create`` in the pipeline finds no record.
+        return PlaybackBackend(cassette_path=empty), context_factory, target, settings
 
-    monkeypatch.setattr(demo_mod, "build_demo_planner", _build_then_break)
+    monkeypatch.setattr(demo_mod, "build_demo_pipeline", _build_then_break)
 
     code, stdout, stderr = _run_main(["demo", "run", "cpu_saturation"], capsys, monkeypatch)
 
@@ -431,23 +444,18 @@ def test_run_cancelled_wrapped_no_traceback(
     Spec §命令在任何分支均禁止向用户输出 Python traceback. ``CancelledError`` is a
     ``BaseException`` (not ``Exception``), so the generic handler can't catch it;
     the loop propagates it verbatim on agent cancellation. The CLI must wrap it as
-    one ``internal: CancelledError`` line, never a traceback.
+    one ``internal: CancelledError`` line, never a traceback. Re-pointed
+    (wire-demo-to-report) to the ``run_diagnosis_pipeline`` seam — the run entry
+    the CLI now awaits — since the assembly no longer owns a ``PlannerAgent`` to
+    monkeypatch ``.run`` on.
     """
 
     import asyncio
 
-    real_build = demo_mod.build_demo_planner
+    async def _cancel(*_args: object, **_kwargs: object) -> object:
+        raise asyncio.CancelledError
 
-    def _build_then_cancel(key: str, *, exit_stack: object) -> tuple[PlannerAgent, ReplayTarget]:
-        planner, target = real_build(key, exit_stack=exit_stack)  # type: ignore[arg-type]
-
-        async def _cancel(*_args: object, **_kwargs: object) -> object:
-            raise asyncio.CancelledError
-
-        monkeypatch.setattr(planner, "run", _cancel)
-        return planner, target
-
-    monkeypatch.setattr(demo_mod, "build_demo_planner", _build_then_cancel)
+    monkeypatch.setattr(demo_mod, "run_diagnosis_pipeline", _cancel)
 
     code, stdout, stderr = _run_main(["demo", "run", "cpu_saturation"], capsys, monkeypatch)
 
@@ -499,3 +507,86 @@ def test_demo_list_empty_registry_exit_0(
     assert code == 0
     assert "无可用场景" in stdout
     assert "Traceback" not in stderr
+
+
+# --------------------------------------------------------------------------- #
+# Structural "no API" proof — demo never calls create_backend (task 2.1)
+# --------------------------------------------------------------------------- #
+
+
+def test_demo_run_never_calls_create_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``demo run`` must NEVER reach the real backend factory (spec §不触达 API).
+
+    Stronger than "the backend is a PlaybackBackend": we monkeypatch
+    ``create_backend`` (every import site that the demo path could conceivably
+    touch) to raise, then run the real full-chain demo. A successful exit-1 run
+    proves the demo wired its offline ``PlaybackBackend`` without ever
+    constructing a real backend — guarding against a "build a real backend then
+    discard it" regression.
+    """
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    def _boom(_settings: object) -> object:
+        raise AssertionError("demo path must never call create_backend")
+
+    monkeypatch.setattr("hostlens.agent.backend.create_backend", _boom)
+    monkeypatch.setattr("hostlens.cli._intent.create_backend", _boom)
+
+    code, stdout, stderr = _run_main(
+        ["demo", "run", "cpu_saturation", "--quiet"], capsys, monkeypatch
+    )
+
+    assert code == 1, stderr
+    assert "## Findings" in stdout
+    assert "AssertionError" not in stderr
+
+
+# --------------------------------------------------------------------------- #
+# partial → exit 2 (unit-level, NOT an 8-scenario e2e — they never produce
+# partial; spec §场景:partial 状态映射退出码 2)
+# --------------------------------------------------------------------------- #
+
+
+def test_partial_report_maps_to_exit_2() -> None:
+    """``_compute_intent_report_exit_code(Report(meta.status=partial))`` → 2.
+
+    Spec §场景:partial 状态映射退出码 2 — the 8 bundled demo scenarios all replay
+    every inspector to ``ok`` (fixture exit codes are 0), so the e2e path never
+    derives ``partial``. This unit test directly constructs a ``partial`` Report
+    (via the ``status`` override) and asserts the SHARED ``--intent`` exit-code
+    mapper returns 2 (distinct from a critical finding's exit 1).
+    """
+
+    from datetime import UTC, datetime
+
+    from hostlens.cli.inspect import _compute_intent_report_exit_code
+    from hostlens.inspectors.result import InspectorResult
+    from hostlens.reporting.models import ReportStatus
+
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    ir = InspectorResult(
+        name="linux.cpu",
+        version="1.0.0",
+        status="ok",  # type: ignore[arg-type]
+        target_name="demo:cpu_saturation",
+        duration_seconds=0.5,
+        findings=[],
+        error=None,
+        missing=[],
+    )
+    report = Report.from_inspector_results(
+        "demo:cpu_saturation",
+        [ir],
+        intent="检查健康",
+        started_at=t0,
+        finished_at=t0,
+        status=ReportStatus.PARTIAL,
+        target_type="local",
+    )
+    assert report.meta is not None
+    assert report.meta.status == "partial"
+    assert _compute_intent_report_exit_code(report) == 2

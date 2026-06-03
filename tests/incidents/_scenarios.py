@@ -55,6 +55,14 @@ class IncidentScenario:
     intent: str
     narrative: str
     inspectors: tuple[InspectorCall, ...]
+    # Diagnosis-phase authored content (design D-3 / D-3.5): the single root-cause
+    # hypothesis the scripted Diagnostician records via ``correlate_findings``
+    # (referencing ordinal label ``F1``), its suggested remediation actions, and
+    # the diagnosis loop's finalize narrative. Synthetic-data discipline applies
+    # (no IPv4 / real paths / FQDNs; ASCII punctuation only).
+    hypothesis: str
+    suggested_actions: tuple[str, ...]
+    diagnosis_narrative: str
 
 
 SCENARIOS: tuple[IncidentScenario, ...] = (
@@ -77,6 +85,17 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 params={},
                 main_stdout="load1=16.40\nload5=12.10\nload15=8.00\nncpu=4\n",
             ),
+        ),
+        hypothesis=(
+            "mysqld (pid 4242) 失控占用 CPU 是本次饱和的根因: 单进程 97.5% CPU "
+            "叠加 1 分钟负载 16.40 远超 4 核容量."
+        ),
+        suggested_actions=(
+            "排查 mysqld 慢查询日志, 定位失控线程或全表扫描.",
+            "必要时限流或重启 mysqld, 并观察负载是否回落.",
+        ),
+        diagnosis_narrative=(
+            "综合 top 进程与系统负载两个信号, 根因指向 mysqld 失控占用 CPU. 建议优先排查其慢查询."
         ),
     ),
     # 2. Memory pressure / OOM ---------------------------------------------
@@ -101,6 +120,18 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 ),
             ),
         ),
+        hypothesis=(
+            "内存耗尽触发 OOM-killer 杀掉 mysqld 是根因: 可用内存仅 2.0%, "
+            "内核已记录一次针对 mysqld 的 OOM 事件."
+        ),
+        suggested_actions=(
+            "立即排查内存占用最高的进程, 确认是否存在内存泄漏.",
+            "扩容物理内存或调整 mysqld 内存上限, 避免再次被 OOM.",
+        ),
+        diagnosis_narrative=(
+            "可用内存极低与 OOM-killer 日志两条信号一致指向内存耗尽, "
+            "mysqld 被杀是结果而非诱因. 建议先扩容再排查泄漏."
+        ),
     ),
     # 3. Disk full / inode exhaustion --------------------------------------
     IncidentScenario(
@@ -122,6 +153,18 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 main_stdout="/dev/sda1 96 /\n/dev/sdb1 40 /var\n",
             ),
         ),
+        hypothesis=(
+            "根分区 / 同时逼近块用尽(98%)与 inode 用尽(96%)是根因: 两类容量都接近写满, "
+            "任一耗尽都会导致写入失败."
+        ),
+        suggested_actions=(
+            "清理根分区下的大日志与临时文件, 释放块空间.",
+            "排查小文件堆积目录, 降低 inode 占用.",
+        ),
+        diagnosis_narrative=(
+            "磁盘块用量与 inode 用量两个信号都集中在根分区, 根因是根分区容量逼近双重耗尽. "
+            "建议优先清理日志."
+        ),
     ),
     # 4. systemd failed units ----------------------------------------------
     IncidentScenario(
@@ -137,6 +180,18 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 params={},
                 main_stdout='{"failed":[{"unit":"nginx.service"},{"unit":"mysql.service"}]}',
             ),
+        ),
+        hypothesis=(
+            "nginx.service 与 mysql.service 同时 failed 是根因: 两个核心服务单元均未拉起, "
+            "对外服务能力受影响."
+        ),
+        suggested_actions=(
+            "查看 nginx.service 与 mysql.service 各自的 journal 日志定位启动失败原因.",
+            "修复配置或依赖后重启两个单元并确认状态恢复.",
+        ),
+        diagnosis_narrative=(
+            "failed 单元清单显示两个核心服务同时挂掉, 根因需结合各自 journal 日志进一步定位. "
+            "建议逐一查看."
         ),
     ),
     # 5. Recent error burst (sampling_window) ------------------------------
@@ -154,6 +209,18 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 main_stdout="error_count=247\nwindow_seconds=300\n",
             ),
         ),
+        hypothesis=(
+            "最近 5 分钟内 247 条 error 级日志的突增是根因信号: 错误水位明显高于正常, "
+            "指向某服务在该窗口内集中报错."
+        ),
+        suggested_actions=(
+            "结合具体服务日志定位错误突增的来源服务.",
+            "确认是否伴随发布/配置变更, 必要时回滚.",
+        ),
+        diagnosis_narrative=(
+            "采样窗口内 error 计数远超基线, 根因是某服务在最近 5 分钟集中报错. "
+            "建议下钻到服务级日志."
+        ),
     ),
     # 6. File-descriptor exhaustion ----------------------------------------
     IncidentScenario(
@@ -169,6 +236,17 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 params={},
                 main_stdout="allocated=950272\nmax=1048576\n",
             ),
+        ),
+        hypothesis=(
+            "系统级文件描述符接近耗尽是根因: 已分配 950272/1048576 达上限约 91%, "
+            "继续增长将导致新连接/打开文件失败."
+        ),
+        suggested_actions=(
+            "排查是否存在进程泄漏 fd, 定位打开数最高的进程.",
+            "在确认无泄漏前提下调高内核 fd 上限作为缓冲.",
+        ),
+        diagnosis_narrative=(
+            "已分配 fd 逼近系统上限, 根因是 fd 接近耗尽. 建议优先排查泄漏进程再考虑调高上限."
         ),
     ),
     # 7. Dependency connectivity (parameterized — Option E) ----------------
@@ -189,6 +267,18 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 ),
             ),
         ),
+        hypothesis=(
+            "下游依赖 database:5432 不可达是根因: 同批探测中 cache:6379 正常, "
+            "故障收敛在 database 这一个端点."
+        ),
+        suggested_actions=(
+            "优先排查 database 的网络连通与进程存活.",
+            "确认防火墙/安全组未拦截 database:5432.",
+        ),
+        diagnosis_narrative=(
+            "依赖探测显示仅 database:5432 不可达而 cache 正常, 根因是 database 端点故障. "
+            "建议优先核查其存活与网络."
+        ),
     ),
     # 8. TLS certificate expiry (parameterized — Option E) -----------------
     IncidentScenario(
@@ -204,6 +294,18 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
                 params={"endpoints": '["payments:443"]'},
                 main_stdout='{"results":[{"endpoint":"payments:443","days_until_expiry":3}]}',
             ),
+        ),
+        hypothesis=(
+            "payments:443 的 TLS 证书 3 天后过期是根因隐患: 已进入紧急续期区间, "
+            "到期后下游握手将失败."
+        ),
+        suggested_actions=(
+            "立即为 payments:443 续期 TLS 证书.",
+            "部署后验证证书链与有效期, 并设置到期前告警.",
+        ),
+        diagnosis_narrative=(
+            "证书有效期仅剩 3 天且已进入紧急区间, 根因是 payments:443 证书即将过期. "
+            "建议立即续期避免握手失败."
         ),
     ),
 )

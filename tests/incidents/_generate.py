@@ -28,14 +28,15 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
 from _harness import (
+    INCIDENT_TARGET_NAME,
     SNAPSHOTS_DIR,
     build_authored_responses,
-    build_incident_planner,
+    build_incident_pipeline_inputs,
     frozen_clock,
     project_planner_result,
 )
@@ -43,12 +44,16 @@ from _scenarios import SCENARIOS, IncidentScenario
 from support.cassette_recording import RecordingBackend
 
 from hostlens.agent.backends.fake import FakeBackend
+from hostlens.cli._intent import _seeding_sort_key, run_diagnosis_pipeline
 from hostlens.core.config import AgentSettings, Settings
 from hostlens.demo.assets import source_tree_path
 from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.targets.base import Capability, ExecResult
 from hostlens.targets.registry import TargetRegistry
+
+if TYPE_CHECKING:
+    from hostlens.agent.planner import PlannerResult
 
 _PROBE_PREFIX = "command -v "
 _FILE_PROBE_PREFIX = "[ -r "
@@ -165,17 +170,73 @@ async def _record_cassette_and_snapshot(scenario: IncidentScenario) -> None:
         cassette_path=cassette_path,
         inner=FakeBackend(responses=build_authored_responses(scenario)),  # type: ignore[arg-type]
     )
-    planner, target = build_incident_planner(recorder, fixture_name=scenario.key)
-    result = await planner.run(scenario.intent)
+
+    # Drive the SAME shared Planner→Diagnostician→Report core the ``--intent`` path
+    # uses, so the single ``RecordingBackend`` captures BOTH phases' requests into
+    # one cassette (design D-3.5 step 2). The single ``FakeBackend`` over the four
+    # authored responses serves both loops in order; no composite/phase-switch
+    # backend is needed.
+    fixture_path = source_tree_path(scenario.key, "fixture")
+    backend, context_factory, replay_target, settings = build_incident_pipeline_inputs(
+        recorder, fixture_path=fixture_path
+    )
+
+    # snapshot stays Planner-only (single pass, via sink — design D-3.5 step 3):
+    # the pipeline returns a ``Report``, but ``snapshots/<key>.md`` + the 8
+    # ``test_*.py`` keep their Planner-only projection. The sink captures the
+    # ``PlannerResult`` while it is still in hand, so we do NOT re-run a second
+    # Planner-only pass (which would exhaust the FakeBackend script and collide on
+    # ``_ACTIVE_CASSETTE_PATHS``).
+    captured: list[PlannerResult] = []
+
+    report = await run_diagnosis_pipeline(
+        backend,
+        settings,
+        context_factory,
+        report_target_name=INCIDENT_TARGET_NAME,
+        target_lookup_name=INCIDENT_TARGET_NAME,
+        target_type=replay_target.type,
+        intent=scenario.intent,
+        tool_clock=frozen_clock,
+        planner_result_sink=captured.append,
+    )
+
+    # Flush AFTER the pipeline returns so both phases' records are captured (an
+    # early flush would drop the diagnosis record — design D-3.5 step 2).
     recorder.flush(persist=True)
 
-    assert target.misses == [], f"{scenario.key}: ReplayTarget misses {target.misses}"
-    assert result.findings, f"{scenario.key}: planner produced no findings"
+    assert replay_target.misses == [], f"{scenario.key}: ReplayTarget misses {replay_target.misses}"
+    assert captured, f"{scenario.key}: planner_result_sink never fired"
+    planner_result = captured[0]
+    assert planner_result.findings, f"{scenario.key}: planner produced no findings"
     assert cassette_path.exists(), f"{scenario.key}: cassette not written (sensitive gate?)"
+
+    # Diagnosis-phase liveness (≥1 hypothesis): catch a mis-written authored
+    # ``[F#]`` label, which the record-time FakeBackend would NOT self-correct —
+    # it would silently drop the hypothesis and record a 0-hypothesis cassette
+    # (design D-3.5 step 1).
+    assert report is not None, f"{scenario.key}: pipeline returned no Report"
+    assert report.hypotheses, (
+        f"{scenario.key}: diagnosis recorded 0 hypotheses — check the authored "
+        "supporting_findings label points at a seeded finding"
+    )
+
+    # Print the D-7-sorted seeded findings list so a maintainer can verify the
+    # authored ``F#`` labels reference real findings (tasks 3.1). The F# labels
+    # are assigned by ``FindingStore.seed`` over the ``_seeding_sort_key`` order
+    # (design D-7), NOT the Report/collector order — sort here to match the real
+    # label assignment, otherwise the printout inverts F# for parallel-inspector
+    # scenarios and misleads the author into writing wrong ``supporting_findings``.
+    print(f"\n[{scenario.key}] D-7-sorted seeded findings (label order):")
+    for index, finding in enumerate(sorted(report.findings, key=_seeding_sort_key), start=1):
+        print(
+            f"  F{index} :: severity={finding.severity} "
+            f"inspector={finding.inspector_name} :: {finding.message}"
+        )
 
     SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
     snapshot_path = SNAPSHOTS_DIR / f"{scenario.key}.md"
-    snapshot_path.write_text(project_planner_result(result), encoding="utf-8")
+    snapshot_path.write_text(project_planner_result(planner_result), encoding="utf-8")
 
 
 def _selected_scenarios() -> list[IncidentScenario]:

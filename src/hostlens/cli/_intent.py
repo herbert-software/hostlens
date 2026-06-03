@@ -99,6 +99,7 @@ __all__ = [
     "build_planner",
     "render_intent_report",
     "render_planner_result",
+    "run_diagnosis_pipeline",
     "run_intent_diagnosis",
 ]
 
@@ -281,6 +282,47 @@ def _make_context_factory(
 # --------------------------------------------------------------------------- #
 
 
+def _seeding_sort_key(finding: Finding) -> tuple[str, str, str, tuple[str, ...], int, str]:
+    """Deterministic sort key for Planner-phase findings before ``store.seed`` (D-7).
+
+    F1/F2/… labels are assigned positionally by ``FindingStore.seed`` over the
+    list order, and the collector's same-response parallel append order is NOT
+    stable across runs (collector docstring). Without a stable sort the seeded
+    order — and hence the ``_render_findings_block`` text fed into the
+    Diagnostician's first user message — would jitter, making the diagnosis-phase
+    request key non-deterministic (offline cassette replay would then miss
+    non-deterministically) and the authored ``[F1]`` references point at a
+    different finding run-to-run.
+
+    The key is the **superset** of every per-finding field
+    ``_render_findings_block`` actually renders
+    (``severity inspector tags evidence :: message``), so a key tie ⇒ the
+    rendered line is byte-identical AND (since ``compute_finding_id`` hashes
+    name/version/message) the id is identical → the tie is harmless and needs no
+    fail-loud guard (design D-7, single-direction superset):
+
+    - ``tags`` uses ``tuple(f.tags)`` in **original order** (matching the
+      rendered ``",".join(f.tags)``), NOT ``sorted`` — a same-set different-order
+      tag list renders differently (``a,b`` vs ``b,a``) so must not tie;
+    - ``evidence`` uses ``len(f.evidence)`` (the render only emits the count);
+    - the key carries ``inspector_version`` (which the render does NOT emit): the
+      key is allowed to be strictly larger than the render projection, never
+      smaller.
+
+    The stamped ``inspector_name`` / ``inspector_version`` are guaranteed non-None
+    (the seed helper stamps them from the source ``InspectorResult`` before
+    sorting), so the key reads them directly.
+    """
+    return (
+        finding.inspector_name or "",
+        finding.inspector_version or "",
+        finding.severity,
+        tuple(finding.tags),
+        len(finding.evidence),
+        finding.message,
+    )
+
+
 def _seed_findings_from_snapshot(
     planner_snapshot: list[InspectorResult],
     store: FindingStore,
@@ -295,9 +337,15 @@ def _seed_findings_from_snapshot(
     finding's id is stamped with ``compute_finding_id(name, version, message)``
     — the SAME content-deterministic function ``Report.from_inspector_results``
     uses after diagnosis, so the FindingStore ids and the final
-    ``Report.findings`` ids are naturally equal (design D-3). The stamped
-    findings are seeded into ``store`` (the Diagnostician needs labeled findings
-    to reference) and returned as ``(label, finding)`` pairs.
+    ``Report.findings`` ids are naturally equal (design D-3).
+
+    After stamping (so ``inspector_name`` / ``inspector_version`` / ``id`` are
+    filled) and **before** ``store.seed`` the stamped findings are sorted by
+    ``_seeding_sort_key`` (design D-7): this makes the positional F1/F2 label
+    assignment — and the diagnosis-phase messages derived from it —
+    deterministic across runs. The stamped, sorted findings are seeded into
+    ``store`` (the Diagnostician needs labeled findings to reference) and
+    returned as ``(label, finding)`` pairs.
     """
     stamped: list[Finding] = []
     for ir in planner_snapshot:
@@ -311,6 +359,7 @@ def _seed_findings_from_snapshot(
                     }
                 )
             )
+    stamped.sort(key=_seeding_sort_key)
     labels = store.seed(stamped)
     return [
         SeededFinding(label=label, finding=finding)
@@ -398,25 +447,30 @@ def _assemble_report(
     return report
 
 
-async def run_intent_diagnosis(
+async def run_diagnosis_pipeline(
+    backend: LLMBackend,
     settings: Settings,
-    target: str,
-    intent: str,
-    target_registry: TargetRegistry,
-    inspector_registry: InspectorRegistry,
-    logger: structlog.stdlib.BoundLogger,
-    *,
+    context_factory: Callable[[], ToolContext],
+    report_target_name: str,
+    target_lookup_name: str,
     target_type: str,
+    intent: str,
+    *,
+    tool_clock: Callable[[], datetime] | None = None,
     observer: LoopObserver | None = None,
+    planner_result_sink: Callable[[PlannerResult], None] | None = None,
 ) -> Report | None:
-    """Assemble + run Planner → seed → Diagnostician → assemble ``Report`` (D-2/D-5).
+    """Run Planner → seed → Diagnostician → assemble ``Report`` (D-1/D-2/D-5).
 
-    ``create_backend(settings)`` is called **exactly once** here; the SAME
-    backend instance reaches both the ``PlannerAgent`` and the
-    ``DiagnosticianAgent`` (the only configuration failure point is before the
-    Planner runs — backend not configured raises ``ConfigError`` at assembly).
-    The backend is handed only to the two agents' loops, never into any
-    ``ToolContext`` (ADR-008).
+    The backend-injectable core shared by ``--intent`` (real
+    ``AnthropicAPIBackend`` via ``create_backend`` + wall clock) and ``demo``
+    (offline ``PlaybackBackend`` + frozen clock): the ``backend`` /
+    ``context_factory`` / ``tool_clock`` that ``run_intent_diagnosis`` used to
+    build internally are now injected, so neither path duplicates the two-loop
+    timing / id-consistency / status-reconcile contract (design D-1). The SAME
+    ``backend`` instance reaches BOTH the ``PlannerAgent`` and the
+    ``DiagnosticianAgent``; it is handed only to the two agents' loops, never
+    into any ``ToolContext`` (ADR-008).
 
     A single per-run ``InspectorResultCollector`` is injected into BOTH the
     Planner's default-tools registry and the Diagnostician's registry, so it
@@ -424,10 +478,33 @@ async def run_intent_diagnosis(
     orchestration operates the collector at TWO time points (design D-2):
 
     1. **Before diagnosis** — seed the ``FindingStore`` from the Planner-phase
-       snapshot (ids stamped by ``compute_finding_id``, no registry re-lookup).
+       snapshot (ids stamped by ``compute_finding_id``, no registry re-lookup,
+       then sorted by ``_seeding_sort_key`` for deterministic F1/F2 labels — D-7).
     2. **After diagnosis** — snapshot the FULL collector (Planner + every
        ``request_more_inspection`` supplement) and assemble the authoritative
        ``Report`` via ``Report.from_inspector_results``.
+
+    Two target names (design D-1): ``report_target_name`` is the display label
+    written into ``Report.target_name`` (``demo:<scenario>`` for demo, the real
+    target name for ``--intent``); ``target_lookup_name`` is the registry lookup
+    key fed to ``register_diagnostician_tools(target_name=)`` (the key
+    ``request_more_inspection`` resolves against ``ctx.target_registry.get``).
+    ``--intent`` passes the same string for both; demo splits them. A generic
+    guard asserts ``target_lookup_name`` is present in the supplied context's
+    target registry (the host-specific ``lookup == DEMO_TARGET_NAME`` invariant
+    is the demo-assembly side's job — this core must not hard-code it or it would
+    break the real ``--intent`` target; tasks 1.1 / 2.1).
+
+    ``register_default_tools`` is called with BOTH ``collector=`` and
+    ``clock=tool_clock`` so a frozen-clock caller (demo) keeps its
+    ``sampling_window`` commands byte-stable (cassette request key would miss
+    otherwise — design D-1 tool_clock).
+
+    ``planner_result_sink`` (when non-None) is invoked exactly once right after
+    ``planner.run`` returns, while the ``PlannerResult`` is still in hand — the
+    mount point a recording harness uses to project the Planner-only incident
+    snapshot in a single pass (design D-3.5 step3). ``--intent`` passes ``None``
+    → no-op → behaviour byte-identical to the pre-refactor seam.
 
     ``started_at`` / ``finished_at`` are taken here (``LoopResult`` carries no
     timestamps): once before the Planner runs and once after the diagnosis loop.
@@ -438,27 +515,32 @@ async def run_intent_diagnosis(
     called ``run_inspector``). ``from_inspector_results`` raises ``ValueError``
     on an empty list, so the emptiness is checked BEFORE assembly and the CLI
     maps ``None`` to the no-result degradation (stderr note + empty stdout +
-    exit 2 + no persist). Every non-empty path returns a faithful ``Report``.
+    exit 2 + no persist). A ``CassetteMiss`` (offline replay drift) is NOT
+    caught here — it propagates verbatim to the caller boundary (design D-1).
+    Every non-empty path returns a faithful ``Report``.
 
     ``observer`` is passed straight through to BOTH agent runs, so the Planner
     and Diagnostician progress trees both stream to the CLI's stderr sink.
 
-    ``target_type`` comes from the orchestration's already-resolved
+    ``target_type`` comes from the caller's already-resolved
     ``ExecutionTarget.type`` and is threaded into the factory, so SSH/Docker/K8s
     intent reports record their real target type instead of the factory default
     ``local`` (which would pollute persisted metadata).
     """
-    backend: LLMBackend = create_backend(settings)
-    context_factory = _make_context_factory(settings, target_registry, inspector_registry, logger)
+    probe_ctx = context_factory()
+    probe_ctx.target_registry.get(target_lookup_name)
 
     collector = InspectorResultCollector()
 
     planner_registry = ToolRegistry()
-    register_default_tools(planner_registry, collector=collector)
+    register_default_tools(planner_registry, collector=collector, clock=tool_clock)
     planner = PlannerAgent(backend, planner_registry, settings, context_factory)
 
     started_at = datetime.now(UTC)
     planner_result = await planner.run(intent, observer=observer)
+
+    if planner_result_sink is not None:
+        planner_result_sink(planner_result)
 
     if planner_result.loop_result.terminal_status == "failed_api_unavailable":
         # The Planner never reached the API: the collector is empty and there is
@@ -481,8 +563,8 @@ async def run_intent_diagnosis(
         register_diagnostician_tools(
             diag_registry,
             finding_store=store,
-            target_name=target,
-            clock=None,
+            target_name=target_lookup_name,
+            clock=tool_clock,
             collector=collector,
         )
         return DiagnosticianAgent(backend, diag_registry, settings, context_factory)
@@ -506,7 +588,7 @@ async def run_intent_diagnosis(
     token_usage = _sum_loop_usage(planner_result.loop_result.usage_totals, diag_usage)
 
     return _assemble_report(
-        target,
+        report_target_name,
         intent,
         full_snapshot,
         diag_result,
@@ -514,6 +596,44 @@ async def run_intent_diagnosis(
         finished_at,
         token_usage=token_usage,
         target_type=target_type,
+    )
+
+
+async def run_intent_diagnosis(
+    settings: Settings,
+    target: str,
+    intent: str,
+    target_registry: TargetRegistry,
+    inspector_registry: InspectorRegistry,
+    logger: structlog.stdlib.BoundLogger,
+    *,
+    target_type: str,
+    observer: LoopObserver | None = None,
+) -> Report | None:
+    """``--intent`` thin wrapper over ``run_diagnosis_pipeline`` (design D-1).
+
+    Builds the real backend (``create_backend(settings)`` — raises
+    ``ConfigError`` mapped to exit 3 by the CLI when no backend is configured)
+    and the real ``ToolContext`` factory over the live ``target_registry`` /
+    ``inspector_registry``, then delegates to the shared core with
+    ``report_target_name == target_lookup_name == target``, the production wall
+    clock (``tool_clock=None``), and no Planner-result sink (``--intent`` does
+    not record). Behaviour is byte-identical to the pre-refactor seam; the
+    existing ``--intent`` tests are the regression guard.
+    """
+    backend: LLMBackend = create_backend(settings)
+    context_factory = _make_context_factory(settings, target_registry, inspector_registry, logger)
+
+    return await run_diagnosis_pipeline(
+        backend,
+        settings,
+        context_factory,
+        report_target_name=target,
+        target_lookup_name=target,
+        target_type=target_type,
+        intent=intent,
+        tool_clock=None,
+        observer=observer,
     )
 
 

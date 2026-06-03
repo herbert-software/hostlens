@@ -47,6 +47,8 @@ from hostlens.tools.default_tools import register_default_tools
 from hostlens.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from hostlens.agent.backend import LLMBackend
     from hostlens.agent.planner import PlannerResult
     from hostlens.targets.replay import ReplayTarget
@@ -139,13 +141,81 @@ def build_incident_planner_over_fixture(
     return planner, replay_target
 
 
-def build_authored_responses(scenario: IncidentScenario) -> list[MessageResponse]:
-    """Two scripted model responses: one parallel tool-use turn + one narrative.
+def build_incident_pipeline_inputs(
+    backend: LLMBackend,
+    *,
+    fixture_path: Path,
+) -> tuple[LLMBackend, Callable[[], ToolContext], ReplayTarget, Settings]:
+    """Assemble the 4-tuple ``run_diagnosis_pipeline`` needs for a full incident run.
 
-    Turn 1 emits one ``run_inspector`` ``tool_use`` block per scenario
-    inspector (the Agent picking the scenario's core inspectors). Turn 2 ends
-    the loop with the scenario narrative. Usage numbers are fixed so the
-    projected token totals are deterministic.
+    Mirrors ``demo.assembly.build_demo_pipeline``'s 4-tuple shape
+    ``(backend, context_factory, replay_target, settings)`` so the incident
+    generator can drive the SAME shared Planner→Diagnostician→Report core the
+    ``--intent`` path uses, capturing BOTH phases' requests through the supplied
+    ``RecordingBackend`` (design D-3.5 step 2 / tasks 3.1).
+
+    The ``backend`` is returned verbatim (it is the recorder). ``context_factory``
+    reuses the incident ``ReplayTarget`` (registered under ``incident-host``) + the
+    builtin ``InspectorRegistry``. The frozen clock is injected into the tool
+    registry by ``run_diagnosis_pipeline`` (``tool_clock=frozen_clock``), not here,
+    so the factory only carries the registries / settings / logger.
+
+    ``settings`` is the env-stripped ``Settings(agent=AgentSettings())`` whose
+    ``agent.primary_model`` defaults to ``claude-opus-4-7`` — byte-identical to the
+    historical recording model (the request key's ``model`` source). Returning
+    this instance (the caller passes it straight to the pipeline) keeps the
+    record-time and replay-time ``model`` identical, the D-3.5 byte-identity
+    prerequisite.
+    """
+    settings = Settings(agent=AgentSettings())
+
+    target_registry = build_registry_from_config(
+        TargetsConfig(
+            version="1",
+            targets=[
+                ReplayEntry(
+                    name=INCIDENT_TARGET_NAME,
+                    type="replay",
+                    fixture=str(fixture_path),
+                )
+            ],
+        ),
+        settings,
+    )
+    replay_target: ReplayTarget = target_registry.get(INCIDENT_TARGET_NAME)  # type: ignore[assignment]
+
+    inspector_registry = build_registry_from_search_paths([], settings=settings).registry
+
+    logger = structlog.get_logger("incident")
+
+    def context_factory() -> ToolContext:
+        return ToolContext(
+            target_registry=target_registry,
+            inspector_registry=inspector_registry,
+            config=settings,
+            logger=logger,
+            approval_service=NoopApprovalService(),
+            cancel=asyncio.Event(),
+        )
+
+    return backend, context_factory, replay_target, settings
+
+
+# The ordinal label the diagnosis-phase ``correlate_findings`` references. F1 is
+# the first label ``FindingStore.seed`` assigns under the D-7 stable sort, so it
+# is guaranteed present for every scenario (each scenario seeds ≥1 finding). The
+# recording generator prints the full D-7-sorted seeded list so a maintainer can
+# verify F1 points at a real finding (design D-3.5 / tasks 3.1).
+_DIAG_SUPPORTING_LABEL = "F1"
+
+
+def build_planner_responses(scenario: IncidentScenario) -> list[MessageResponse]:
+    """The two scripted Planner-phase turns (one parallel tool-use + narrative).
+
+    Turn 1 emits one ``run_inspector`` ``tool_use`` block per scenario inspector
+    (the Agent picking the scenario's core inspectors). Turn 2 ends the Planner
+    loop with the scenario narrative. Usage numbers are fixed so the projected
+    token totals are deterministic.
     """
     tool_blocks: list[ToolUseBlock | TextBlock] = [
         ToolUseBlock(
@@ -177,6 +247,62 @@ def build_authored_responses(scenario: IncidentScenario) -> list[MessageResponse
         usage=Usage(input_tokens=1500, output_tokens=140),
     )
     return [turn1, turn2]
+
+
+def build_diagnostician_responses(scenario: IncidentScenario) -> list[MessageResponse]:
+    """The two scripted Diagnostician-phase turns (one ``correlate_findings`` + finalize).
+
+    Turn 1 records exactly one root-cause hypothesis via ``correlate_findings``,
+    referencing the ordinal label ``F1`` (the first D-7-sorted seeded finding,
+    always present) — NOT a ``finding.id`` (``diagnostician_tools.py``: the model
+    references ordinal labels). It deliberately never calls
+    ``request_more_inspection`` so the diagnosis phase adds zero target commands
+    and the fixture stays untouched (design D-3). Turn 2 finalizes the diagnosis
+    loop with a short narrative. Usage numbers are fixed for determinism.
+    """
+    correlate = MessageResponse(
+        id="msg_incident_diag_turn1",
+        model="claude-test",
+        role="assistant",
+        content=[
+            ToolUseBlock(
+                type="tool_use",
+                id="tu_diag_0",
+                name="correlate_findings",
+                input={
+                    "description": scenario.hypothesis,
+                    "confidence": "high",
+                    "supporting_findings": [_DIAG_SUPPORTING_LABEL],
+                    "suggested_actions": list(scenario.suggested_actions),
+                },
+            )
+        ],
+        stop_reason="tool_use",
+        usage=Usage(input_tokens=1700, output_tokens=110),
+    )
+    finalize = MessageResponse(
+        id="msg_incident_diag_turn2",
+        model="claude-test",
+        role="assistant",
+        content=[TextBlock(type="text", text=scenario.diagnosis_narrative)],
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=1900, output_tokens=160),
+    )
+    return [correlate, finalize]
+
+
+def build_authored_responses(scenario: IncidentScenario) -> list[MessageResponse]:
+    """Full-chain scripted responses: 2 Planner turns + 2 Diagnostician turns.
+
+    The loop contract requires every ``tool_use`` response be followed by a
+    backend call returning ``end_turn``, so the happy path is exactly four
+    ordered ``MessageResponse`` objects (design D-3.5 step 1):
+    ``planner_tool_use`` → ``planner_end_turn`` → ``diag_correlate_tool_use`` →
+    ``diag_end_turn``. A single ``FakeBackend`` over this list serves BOTH loops;
+    the ``RecordingBackend`` captures both phases' requests into one cassette
+    (matched by request key, not order — design D-2).
+    """
+    return build_planner_responses(scenario) + build_diagnostician_responses(scenario)
 
 
 async def assert_incident_snapshot(scenario_key: str, backend: LLMBackend) -> None:

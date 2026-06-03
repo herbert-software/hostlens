@@ -1,25 +1,33 @@
 """``hostlens demo`` Typer subcommand group — offline scenario replay.
 
-Spec: ``openspec/changes/add-demo-cli/specs/demo-cli-command/spec.md``.
+Spec: ``openspec/changes/wire-demo-to-report/specs/demo-cli-command/spec.md``.
 
-``demo run <scenario>`` runs the full Planner Agent pipeline (``ReplayTarget`` +
-``PlaybackBackend``) over a packaged incident scenario and renders the report to
-stdout. It is fully self-contained: no real Anthropic API call, no SSH / remote
-connection, no ``ANTHROPIC_API_KEY`` and no user ``targets.yaml`` required
-(design D3 / D7). Progress streams to stderr via ``RichLiveObserver`` (default
-on; ``--quiet`` / ``--no-progress`` are two spellings of one boolean switch).
+``demo run <scenario>`` runs the full Planner → Diagnostician pipeline
+(``ReplayTarget`` + ``PlaybackBackend``) over a packaged incident scenario,
+assembles a faithful first-class ``Report`` via the shared
+``run_diagnosis_pipeline`` core (design D1), and renders the intent-style report
+(narrative + ``## Findings`` + ``## 根因假设``) to stdout. It is fully
+self-contained: no real Anthropic API call, no SSH / remote connection, no
+``ANTHROPIC_API_KEY`` and no user ``targets.yaml`` required (design D3 / D7).
+Progress streams to stderr via ``RichLiveObserver`` (default on; ``--quiet`` /
+``--no-progress`` are two spellings of one boolean switch).
 
 ``demo list`` enumerates the scenario registry (the single SOT shared with
 ``demo run``).
 
-Exit code contract (design D8, priority ``3 > 2 > 1 > 0``):
+Exit code contract (design D4, priority ``3 > 2 > 1 > 0``):
 
 - ``0`` / ``1`` / ``2`` for a *successfully assembled* run — reuses
-  ``inspect._compute_intent_exit_code`` (``ok`` + no critical → 0; ``ok`` + ≥1
-  critical → 1; non-``ok`` terminal_status → 2).
-- ``2`` also covers assembly-phase asset corruption (``PlaybackBackend``
-  ``ValueError`` on bad cassette JSON / ``ReplayTarget`` ``ConfigError`` on bad
-  fixture schema) and runtime Agent drift (``CassetteMiss`` / ``ReplayMiss``).
+  ``inspect._compute_intent_report_exit_code`` over the assembled ``Report``
+  (``meta.status`` ok + no critical → 0; ok + ≥1 critical → 1; any degraded
+  ``meta.status`` — ``degraded_*`` / ``empty_response`` / ``partial`` → 2).
+- ``2`` also covers the no-result path (empty collector → ``None`` Report),
+  assembly-phase asset corruption (``PlaybackBackend`` ``ValueError`` on bad
+  cassette JSON / ``ReplayTarget`` ``ConfigError`` on bad fixture schema),
+  runtime Agent drift (``CassetteMiss`` / ``ReplayMiss``) in EITHER loop, and
+  ``--persist`` store failure (raise → ``internal:`` / orphan → ``warning:``,
+  reusing the ``--intent`` ``(orphaned or persist_failed) and exit_code in (0,1)``
+  escalation).
 - ``3`` is demo's own caller boundary: unknown scenario / missing packaged
   asset (both caught by the pre-flight check *before* assembly) and ``--output``
   write failure.
@@ -27,7 +35,7 @@ Exit code contract (design D8, priority ``3 > 2 > 1 > 0``):
 A Python traceback never reaches the user: any unexpected exception is wrapped
 as a single ``internal: <kind>: <msg>`` stderr line (mirrors ``inspect.py``).
 The pre-flight asset resolution runs *before* assembly so an unknown scenario or
-un-packaged asset is reliably exit 3, not exit 2 (design D8).
+un-packaged asset is reliably exit 3, not exit 2 (design D4).
 """
 
 from __future__ import annotations
@@ -38,18 +46,30 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import click
 import structlog
 import typer
 
-from hostlens.agent.planner import PlannerResult
-from hostlens.cli._intent import RichLiveObserver, render_planner_result
-from hostlens.cli.inspect import _compute_intent_exit_code
+from hostlens.cli._intent import (
+    RichLiveObserver,
+    _seeding_sort_key,
+    render_intent_report,
+    run_diagnosis_pipeline,
+)
+from hostlens.cli.inspect import (
+    _compute_intent_report_exit_code,
+    _persist_report,
+)
 from hostlens.core.logging import configure_logging
-from hostlens.demo.assembly import build_demo_planner
+from hostlens.demo.assembly import DEMO_TARGET_NAME, _frozen_clock, build_demo_pipeline
 from hostlens.demo.assets import asset_exists
 from hostlens.demo.registry import DemoScenario, get_scenario, list_scenarios
+
+if TYPE_CHECKING:
+    from hostlens.agent.backend import LLMBackend
+    from hostlens.reporting.models import Report
 
 __all__ = ["app"]
 
@@ -211,21 +231,37 @@ def run_cmd(
         "--no-progress",
         help="Suppress the live Agent progress stream (report still renders).",
     ),
+    persist: bool = typer.Option(
+        False,
+        "--persist",
+        help=(
+            "Save the assembled Report to the REAL report store "
+            "($XDG_DATA_HOME/hostlens/reports.db, same store 'hostlens reports' "
+            "reads). Off by default; the demo Report is tagged target_name="
+            "'demo:<scenario>'."
+        ),
+    ),
 ) -> None:
-    """Replay a packaged incident scenario through the Planner Agent.
+    """Replay a packaged incident scenario through the full diagnosis pipeline.
 
-    The scenario runs entirely offline (``ReplayTarget`` + ``PlaybackBackend``);
-    progress streams to stderr (unless ``--quiet`` / ``--no-progress``) and the
-    rendered report goes to stdout (or ``--output``). Exit codes follow the
-    4-value contract documented at the module level (design D8).
+    The scenario runs entirely offline (``ReplayTarget`` + ``PlaybackBackend``):
+    Planner → Diagnostician → a faithful first-class ``Report`` (intent-style
+    render: narrative + ``## Findings`` + ``## 根因假设``). Progress streams to
+    stderr (unless ``--quiet`` / ``--no-progress``) and the rendered report goes
+    to stdout (or ``--output``). Exit codes follow the 4-value contract
+    documented at the module level (design D4).
+
+    The one telemetry line carries the cassette's RECORDED token counts (a replay
+    snapshot value), NOT a real billing measurement — the demo issues no API call.
 
     Exit codes:
-      0  healthy (no critical finding) — note: the 8 bundled incident scenarios
-         all contain a critical finding by design, so a successful replay normally
-         exits 1, not 0.
-      1  replay succeeded and the report contains >=1 critical finding (expected
+      0  healthy (``meta.status`` ok, no critical finding) — note: the 8 bundled
+         incident scenarios all contain a critical finding by design, so a
+         successful replay normally exits 1, not 0.
+      1  replay succeeded and the Report contains >=1 critical finding (expected
          for the bundled scenarios)
-      2  degraded run / corrupt asset / replay drift
+      2  degraded ``meta.status`` / no-result / corrupt asset / replay drift /
+         persist failure (``--persist``)
       3  usage error: unknown scenario, missing packaged asset, --output unwritable
     """
 
@@ -243,22 +279,53 @@ def run_cmd(
 
         observer = None if quiet else RichLiveObserver()
         try:
-            result = _run_scenario(resolved.key, resolved.intent, observer)
+            report = _run_scenario(resolved.key, resolved.intent, observer)
         finally:
             # fail-loud loop paths don't emit RunFinalized, so close the Live
             # region here regardless of success / degrade / raise.
             if observer is not None:
                 observer.close()
 
-        rendered = render_planner_result(result, fmt)
+        if report is None:
+            # No-result path (collector empty — the demo's normal replay never
+            # hits this). No Report → nothing to render or persist; one-line
+            # degrade reason, empty stdout, skip persist, exit 2 (mirrors
+            # --intent).
+            typer.echo(
+                "hostlens demo: degraded run (no inspector results collected); no report produced",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        # Persist BEFORE rendering (only on explicit --persist) so the Report is
+        # on disk even if a later render step fails — mirrors the --intent Report
+        # seam (inspect.py:638). no-result already returned above, so persistence
+        # is never silently skipped as a fake success.
+        persist_failed = False
+        orphaned = False
+        if persist:
+            try:
+                orphaned = _persist_report(report)
+            except Exception as exc:
+                kind = type(exc).__name__
+                typer.echo(f"internal: failed to persist report: {kind}: {exc}", err=True)
+                persist_failed = True
+
+        rendered = render_intent_report(report, fmt)
         _emit_output(rendered, output)
 
-        exit_code = _compute_intent_exit_code(result)
+        exit_code = _compute_intent_report_exit_code(report)
+        # Reuse the --intent Report seam: an orphan/persist-fail escalates a
+        # healthy (0) OR critical (1) run to 2 — the ``in (0, 1)`` predicate (NOT
+        # the --inspector ``== 0`` variant), so a critical-finding demo that
+        # orphans still surfaces the persist degradation.
+        if (orphaned or persist_failed) and exit_code in (0, 1):
+            exit_code = 2
         if exit_code != 0:
-            if exit_code == 2:
+            if exit_code == 2 and not (orphaned or persist_failed):
+                status = report.meta.status if report.meta is not None else "unknown"
                 typer.echo(
-                    "hostlens demo: degraded run (terminal_status="
-                    f"{result.loop_result.terminal_status})",
+                    f"hostlens demo: degraded run (status={status})",
                     err=True,
                 )
             raise typer.Exit(code=exit_code)
@@ -286,28 +353,74 @@ def run_cmd(
         structlog.configure(**saved_structlog_config)
 
 
+def _order_findings_for_demo(report: Report) -> Report:
+    """Pin the demo's findings render order deterministically (design D-7 extension).
+
+    Final ``Report.findings`` order follows ``InspectorResultCollector`` append
+    order = parallel-inspector handler completion order, which the collector
+    declares not stable across runs (the runner's ``asyncio.to_thread`` DSL eval
+    can genuinely reorder it). The diagnosis phase is already pinned by the D-7
+    seed sort; extend the SAME key to the user-facing render so the offline demo
+    is byte-stable across environments. Demo-local — deliberately NOT in the
+    shared ``render_intent_report`` (which also serves ``--intent``, out of scope).
+    """
+    return report.model_copy(update={"findings": sorted(report.findings, key=_seeding_sort_key)})
+
+
 def _run_scenario(
     scenario_key: str, intent: str, observer: RichLiveObserver | None
-) -> PlannerResult:
-    """Assemble + run the demo planner for ``scenario_key`` inside an ExitStack.
+) -> Report | None:
+    """Assemble + run the full demo pipeline for ``scenario_key`` in an ExitStack.
 
-    The ``ExitStack`` holds the reader ``as_file()`` context managers for the
-    packaged assets and stays open until ``PlannerAgent.run()`` returns (design
-    D2 lifecycle). After the run we assert ``replay_target.misses == []`` — the
-    request-key / strict-consumption drift guard (design D7): a non-empty
-    ``misses`` means the assembly produced a request key that diverged from the
-    recording, so the run is not the deterministic replay the demo promises.
+    Runs Planner → Diagnostician → ``Report`` via the shared
+    ``run_diagnosis_pipeline`` core (design D1), over the demo's offline
+    ``PlaybackBackend`` + frozen clock. Returns the assembled ``Report`` (or
+    ``None`` on the no-result path).
+
+    The ``ExitStack`` MUST wrap the WHOLE ``run_diagnosis_pipeline`` call (both
+    loops + seed + assembly + the ``misses`` assertion): the single
+    ``PlaybackBackend`` / ``ReplayTarget`` reads its packaged-asset reader across
+    both loops, so closing the reader early would make the Diagnostician's
+    ``messages_create`` miss (design D2 lifecycle). After the run we assert
+    ``replay_target.misses == []`` — the request-key / strict-consumption drift
+    guard (design D7): a non-empty ``misses`` means the assembly diverged from
+    the recording, so the run is not the deterministic replay the demo promises.
+
+    The demo-side D1 invariant is also asserted here: the diagnostician lookup
+    name (``DEMO_TARGET_NAME``) MUST equal the ``ReplayTarget`` registry name, so
+    a future ``request_more_inspection`` cassette would resolve the target rather
+    than miss (the core deliberately does NOT hard-code this — that would break
+    the real ``--intent`` target).
     """
 
     with contextlib.ExitStack() as stack:
-        planner, replay_target = build_demo_planner(scenario_key, exit_stack=stack)
-        result = asyncio.run(planner.run(intent, observer=observer))
+        backend, context_factory, replay_target, settings = build_demo_pipeline(
+            scenario_key, exit_stack=stack
+        )
+        # D-1 invariant: the diagnostician lookup name MUST equal the name the
+        # ReplayTarget is actually registered under, so a future
+        # ``request_more_inspection`` cassette resolves the target instead of
+        # missing. Assert the real registered name, not just the literal constant.
+        assert replay_target.name == DEMO_TARGET_NAME
+        report = asyncio.run(
+            run_diagnosis_pipeline(
+                cast("LLMBackend", backend),
+                settings,
+                context_factory,
+                report_target_name=f"demo:{scenario_key}",
+                target_lookup_name=DEMO_TARGET_NAME,
+                target_type=replay_target.type,
+                intent=intent,
+                tool_clock=_frozen_clock,
+                observer=observer,
+            )
+        )
         if replay_target.misses:
             raise RuntimeError(
                 f"replay drift: {len(replay_target.misses)} unmatched command(s) "
                 f"for scenario {scenario_key}"
             )
-    return result
+    return _order_findings_for_demo(report) if report is not None else None
 
 
 # --------------------------------------------------------------------------- #
