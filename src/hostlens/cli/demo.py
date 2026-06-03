@@ -1,6 +1,6 @@
 """``hostlens demo`` Typer subcommand group — offline scenario replay.
 
-Spec: ``openspec/changes/add-demo-cli/specs/demo-cli-command/spec.md``.
+Spec: ``openspec/changes/wire-demo-to-report/specs/demo-cli-command/spec.md``.
 
 ``demo run <scenario>`` runs the full Planner → Diagnostician pipeline
 (``ReplayTarget`` + ``PlaybackBackend``) over a packaged incident scenario,
@@ -397,7 +397,11 @@ def _run_scenario(
         backend, context_factory, replay_target, settings = build_demo_pipeline(
             scenario_key, exit_stack=stack
         )
-        assert DEMO_TARGET_NAME == "incident-host"
+        # D-1 invariant: the diagnostician lookup name MUST equal the name the
+        # ReplayTarget is actually registered under, so a future
+        # ``request_more_inspection`` cassette resolves the target instead of
+        # missing. Assert the real registered name, not just the literal constant.
+        assert replay_target.name == DEMO_TARGET_NAME
         report = asyncio.run(
             run_diagnosis_pipeline(
                 cast("LLMBackend", backend),
