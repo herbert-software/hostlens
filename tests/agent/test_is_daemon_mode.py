@@ -1,8 +1,10 @@
 """Tests for ``hostlens.agent.backend.is_daemon_mode`` hook.
 
-M2 scope per spec §需求:`is_daemon_mode` M2 stub: the function ALWAYS
-returns False; the signature is locked so M5 Scheduler can flip the
-behavior without churning ``create_backend`` or its tests.
+M4 scope (add-scheduler, design D-12): the function reads
+``settings.daemon_mode`` — defaults to False, flips to True only when the
+``schedule daemon`` / ``schedule run`` boot path set the flag. The signature
+stays locked so the M2-era ``create_backend`` call site and tests keep
+working unchanged.
 
 The signature contract test ensures:
 - single parameter ``settings: Settings``
@@ -35,6 +37,22 @@ def test_is_daemon_mode_returns_false_for_backend_configured_settings() -> None:
         ),
     )
     assert is_daemon_mode(settings) is False
+
+
+def test_is_daemon_mode_returns_true_when_flag_set() -> None:
+    """M4: ``daemon_mode=True`` (set by the scheduler boot path) flips it."""
+
+    settings = Settings(daemon_mode=True)
+    assert is_daemon_mode(settings) is True
+
+
+def test_is_daemon_mode_returns_true_via_model_copy() -> None:
+    """The boot path flips the flag with ``model_copy(update=...)``."""
+
+    settings = Settings()
+    daemon_settings = settings.model_copy(update={"daemon_mode": True})
+    assert is_daemon_mode(settings) is False
+    assert is_daemon_mode(daemon_settings) is True
 
 
 def test_is_daemon_mode_signature_is_locked() -> None:

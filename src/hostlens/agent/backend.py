@@ -453,9 +453,11 @@ def check_capability_consistency(
 def is_daemon_mode(settings: Settings) -> bool:
     """Return whether Hostlens is running in scheduler daemon mode.
 
-    M2 scope: **always returns False**. The hook lands now so M5 Scheduler
-    can flip it without churning the ``create_backend`` call site or any
-    downstream ``BackendDiagnostics.ensure_safe_for_daemon`` gate.
+    M4 scope (add-scheduler, design D-12): reads ``settings.daemon_mode``.
+    The ``schedule daemon`` / ``schedule run`` entry points set that flag to
+    True before calling ``create_backend``, so the existing daemon-safety
+    gate inside the factory fires for those long-running paths only. Every
+    other code path leaves ``daemon_mode`` at its False default.
 
     The function is intentionally defined at module level (next to
     ``create_backend``) so tests can ``monkeypatch.setattr(
@@ -466,9 +468,7 @@ def is_daemon_mode(settings: Settings) -> bool:
     it via the module-level name rather than a local alias.
     """
 
-    # Suppress unused-arg lint without dropping the signature contract.
-    _ = settings
-    return False
+    return settings.daemon_mode
 
 
 def create_backend(settings: Settings) -> LLMBackend:

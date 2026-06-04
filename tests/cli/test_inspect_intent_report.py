@@ -514,7 +514,7 @@ def test_intent_critical_finding_exit_1(
 ) -> None:
     """status=ok + ≥1 critical finding → exit 1 (Report.findings based)."""
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
     from hostlens.reporting.models import Finding
     from hostlens.tools.registry import ToolRegistry
     from hostlens.tools.schemas.run_inspector import RunInspectorInput, RunInspectorOutput
@@ -704,7 +704,7 @@ def test_intent_no_result_not_persisted(
 def _register_critical_ok_report(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch default-tools registration so the run yields status=ok + a critical finding."""
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
     from hostlens.inspectors.result import InspectorResult
     from hostlens.reporting.models import Finding
     from hostlens.tools.base import ToolSpec

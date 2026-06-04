@@ -694,7 +694,7 @@ def test_intent_secret_in_tool_failure_not_leaked(
     progress / error envelope, which is unaffected by the no-result outcome.
     """
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
     from hostlens.tools.registry import ToolRegistry
     from hostlens.tools.schemas.run_inspector import RunInspectorInput, RunInspectorOutput
 

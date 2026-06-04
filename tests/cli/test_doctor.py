@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -699,4 +700,212 @@ def test_doctor_json_keeps_all_pre_existing_keys(
         "loaded",
         "errors",
         "missing_secrets",
+    }
+
+
+# ---------------------------------------------------------------------------
+# M4 add-scheduler: schedule health under ``checks.schedules`` (design D-10)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def schedules_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Run doctor with cwd at a tmp root and isolate the runs.db.
+
+    ``_check_schedules`` scans the cwd-relative ``schedules/`` directory
+    (matching the Demo Path) and reads ``RunStore``'s default db under
+    ``$XDG_DATA_HOME``. Both are redirected at the tmp root so tests never
+    touch the repo's real ``schedules/`` or the operator's home.
+    """
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    sdir = tmp_path / "schedules"
+    sdir.mkdir()
+    return sdir
+
+
+def _write_schedule(path: Path, *, name: str, target: str) -> None:
+    _write_yaml(
+        path,
+        {
+            "name": name,
+            "schedule": {"interval": {"minutes": 1}, "timezone": "Asia/Shanghai"},
+            "targets": [target],
+            "intent": "check this host",
+        },
+    )
+
+
+def test_doctor_schedules_absent_dir_ok(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``schedules/`` directory → ``checks.schedules`` is ``ok``."""
+
+    monkeypatch.chdir(tmp_path)  # tmp_path has no schedules/ subdir
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["schedules"]["status"] == "ok"
+    assert payload["checks"]["schedules"]["detail"] == "no schedules configured"
+
+
+def test_doctor_schedules_empty_dir_ok(
+    runner: CliRunner,
+    schedules_dir: Path,
+) -> None:
+    """Empty ``schedules/`` (no manifests) → ``ok`` with ``manifests=0``."""
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["schedules"]["status"] == "ok"
+    assert payload["checks"]["schedules"]["detail"] == "manifests=0"
+
+
+def test_doctor_schedules_valid_manifest_visible(
+    runner: CliRunner,
+    schedules_dir: Path,
+    targets_yaml: Path,
+) -> None:
+    """A valid manifest surfaces under ``checks.schedules`` with a count."""
+
+    _write_yaml(
+        targets_yaml,
+        {"version": "1", "targets": [{"name": "local-host", "type": "local"}]},
+    )
+    _write_schedule(schedules_dir / "demo.yaml", name="demo", target="local-host")
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+    check = payload["checks"]["schedules"]
+    assert check["status"] == "ok"
+    assert "manifests=1" in check["detail"]
+    assert "next_fire_time_ok=1/1" in check["detail"]
+    assert "recent_runs=0" in check["detail"]
+
+
+def test_doctor_schedules_invalid_manifest_error(
+    runner: CliRunner,
+    schedules_dir: Path,
+    targets_yaml: Path,
+) -> None:
+    """An unregistered target makes the loader fail-loud → status ``error``.
+
+    doctor must NOT crash; it reports the loader's ``kind`` in ``detail``
+    and flips the overall exit code to 1 (fail-loud parity with targets /
+    inspectors).
+    """
+
+    _write_yaml(
+        targets_yaml,
+        {"version": "1", "targets": [{"name": "local-host", "type": "local"}]},
+    )
+    _write_schedule(schedules_dir / "bad.yaml", name="bad", target="not-registered")
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 1, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    check = payload["checks"]["schedules"]
+    assert check["status"] == "error"
+    assert "schedule_target_not_registered" in check["detail"]
+
+
+def test_doctor_schedules_malformed_yaml_does_not_crash(
+    runner: CliRunner,
+    schedules_dir: Path,
+) -> None:
+    """A syntactically broken manifest is reported as ``error``, no crash."""
+
+    (schedules_dir / "broken.yaml").write_text("name: [unclosed")
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 1, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["schedules"]["status"] == "error"
+
+
+def test_doctor_schedules_recent_runs_distribution(
+    runner: CliRunner,
+    schedules_dir: Path,
+    targets_yaml: Path,
+    tmp_path: Path,
+) -> None:
+    """Recent ``Run`` rows fold into the status distribution in ``detail``."""
+
+    from hostlens.scheduler.store import Run, RunStatus, RunStore
+
+    _write_yaml(
+        targets_yaml,
+        {"version": "1", "targets": [{"name": "local-host", "type": "local"}]},
+    )
+    _write_schedule(schedules_dir / "demo.yaml", name="demo", target="local-host")
+
+    # Seed the default-location runs.db (under the redirected XDG_DATA_HOME).
+    db_path = tmp_path / "data" / "hostlens" / "runs.db"
+    store = RunStore(db_path=db_path)
+    now = datetime.now(UTC)
+    asyncio.run(
+        store.save(
+            Run(
+                run_id="r1",
+                schedule_name="demo",
+                triggered_at=now,
+                status=RunStatus.MISSED,
+                targets=["local-host"],
+            )
+        )
+    )
+    asyncio.run(
+        store.save(
+            Run(
+                run_id="r2",
+                schedule_name="demo",
+                triggered_at=now,
+                status=RunStatus.FAILED,
+                started_at=now,
+                targets=["local-host"],
+            )
+        )
+    )
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+    check = payload["checks"]["schedules"]
+    assert check["status"] == "ok"
+    assert "recent_runs=2" in check["detail"]
+    assert "failed=1" in check["detail"]
+    assert "missed=1" in check["detail"]
+
+
+def test_doctor_schedules_json_top_schema_unchanged(
+    runner: CliRunner,
+    schedules_dir: Path,
+    targets_yaml: Path,
+) -> None:
+    """``checks.schedules`` is add-only: top-level schema stays the closed set.
+
+    The cli-foundation closed ``--json`` schema (``version`` / ``timestamp``
+    / ``checks`` / ``ready``) must not gain a top-level ``schedules`` field —
+    the schedule health lands strictly inside ``checks``.
+    """
+
+    _write_yaml(
+        targets_yaml,
+        {"version": "1", "targets": [{"name": "local-host", "type": "local"}]},
+    )
+    _write_schedule(schedules_dir / "demo.yaml", name="demo", target="local-host")
+    result = runner.invoke(app, ["doctor", "--json"])
+    payload = json.loads(result.stdout)
+
+    assert {"version", "timestamp", "checks", "ready"} <= set(payload.keys())
+    # No top-level ``schedules`` field — it lives only under ``checks``.
+    assert "schedules" not in payload
+    assert "schedules" in payload["checks"]
+    # The schedules check obeys the same per-check shape: status + add-only
+    # optional ``detail`` / ``path`` — no new required field on CheckResult.
+    assert set(payload["checks"]["schedules"].keys()) <= {"status", "detail", "path"}
+    assert payload["checks"]["schedules"]["status"] in {
+        "ok",
+        "present",
+        "missing",
+        "unreadable",
+        "error",
     }

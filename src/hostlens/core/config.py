@@ -183,6 +183,15 @@ class Settings(BaseSettings):
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_mode: Literal["dev", "prod"] = "prod"
+    # Scheduler daemon-mode flag (M4 add-scheduler, design D-12). The
+    # ``schedule daemon`` / ``schedule run`` entry points flip this to True
+    # (via ``model_copy``) before calling ``create_backend`` so the existing
+    # ``is_daemon_mode`` seam fires the backend daemon-safety gate. Defaults
+    # to False so every other code path (CLI one-shots, tests) keeps the M2
+    # behavior. NOT read from the environment in normal use, but it lives on
+    # ``Settings`` so the locked ``is_daemon_mode(settings) -> bool`` signature
+    # carries it without a separate contextvar.
+    daemon_mode: bool = False
     config_dir: Path = Path("~/.config/hostlens").expanduser()
     targets_config_path: Path = Path("~/.config/hostlens/targets.yaml").expanduser()
     ssh: SshSettings = Field(default_factory=SshSettings)

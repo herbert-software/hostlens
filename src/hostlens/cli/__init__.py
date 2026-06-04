@@ -20,6 +20,7 @@ from hostlens.cli.doctor import run_doctor
 from hostlens.cli.inspect import inspect_cmd
 from hostlens.cli.inspectors import app as inspectors_app
 from hostlens.cli.reports import reports_app
+from hostlens.cli.schedule import schedule_app
 from hostlens.cli.target import target_app
 from hostlens.core.exceptions import ConfigError
 
@@ -73,6 +74,7 @@ app.add_typer(target_app, name="target")
 app.add_typer(inspectors_app, name="inspectors")
 app.add_typer(demo_app, name="demo")
 app.add_typer(reports_app, name="reports")
+app.add_typer(schedule_app, name="schedule")
 app.command("inspect")(inspect_cmd)
 
 

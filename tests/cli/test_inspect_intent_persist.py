@@ -584,7 +584,7 @@ def test_intent_persist_dangling_ref_internal_exit_2_not_persisted(
     single ``internal:`` stderr line, exits 2, writes nothing to stdout, leaks no
     traceback, and persists NOTHING."""
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
     from hostlens.agent.diagnostician import DiagnosticianResult
     from hostlens.reporting.models import ReportStatus, RootCauseHypothesis
 

@@ -42,6 +42,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 # ``PyYAML`` ships no PEP 561 marker — see CLI target.py for the same
 # rationale. We only need raw yaml parsing here (no schema validation)
@@ -73,8 +74,11 @@ from hostlens.core.exceptions import ConfigError, InspectorError, TargetError
 from hostlens.core.logging import configure_logging
 from hostlens.core.redact import redact_text
 from hostlens.inspectors.registry import build_registry_from_search_paths
+from hostlens.scheduler.loader import load_schedules
+from hostlens.scheduler.schema import ScheduleManifest
+from hostlens.scheduler.store import RunStore
 from hostlens.targets.base import ExecutionTarget
-from hostlens.targets.config import TargetEntry, load_targets_config
+from hostlens.targets.config import TargetEntry, TargetsConfig, load_targets_config
 from hostlens.targets.registry import build_registry_from_config
 
 __all__ = [
@@ -527,6 +531,11 @@ def _is_ready(
     key = checks["anthropic_key"].status
     if not (py == "ok" and cfg in {"ok", "missing"} and key in {"present", "missing"}):
         return False
+    # A malformed schedule manifest (loader fail-loud → status "error") is a
+    # real misconfiguration that must not silently pass — mirror the
+    # targets / inspectors fail-loud posture and flip exit 1.
+    if checks["schedules"].status == "error":
+        return False
     # Any target failing connectivity flips the whole doctor to exit 1
     # (spec §场景:某 target 连通失败 doctor exit 1).
     if any(row.connectivity == "failed" for row in targets):
@@ -649,11 +658,134 @@ def _check_backend(settings: Settings) -> BackendHealthRow | None:
     return row
 
 
+# ---------------------------------------------------------------------------
+# M4 (`add-scheduler`): schedule health check (design D-10, add-only)
+# ---------------------------------------------------------------------------
+
+
+_SCHEDULES_DIR_DEFAULT = Path("schedules")
+"""Directory doctor scans for ``schedules/*.yaml`` manifests.
+
+cwd-relative, matching the proposal Demo Path (``cat > schedules/...``).
+Resolved at call time (not import) so tests can ``monkeypatch.chdir``."""
+
+_RECENT_RUNS_LIMIT = 20
+"""How many recent ``Run`` rows doctor folds into the status distribution."""
+
+
+def _next_fire_time_computable(manifest: ScheduleManifest) -> bool:
+    """Whether the manifest's trigger yields a next fire time from ``now``.
+
+    Built straight from the validated ``ScheduleSpec`` (no scheduler /
+    runner instance) to stay decoupled from the APScheduler runner that is
+    developed in parallel. The schema already validated cron field count /
+    timezone, so this only confirms the trigger projects to a future fire.
+    """
+
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    tz = ZoneInfo(manifest.schedule.timezone)
+    now = datetime.now(tz)
+    spec = manifest.schedule
+    if spec.cron is not None:
+        trigger: CronTrigger | IntervalTrigger = CronTrigger.from_crontab(spec.cron, timezone=tz)
+    else:
+        # _exactly_one_trigger guarantees interval is set when cron is None.
+        interval = spec.interval
+        assert interval is not None
+        trigger = IntervalTrigger(
+            weeks=interval.weeks,
+            days=interval.days,
+            hours=interval.hours,
+            minutes=interval.minutes,
+            seconds=interval.seconds,
+            timezone=tz,
+        )
+    return trigger.get_next_fire_time(None, now) is not None
+
+
+def _check_schedules(settings: Settings) -> CheckResult:
+    """Schedule subsystem health for ``hostlens doctor`` (design D-10).
+
+    Lands under ``DoctorReport.checks["schedules"]`` (a new check_id in the
+    existing ``checks`` namespace — **not** a new top-level field), keeping
+    the closed cli-foundation ``--json`` schema intact (add-only policy).
+
+    Behaviour:
+
+    - No ``schedules/`` directory → ``status="ok"`` with a "no schedules
+      configured" detail (an absent directory is a valid empty state, not
+      a failure).
+    - ``load_schedules`` raising ``ConfigError`` (malformed / unregistered
+      target / duplicate name / blank intent) → ``status="error"`` carrying
+      the loader's ``kind`` + file + reason in ``detail``. doctor itself
+      MUST NOT crash on a bad manifest.
+    - All manifests valid → ``status="ok"`` with a compact ``detail``:
+      manifest count, how many have a computable next fire time, and the
+      recent-Run status distribution from ``RunStore``.
+
+    ``detail`` is the add-only carrier (no new ``CheckResult`` field) so the
+    per-check schema stays unchanged across all checks.
+    """
+
+    schedules_dir = _SCHEDULES_DIR_DEFAULT
+    if not schedules_dir.is_dir():
+        return CheckResult(status="ok", detail="no schedules configured")
+
+    # The loader validates ``targets`` membership against the registry, so
+    # doctor must hand it the same registry ``_check_targets`` probes. A
+    # malformed targets.yaml surfaces as a schedule load error too (the
+    # loader cannot validate target membership without a registry).
+    try:
+        # Skip the loader call entirely when targets.yaml is absent — it
+        # would log a structlog INFO to stdout and corrupt strict-JSON
+        # output (same rationale as ``_check_targets``). An empty registry
+        # is the correct input: any manifest then fails target-membership
+        # validation and surfaces as a load error below.
+        config = (
+            load_targets_config(settings.targets_config_path)
+            if settings.targets_config_path.exists()
+            else TargetsConfig(version="1", targets=[])
+        )
+        registry = build_registry_from_config(config, settings)
+        manifests = load_schedules(schedules_dir, registry)
+    except (ConfigError, TargetError, ValidationError, yaml.YAMLError) as exc:
+        kind = getattr(exc, "kind", type(exc).__name__)
+        return CheckResult(status="error", detail=f"{kind}: {exc}")
+
+    if not manifests:
+        # No manifests configured: report the empty-but-valid state without
+        # opening RunStore (which would otherwise create the real runs.db as
+        # a side effect when no schedule subsystem is actually in use).
+        return CheckResult(status="ok", detail="manifests=0")
+
+    computable = sum(1 for m in manifests if _next_fire_time_computable(m))
+
+    runs = asyncio.run(RunStore().list_recent(limit=_RECENT_RUNS_LIMIT))
+    status_counts: dict[str, int] = {}
+    for run in runs:
+        key = str(run.status)
+        status_counts[key] = status_counts.get(key, 0) + 1
+    if status_counts:
+        dist = " ".join(f"{k}={v}" for k, v in sorted(status_counts.items()))
+    else:
+        dist = "none"
+
+    detail = (
+        f"manifests={len(manifests)} "
+        f"next_fire_time_ok={computable}/{len(manifests)} "
+        f"recent_runs={len(runs)} status_counts=[{dist}]"
+    )
+    return CheckResult(status="ok", detail=detail)
+
+
 def _build_report(settings: Settings) -> DoctorReport:
     checks: dict[str, CheckResult] = {
         "python_version": check_python_version(),
         "anthropic_key": check_anthropic_key(),
         "config_dir": check_config_dir(),
+        "schedules": _check_schedules(settings),
     }
     targets = _check_targets(settings)
     inspectors = _check_inspectors(settings)

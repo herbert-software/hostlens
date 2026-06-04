@@ -1112,7 +1112,7 @@ def test_intent_redacts_finding_secret_in_md_and_json(
     the masked placeholder does.
     """
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
 
     monkeypatch.setattr(
         intent_mod, "register_default_tools", _register_secret_bearing_inspector(True)
@@ -1294,7 +1294,7 @@ def test_intent_redacts_loop_telemetry_secret_in_json(
     the finding message itself is benign.
     """
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
     from hostlens.reporting.models import Report
 
     monkeypatch.setattr(
@@ -1334,7 +1334,7 @@ def test_intent_redaction_preserves_round_trip(
     masked output.
     """
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
     from hostlens.reporting.models import Report
 
     monkeypatch.setattr(
@@ -1376,7 +1376,7 @@ def test_intent_prompt_missing_config_error_generic_message_exit_3(
     sees a generic "configuration error" line instead.
     """
 
-    import hostlens.cli._intent as intent_mod
+    import hostlens.orchestration.pipeline as intent_mod
     from hostlens.core.exceptions import ConfigError
 
     def _boom(*_args: Any, **_kwargs: Any) -> Any:

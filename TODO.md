@@ -328,14 +328,14 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
   >
   > **「近期兜底」已落地**：`add-backend-disable-thinking`（2026-05-31 archived）已加 `disable_thinking` 开关（抑制路径）+ `BackendError(kind="unsupported_content_block")` 归一。原 §3.6 四支柱按动机拆成两刀。
 
-  - [ ] **Path 1 — `tolerate-inbound-thinking`（容忍，提案已落，待实现）** 动机：DeepSeek 默认吐 thinking 我们不认 → 从「抑制」转向「建模容忍」，不依赖 `disable_thinking` 关得掉。范围 = 支柱①③④（不含②）。
-    - [ ] **支柱①** `ContentBlock` 联合新增 `ThinkingBlock{type,thinking,signature}` + `RedactedThinkingBlock{type,data}`，**两者 `extra="allow"`**（verbatim relay 保真）；`signature: str` required（实测 pro/flash 都有，值==message id，DeepSeek 不验签）
-    - [ ] **支柱③** Agent loop 多轮 verbatim 回传 thinking 块 —— **已天然成立**：断点 B 恒落末尾 user tool_result、永不落 thinking（loop 结构使然），只加结构回归测试钉死（design D-3）
-    - [ ] **支柱④** cassette keying 投影时**丢整个 thinking/redacted 块**再 hash（`extra="allow"` 残留字段会毁 hash 稳定）+ recorder 落盘 request 同源归一；response 存完整供回放
-    - [ ] **零新 capability**（design D-2）：容忍 = 无条件扩 union，没人 branch tolerate flag → 违反 §4.11，7 字段不变；`extended_thinking` 保持 False
-    - [ ] 收窄 `unsupported_content_block` 语义（thinking 现能 parse，该 kind 改指「真正未知新 block」）+ 改其测试
-    - [ ] `disable_thinking` 降级为「可选 token 优化」（非兼容必需）
-    - [ ] 验收：DeepSeek 不设 disable 也跑通 thinking-on 多轮（live 已预验证）+ cassette record→replay 命中
+  - [x] **Path 1 — `tolerate-inbound-thinking`（容忍，已实现 + archived #53）** 动机：DeepSeek 默认吐 thinking 我们不认 → 从「抑制」转向「建模容忍」，不依赖 `disable_thinking` 关得掉。范围 = 支柱①③④（不含②）。
+    - [x] **支柱①** `ContentBlock` 联合新增 `ThinkingBlock{type,thinking,signature}` + `RedactedThinkingBlock{type,data}`，**两者 `extra="allow"`**（verbatim relay 保真）；`signature: str` required（实测 pro/flash 都有，值==message id，DeepSeek 不验签）
+    - [x] **支柱③** Agent loop 多轮 verbatim 回传 thinking 块 —— **已天然成立**：断点 B 恒落末尾 user tool_result、永不落 thinking（loop 结构使然），只加结构回归测试钉死（design D-3）
+    - [x] **支柱④** cassette keying 投影时**丢整个 thinking/redacted 块**再 hash（`extra="allow"` 残留字段会毁 hash 稳定）+ recorder 落盘 request 同源归一；response 存完整供回放
+    - [x] **零新 capability**（design D-2）：容忍 = 无条件扩 union，没人 branch tolerate flag → 违反 §4.11，7 字段不变；`extended_thinking` 保持 False
+    - [x] 收窄 `unsupported_content_block` 语义（thinking 现能 parse，该 kind 改指「真正未知新 block」）+ 改其测试
+    - [x] `disable_thinking` 降级为「可选 token 优化」（非兼容必需）
+    - [x] 验收：DeepSeek 不设 disable 也跑通 thinking-on 多轮（live 已预验证）+ cassette record→replay 命中
   - [ ] **Path 2 — `support-extended-thinking`（请求+消费，未来独立提案）** 范围 = 支柱② + 把推理 trace 渲进 Report。
     - [ ] **支柱②** `LLMBackend.messages_create` + Protocol 加 `thinking` 参数（`{type:enabled,budget_tokens}` / `disabled` / `adaptive`）+ 对应 backend `BackendCapabilities.extended_thinking=True`（此时才真正「主动请求」，loop 按 capability gate 决定注入）
     - [ ] **消费**：Diagnostician 推理 trace 渲进 Report（reporting/models + 渲染 + 持久化 + diff）—— 简历级「Agent 给你看它的思考」亮点
@@ -353,22 +353,22 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 ### 任务
 
-- [ ] **4.1 Schedule manifest schema**
-  - [ ] `scheduler/schema.py`：`ScheduleManifest`（cron/interval、timezone、targets、**intent 必填、inspectors 可选作为优先 hint**、report 配置、notify 配置占位）
-  - [ ] `scheduler/loader.py`：扫 `schedules/*.yaml`
-- [ ] **4.2 APScheduler 封装**
-  - [ ] `scheduler/runner.py`：基于 `AsyncIOScheduler`，每个 manifest 注册为一个 job
-  - [ ] job 执行 = 调 M2 的 Agent loop
-- [ ] **4.3 Run 记录（与 ARCHITECTURE.md §7 RunStatus enum 对齐）**
-  - [ ] `scheduler/store.py`：每次触发记录 `Run`（run_id / schedule_name / triggered_at / started_at / finished_at / status / report_id / error / notify_results）
-  - [ ] `RunStatus` Enum：ok / partial / budget_exhausted / missed / skipped_due_to_running / failed_api_unavailable / failed / daemon_stopped（详见 ARCHITECTURE.md §7）
-  - [ ] 验收：`Run.report_id is None` **当且仅当 `Run.status not in {ok, partial}`**（涵盖所有无 Report 的 RunStatus 值，与 ARCHITECTURE.md §7 边界表一致）；doctor 能输出最近 N 次 Run 状态分布
-- [ ] **4.4 Daemon 模式**
-  - [ ] `cli/schedule.py`：`run`（前台）/ `daemon`（后台）/ `list` / `trigger <name>` / `status`
-  - [ ] SIGTERM 信号：停止接受新任务，等当前 job 完成再退出
-  - [ ] daemon 模式日志写文件 + structlog json
-- [ ] **4.5 doctor 集成**
-  - [ ] `hostlens doctor` 增加 schedule 健康检查（next_fire_time 是否合理、上次 run 是否失败）
+- [x] **4.1 Schedule manifest schema**
+  - [x] `scheduler/schema.py`：`ScheduleManifest`（cron/interval、timezone、targets、**intent 必填、inspectors 可选作为优先 hint**、report 配置、notify 配置占位）
+  - [x] `scheduler/loader.py`：扫 `schedules/*.yaml`
+- [x] **4.2 APScheduler 封装**
+  - [x] `scheduler/runner.py`：基于 `AsyncIOScheduler`，每个 manifest 注册为一个 job
+  - [x] job 执行 = 调 M2 的 Agent loop（经 `orchestration.pipeline.run_diagnosis_pipeline`）
+- [x] **4.3 Run 记录（与 ARCHITECTURE.md §7 RunStatus enum 对齐）**
+  - [x] `scheduler/store.py`：每次触发记录 `Run`（run_id / schedule_name / triggered_at / started_at / finished_at / status / report_id / error / notify_results + 留痕 targets/inspectors/report_hash/report_storage）
+  - [x] `RunStatus` Enum：ok / partial / budget_exhausted / missed / skipped_due_to_running / failed_api_unavailable / failed / daemon_stopped（详见 ARCHITECTURE.md §7）
+  - [x] 验收：`Run.report_id is None` **当且仅当 `Run.status not in {ok, partial}`**（涵盖所有无 Report 的 RunStatus 值，与 ARCHITECTURE.md §7 边界表一致）；doctor 能输出最近 N 次 Run 状态分布
+- [x] **4.4 Daemon 模式**
+  - [x] `cli/schedule.py`：`run`（前台）/ `daemon`（后台）/ `list` / `trigger <name>` / `status`
+  - [x] SIGTERM 信号：停止接受新任务，等当前 job 完成再退出（D-5 shield+drain；超 grace 落 daemon_stopped）
+  - [x] daemon 模式日志写文件 + structlog json
+- [x] **4.5 doctor 集成**
+  - [x] `hostlens doctor` 增加 schedule 健康检查（next_fire_time 是否合理、上次 run 是否失败）落 `checks.schedules`
 
 ---
 

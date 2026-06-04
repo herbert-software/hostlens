@@ -40,6 +40,7 @@ dependencies = [
     "jinja2>=3.1,<4",
     "jsonschema>=4.20,<5",
     "anthropic>=0.45,<2",
+    "APScheduler>=3.10,<4",
 ]
 
 [project.optional-dependencies]
@@ -101,7 +102,7 @@ plugins = ["pydantic.mypy"]
 exclude = ['tests/']
 
 [[tool.mypy.overrides]]
-module = ["simpleeval", "jsonschema"]
+module = ["simpleeval", "jsonschema", "apscheduler.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]
