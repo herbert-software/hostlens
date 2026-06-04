@@ -16,4 +16,4 @@
 - [x] 3.2 `mypy --strict src/hostlens/core/config.py src/hostlens/cli/schedule.py` 通过（无 `Any` 泄漏）
 - [x] 3.3 全量 `pytest tests/ -m 'not live'` 绿
 - [x] 3.4 `openspec-cn validate add-configurable-shutdown-grace` 通过
-- [ ] 3.5 PR 前对抗性 review（CLAUDE.md §5.3；含运行时行为变更——默认值 30→120 + 新配置项，应跑）
+- [x] 3.5 PR 前对抗性 review（CLAUDE.md §5.3）—— 已跑 `/review-loop`（Codex + Code Reviewer + Reality Checker）1 轮收敛三方 APPROVE（含 mutation 测试验证断言非 tautology），随后开 PR #55 合并
