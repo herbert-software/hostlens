@@ -124,7 +124,7 @@
 ### 5.3 优雅停机（M4 已落地）
 
 - **机制（实现，design D-5）**：SIGTERM/SIGINT → `scheduler.pause()`（停止派发新触发）→ `asyncio.wait(in-flight, timeout=grace)` 等当前 job 完成 → 超 grace 的 pending **`task.cancel()`**（单进程 asyncio daemon **不自我 SIGKILL**；`task.cancel()` 是「超 grace 强制停」的进程内实现）→ 主协程 `gather` drain，被强制中断的 in-flight job 落 `Run(status=daemon_stopped)`（shield + drain 保证终态写不丢）。信号 handler 幂等（停机中再收信号忽略）。
-- **grace 取值（待对齐讨论 / 实现偏差）**：实现默认 `_GRACE_SECONDS = 30s`（runner 构造器 `grace_seconds` 可注入，但 daemon CLI 暂用默认、**未接 `daemon.shutdown_grace_seconds` 配置**）。本文档原定 120s + 可配——**值与可配性待与实现对齐**：30s 对跑 LLM agent loop 的巡检 job 可能偏紧，是否上调 + 是否暴露配置项后续讨论。
+- **grace 取值**：默认 `120s`，可经 `daemon.shutdown_grace_seconds`（env `HOSTLENS_DAEMON__SHUTDOWN_GRACE_SECONDS`，范围 `1–600s`）配置；`daemon` / `run` 启动经 `_build_runner` 把该配置值传入 runner。120s 覆盖「单 turn、无重试」的常见基线（单次 LLM API timeout 即 60s，旧的 30s 比单次 timeout 还小、会误切正在等模型的 job）——**不保证**覆盖多 turn / 命中 backend 重试退避的更长 job，那类 job 仍可能超 grace 落 `daemon_stopped`，运维按自身负载经该配置上调缓解。非法值（非数 / 超范围）经 `load_settings()` raise `ConfigError`、命令 fail-loud（不静默回退）。不暴露 CLI `--grace` 旗标（daemon 级参数走 env/config）。与 §6.1 的 `misfire_grace_time` 是独立概念、不共享代码。
 - 被 `SIGKILL`（-9 不可捕获）中断的 in-flight job 不留 Run 记录（已知限制，单机内存调度无 start-row WAL）。
 
 ---

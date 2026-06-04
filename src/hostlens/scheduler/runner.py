@@ -93,6 +93,13 @@ _INTERVAL_MISFIRE_FLOOR_SECONDS = 30
 # how long ``graceful_stop`` waits for an in-flight job to finish naturally
 # before force-cancelling it. Conservative fixed default; injectable so tests
 # drive the force-cancel path with a tiny value.
+#
+# NOTE: this 30s is only the library-internal fallback for code that
+# constructs ``SchedulerRunner`` directly without passing ``grace_seconds``
+# (tests, advanced lib use). The production source of truth is
+# ``DaemonSettings.shutdown_grace_seconds`` (default 120s); the daemon / run
+# CLI paths both go through ``cli/schedule.py:_build_runner``, which injects
+# that settings value — they never rely on this default.
 _GRACE_SECONDS = 30.0
 
 

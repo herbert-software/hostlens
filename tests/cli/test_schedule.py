@@ -373,6 +373,96 @@ def test_subscription_backend_rejected_for_daemon_and_run(
 
 
 # --------------------------------------------------------------------------- #
+# shutdown grace config → runner (add-configurable-shutdown-grace)
+# --------------------------------------------------------------------------- #
+
+
+def _spy_grace_on_serve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, float]:
+    """Spy the PRODUCTION ``SchedulerRunner`` constructor + short-circuit the loop.
+
+    Captures the ``grace_seconds`` the CLI actually passes (patching
+    ``_build_runner`` would not — its signature has no ``grace_seconds``), and
+    patches ``_serve_loop`` so the daemon loop returns immediately instead of
+    blocking on a stop signal. The backend is daemon-safe so the boot gate
+    passes.
+    """
+
+    captured: dict[str, float] = {}
+    real_runner_cls = SchedulerRunner
+
+    def _spy_runner(*args: Any, grace_seconds: float, **kwargs: Any) -> SchedulerRunner:
+        captured["grace_seconds"] = grace_seconds
+        return real_runner_cls(*args, grace_seconds=grace_seconds, **kwargs)
+
+    monkeypatch.setattr("hostlens.cli.schedule.SchedulerRunner", _spy_runner)
+    monkeypatch.setattr(
+        "hostlens.cli.schedule.create_backend", lambda settings: FakeBackend(responses=[])
+    )
+
+    async def _noop_serve_loop(runner: Any, logger: Any) -> None:
+        return None
+
+    monkeypatch.setattr("hostlens.cli.schedule._serve_loop", _noop_serve_loop)
+    monkeypatch.setattr("hostlens.cli.schedule.os.geteuid", lambda: 1000)
+    return captured
+
+
+def test_daemon_passes_default_grace_to_runner(
+    runner: CliRunner, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_manifest(env, name="nightly")
+    captured = _spy_grace_on_serve(monkeypatch)
+
+    result = runner.invoke(app, ["schedule", "daemon"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert captured["grace_seconds"] == 120.0
+
+
+def test_daemon_passes_env_override_grace_to_runner(
+    runner: CliRunner, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_manifest(env, name="nightly")
+    captured = _spy_grace_on_serve(monkeypatch)
+    monkeypatch.setenv("HOSTLENS_DAEMON__SHUTDOWN_GRACE_SECONDS", "60")
+
+    result = runner.invoke(app, ["schedule", "daemon"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert captured["grace_seconds"] == 60.0
+
+
+@pytest.mark.parametrize(
+    ("bad_value", "expected_constraint"),
+    [
+        ("0", "greater than or equal to 1"),
+        ("-1", "greater than or equal to 1"),
+        ("601", "less than or equal to 600"),
+        ("not-a-number", "valid number"),
+    ],
+)
+def test_daemon_invalid_grace_fail_loud_exit_2(
+    runner: CliRunner,
+    env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_value: str,
+    expected_constraint: str,
+) -> None:
+    """Illegal grace fails at ``load_settings`` (exit 2) before entering the loop."""
+
+    _write_manifest(env, name="nightly")
+    monkeypatch.setattr("hostlens.cli.schedule.os.geteuid", lambda: 1000)
+    monkeypatch.setenv("HOSTLENS_DAEMON__SHUTDOWN_GRACE_SECONDS", bad_value)
+
+    result = runner.invoke(app, ["schedule", "daemon"])
+    output = result.stdout + result.stderr
+    assert result.exit_code == 2, output
+    assert "daemon.shutdown_grace_seconds" in output
+    # Spec: stderr must indicate the field AND the expected range/constraint.
+    assert expected_constraint in output
+
+
+# --------------------------------------------------------------------------- #
 # graceful shutdown (design D-5) — driven against the runner directly
 # --------------------------------------------------------------------------- #
 

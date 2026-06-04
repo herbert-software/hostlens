@@ -236,6 +236,7 @@ def _build_runner(
         backend_factory=backend_factory,
         context_factory=_context_factory(settings, target_registry, inspector_registry, logger),
         target_registry=target_registry,
+        grace_seconds=settings.daemon.shutdown_grace_seconds,
     )
 
 

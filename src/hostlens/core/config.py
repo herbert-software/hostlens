@@ -34,6 +34,7 @@ from hostlens.core.exceptions import ConfigError
 __all__ = [
     "AgentSettings",
     "BackendSettings",
+    "DaemonSettings",
     "Settings",
     "SshSettings",
     "load_settings",
@@ -154,6 +155,27 @@ class AgentSettings(BaseModel):
     token_budget_output: int = Field(default=30_000, ge=1, le=200_000)
 
 
+class DaemonSettings(BaseModel):
+    """Scheduler-daemon runtime settings.
+
+    ``shutdown_grace_seconds`` is how long ``graceful_stop`` waits for an
+    in-flight job to finish naturally before force-cancelling it. The default
+    of 120s replaces the old fixed 30s, which was smaller than a single LLM
+    API timeout (60s) and so force-cancelled jobs still legitimately waiting
+    on the model. The ``ge=1`` lower bound forbids 0/negative (which would
+    make ``asyncio.wait(timeout=0)`` cancel every in-flight job immediately,
+    i.e. no graceful stop); ``le=600`` caps how long a shutdown can stall.
+
+    Held as a ``default_factory`` namespace on ``Settings`` (like ``ssh``,
+    NOT optional like ``agent``) so the grace is always readable on the
+    shutdown path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    shutdown_grace_seconds: float = Field(default=120.0, ge=1, le=600)
+
+
 _SENSITIVE_FIELD_PATTERN: re.Pattern[str] = re.compile(
     r"(?i)(key|token|secret|password|credential)"
 )
@@ -195,6 +217,13 @@ class Settings(BaseSettings):
     config_dir: Path = Path("~/.config/hostlens").expanduser()
     targets_config_path: Path = Path("~/.config/hostlens/targets.yaml").expanduser()
     ssh: SshSettings = Field(default_factory=SshSettings)
+    # Daemon-level runtime params. Uses
+    # ``default_factory`` (like ``ssh``, not optional like ``agent``) so
+    # ``daemon.shutdown_grace_seconds`` is always readable on the shutdown
+    # path. env override: ``HOSTLENS_DAEMON__SHUTDOWN_GRACE_SECONDS`` (double
+    # underscore routes into the namespace; the single-underscore
+    # ``HOSTLENS_DAEMON_MODE`` flat field above is unaffected).
+    daemon: DaemonSettings = Field(default_factory=DaemonSettings)
     inspectors_search_paths: Annotated[list[Path], NoDecode] = Field(
         default_factory=lambda: [Path("~/.config/hostlens/inspectors").expanduser()]
     )

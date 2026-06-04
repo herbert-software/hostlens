@@ -120,6 +120,45 @@ def test_ssh_idle_timeout_seconds_env_var_override(
     assert settings.ssh.idle_timeout_seconds == 120
 
 
+def test_daemon_shutdown_grace_seconds_default() -> None:
+    settings = load_settings()
+    assert settings.daemon.shutdown_grace_seconds == 120.0
+
+
+def test_daemon_shutdown_grace_seconds_env_var_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOSTLENS_DAEMON__SHUTDOWN_GRACE_SECONDS", "60")
+    settings = load_settings()
+    assert settings.daemon.shutdown_grace_seconds == 60.0
+
+
+@pytest.mark.parametrize(
+    ("bad_value", "expected_constraint"),
+    [
+        ("0", "greater than or equal to 1"),
+        ("-1", "greater than or equal to 1"),
+        ("601", "less than or equal to 600"),
+        ("not-a-number", "valid number"),
+    ],
+)
+def test_daemon_shutdown_grace_seconds_invalid_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch, bad_value: str, expected_constraint: str
+) -> None:
+    monkeypatch.setenv("HOSTLENS_DAEMON__SHUTDOWN_GRACE_SECONDS", bad_value)
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+
+    msg = str(excinfo.value)
+    # Field name present (namespaced) so the operator knows what to fix.
+    assert "daemon.shutdown_grace_seconds" in msg
+    # Offending value preserved (non-sensitive field => keep value for debugging).
+    assert bad_value in msg
+    # Spec: error must indicate the expected range/constraint, not just the field.
+    assert expected_constraint in msg
+
+
 def test_inspectors_search_paths_default() -> None:
     settings = load_settings()
     assert settings.inspectors_search_paths == [Path("~/.config/hostlens/inspectors").expanduser()]
