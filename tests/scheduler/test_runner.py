@@ -227,6 +227,11 @@ async def test_trigger_ok_persists_run_and_report(tmp_path: Path) -> None:
     assert await report_store.get_run(run.report_id) is not None
     persisted = await run_store.list_recent(limit=10)
     assert [r.run_id for r in persisted] == [run.run_id]
+    # B2: a scheduler-triggered Report carries its schedule name in meta.
+    report = await report_store.get_run(run.report_id)
+    assert report is not None
+    assert report.meta is not None
+    assert report.meta.schedule_name == "nightly"
 
 
 # --------------------------------------------------------------------------- #
@@ -497,6 +502,42 @@ async def test_unknown_trigger_name_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(KeyError):
         await runner.trigger("does-not-exist")
+
+
+class _RaisingBackend:
+    """Backend whose ``messages_create`` raises an unexpected (non-CancelledError,
+    non-BackendUnavailable) exception, with a secret in the message."""
+
+    name = "raising"
+
+    def __init__(self) -> None:
+        self.capabilities = FakeBackend(responses=[]).capabilities
+
+    async def messages_create(self, **_kwargs: Any) -> MessageResponse:
+        raise RuntimeError("boom sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv")
+
+
+@_POSIX_ONLY
+async def test_trigger_unexpected_exception_persists_failed_run(tmp_path: Path) -> None:
+    run_store, report_store = _stores(tmp_path)
+    runner = _build_runner(
+        backend_factory=lambda: cast(LLMBackend, _RaisingBackend()),
+        run_store=run_store,
+        report_store=report_store,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await runner.trigger("nightly")
+
+    persisted = await run_store.list_recent(limit=10)
+    assert len(persisted) == 1
+    failed = persisted[0]
+    assert failed.status is RunStatus.FAILED
+    assert failed.started_at is not None
+    assert failed.report_id is None
+    # The secret in the exception message is redacted before persistence.
+    assert failed.error is not None
+    assert "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv" not in failed.error
 
 
 # --------------------------------------------------------------------------- #

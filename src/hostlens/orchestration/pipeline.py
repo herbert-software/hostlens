@@ -170,6 +170,7 @@ def _assemble_report(
     *,
     token_usage: TokenUsage,
     target_type: str,
+    schedule_name: str | None = None,
 ) -> Report:
     """Assemble the authoritative ``Report`` from the post-diagnosis snapshot.
 
@@ -203,6 +204,7 @@ def _assemble_report(
         status=status_override,
         token_usage=token_usage,
         target_type=target_type,
+        schedule_name=schedule_name,
     )
     report = report.model_copy(
         update={
@@ -236,6 +238,7 @@ async def run_diagnosis_pipeline(
     tool_clock: Callable[[], datetime] | None = None,
     observer: LoopObserver | None = None,
     planner_result_sink: Callable[[PlannerResult], None] | None = None,
+    schedule_name: str | None = None,
 ) -> Report | None:
     """Run Planner → seed → Diagnostician → assemble ``Report`` (D-1/D-2/D-5).
 
@@ -373,4 +376,5 @@ async def run_diagnosis_pipeline(
         finished_at,
         token_usage=token_usage,
         target_type=target_type,
+        schedule_name=schedule_name,
     )

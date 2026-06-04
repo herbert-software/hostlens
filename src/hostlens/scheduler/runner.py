@@ -287,7 +287,34 @@ class SchedulerRunner:
         """
         if name not in self._manifests:
             raise KeyError(f"unknown schedule name: {name!r}")
-        return await self._run_job(name)
+        manifest = self._manifests[name]
+        triggered_at = self._clock()
+        try:
+            return await self._run_job(name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # The timer path routes unexpected job exceptions through APScheduler's
+            # EVENT_JOB_ERROR listener, which persists a Run(failed). `trigger`
+            # bypasses that listener (it calls `_run_job` directly), so persist the
+            # failure row here to keep both execution paths consistent (§4.6), then
+            # re-raise so the CLI still exits non-zero.
+            run = Run(
+                run_id=str(uuid.uuid4()),
+                schedule_name=manifest.name,
+                triggered_at=triggered_at,
+                started_at=triggered_at,
+                finished_at=self._clock(),
+                status=RunStatus.FAILED,
+                report_id=None,
+                error=redact_text(str(exc)),
+                targets=list(manifest.targets),
+                inspectors=[],
+                report_hash=None,
+                report_storage=None,
+            )
+            await self._run_store.save(run)
+            raise
 
     async def _run_job(self, name: str) -> Run:
         # Register this task in the in-flight set BEFORE any ``await`` so a
@@ -320,6 +347,7 @@ class SchedulerRunner:
                 target_type=target_type,
                 intent=manifest.intent,
                 planner_result_sink=_sink,
+                schedule_name=manifest.name,
             )
 
             run = await self._map_outcome(
