@@ -76,4 +76,5 @@ credentials.json
 # Local venvs created during ad-hoc test runs
 .venv-clean/
 .venv-demo/
+.venv-impl/
 .claude/scheduled_tasks.lock
