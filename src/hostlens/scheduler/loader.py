@@ -14,7 +14,13 @@ schema cannot express alone:
       fan-out is a non-goal — design D-2 / spec §需求:M4 每个 manifest 必须
       恰好一个 target);
   (c) ``name`` is globally unique across all files;
-  (d) ``intent`` is non-blank.
+  (d) ``intent`` is non-blank;
+  (e) every ``notify[].only_if`` (when present) is a syntactically valid DSL
+      expression (`routing.validate_only_if` → `inspectors.dsl.validate_ast`).
+      This is the **load-time** half of the M5 two-stage check: it does NOT
+      read ``notifiers.yaml`` or verify the ``channel`` exists, so
+      ``schedule list`` never depends on channel configuration; channel
+      existence is validated at assembly time by the runner (design D-7).
 
 Any invalid manifest is **fail-loud**: a `ConfigError` is raised whose
 message carries the offending **file name + field + reason**. The loader
@@ -28,10 +34,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import simpleeval
 import yaml
 from pydantic import ValidationError
 
 from hostlens.core.exceptions import ConfigError
+from hostlens.notifiers.routing import validate_only_if
 from hostlens.scheduler.schema import ScheduleManifest
 
 if TYPE_CHECKING:
@@ -98,6 +106,24 @@ def load_schedules(
                     field="targets",
                     target=target_name,
                 )
+
+        # (e) every notify only_if (when present) is syntactically valid. This
+        # is the load-time half only: channel existence is checked at assembly
+        # time so ``schedule list`` never reads notifiers.yaml.
+        for notify in manifest.notify:
+            if notify.only_if is None:
+                continue
+            try:
+                validate_only_if(notify.only_if)
+            except simpleeval.FeatureNotAvailable as exc:
+                raise ConfigError(
+                    "notify only_if is not a valid expression",
+                    kind="schedule_notify_only_if_invalid",
+                    file=path.name,
+                    field="notify.only_if",
+                    channel=notify.channel,
+                    only_if=notify.only_if,
+                ) from exc
 
         # (c) name globally unique across files.
         if manifest.name in seen_names:

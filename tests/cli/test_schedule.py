@@ -570,6 +570,133 @@ async def test_no_in_progress_placeholder_and_sigkill_leaves_no_run(tmp_path: Pa
 
 
 # --------------------------------------------------------------------------- #
+# channel wiring → runner (fix: _build_runner injects load_channels result)
+# --------------------------------------------------------------------------- #
+
+
+def _write_notify_manifest(root: Path, *, name: str, channel: str) -> None:
+    (root / "schedules" / f"{name}.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": name,
+                "schedule": {"interval": {"minutes": 10}, "timezone": "UTC"},
+                "targets": [_TARGET],
+                "intent": "检查健康",
+                "notify": [{"channel": channel}],
+            }
+        )
+    )
+
+
+def _write_notifiers_yaml(root: Path, monkeypatch: pytest.MonkeyPatch, *, channel: str) -> None:
+    cfg = root / "notifiers.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "channels": {
+                    channel: {
+                        "type": "telegram",
+                        "bot_token": "${HOSTLENS_TEST_TG_TOKEN}",
+                        "chat_id": "12345",
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("HOSTLENS_NOTIFIERS_CONFIG_PATH", str(cfg))
+    monkeypatch.setenv("HOSTLENS_TEST_TG_TOKEN", "123:abc")
+
+
+def _cli_build_runner(env: Path) -> SchedulerRunner:
+    """Drive the production ``cli/schedule.py:_build_runner`` end to end."""
+
+    from hostlens.cli import schedule as schedule_cli
+
+    settings = schedule_cli._load_settings_or_exit()
+    target_registry = schedule_cli._build_target_registry(settings)
+    inspector_registry = schedule_cli._build_inspector_registry(settings)
+    manifests = schedule_cli._load_manifests_or_exit(settings, target_registry)
+    logger = structlog.get_logger("test_cli_build_runner")
+    return schedule_cli._build_runner(
+        settings, manifests, target_registry, inspector_registry, logger
+    )
+
+
+def test_build_runner_injects_configured_channel(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest referencing a configured channel assembles + injects it."""
+
+    _write_notify_manifest(env, name="nightly", channel="tg-main")
+    _write_notifiers_yaml(env, monkeypatch, channel="tg-main")
+
+    built = _cli_build_runner(env)
+    assert "tg-main" in built._channels
+    assert built._channels["tg-main"].name == "telegram"
+
+
+@_POSIX_ONLY
+def test_schedule_run_assembles_with_channels(
+    runner: CliRunner, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``schedule trigger`` over a notify manifest assembles + fires (no traceback)."""
+
+    _write_notify_manifest(env, name="nightly", channel="tg-main")
+    _write_notifiers_yaml(env, monkeypatch, channel="tg-main")
+    _patch_backend(monkeypatch, lambda: FakeBackend(responses=_happy_script()))
+
+    result = runner.invoke(app, ["schedule", "trigger", "nightly"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "Traceback" not in (result.stdout + result.stderr)
+
+
+def test_build_runner_unknown_channel_fail_loud(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A notify manifest with no notifiers.yaml → unknown channel → fail-loud.
+
+    ``load_channels`` returns an empty map (no file), and the runner's
+    assembly-time channel-existence check raises on the unresolved reference.
+    """
+
+    _write_notify_manifest(env, name="nightly", channel="tg-main")
+    missing = env / "no-such-notifiers.yaml"
+    monkeypatch.setenv("HOSTLENS_NOTIFIERS_CONFIG_PATH", str(missing))
+
+    with pytest.raises(ValueError, match="unknown channel"):
+        _cli_build_runner(env)
+
+
+def test_build_runner_no_notify_manifest_assembles_without_channels(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest with no ``notify`` assembles fine when notifiers.yaml is absent."""
+
+    _write_manifest(env, name="nightly")
+    missing = env / "no-such-notifiers.yaml"
+    monkeypatch.setenv("HOSTLENS_NOTIFIERS_CONFIG_PATH", str(missing))
+
+    built = _cli_build_runner(env)
+    assert built._channels == {}
+
+
+def test_build_runner_malformed_notifiers_yaml_fail_loud(
+    runner: CliRunner, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown channel ``type`` in notifiers.yaml is fail-loud (exit 2, clean)."""
+
+    _write_notify_manifest(env, name="nightly", channel="tg-main")
+    cfg = env / "notifiers.yaml"
+    cfg.write_text(yaml.safe_dump({"channels": {"tg-main": {"type": "nope", "bot_token": "x"}}}))
+    monkeypatch.setenv("HOSTLENS_NOTIFIERS_CONFIG_PATH", str(cfg))
+    monkeypatch.setattr("hostlens.cli.schedule.os.geteuid", lambda: 1000)
+
+    result = runner.invoke(app, ["schedule", "trigger", "nightly"])
+    combined = result.stdout + result.stderr
+    assert result.exit_code == 2, combined
+    assert "notifier channels" in combined
+    assert "Traceback" not in combined
+
+
+# --------------------------------------------------------------------------- #
 # daemon logging (design 5.5): file sink + secret redaction
 # --------------------------------------------------------------------------- #
 

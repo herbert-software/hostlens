@@ -13,9 +13,10 @@ Discriminated `schedule` (design D-8): exactly one of `cron` (standard
 timezone / non-5-field cron / all-zero interval so an invalid manifest
 fails at parse time (fail-loud) rather than at fire time.
 
-`report.diff_with_last` and `notify` are **M4 placeholders**: typed and
-parsed, but never consumed (no auto-diff at assembly, no notification send,
-no secret resolution). See design D-9.
+`report.diff_with_last` is an **M4 placeholder**: typed and parsed, but
+never consumed (no auto-diff at assembly). `notify` is **consumed from M5
+on**: the loader validates each `only_if` syntax at load time and the runner
+routes/sends per channel at fire time. See design D-9 / add-notifier-channels.
 """
 
 from __future__ import annotations
@@ -148,16 +149,18 @@ class ReportConfig(BaseModel):
 
 
 class NotifyConfig(BaseModel):
-    """Notify channel config — **M4 placeholder** (typed, not consumed).
+    """Notify channel config — **consumed from M5 on** for routing/send.
 
-    M5 will consume `channel` + `only_if` for routing. M4 parses this as a
-    typed structure (so a manifest carrying `notify` validates) but never
-    evaluates `only_if`, resolves `${ENV_VAR}` secrets, or instantiates any
-    Notifier. ``extra="allow"`` keeps M5-bound fields parseable without
-    pinning their full shape into the M4 contract.
+    The loader validates each ``only_if`` syntax (``inspectors.dsl.validate_ast``)
+    at load time and the runner routes/sends per channel at fire time. The
+    legal fields are exactly ``channel`` + optional ``only_if``;
+    ``extra="forbid"`` (M5 tightening, replacing M4's ``extra="allow"``) makes
+    a misspelled sub-field such as ``only_iff`` raise ``ValidationError``
+    rather than being silently dropped, matching the fail-loud basis of the
+    other manifest models. A future field needs an explicit OpenSpec change.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     channel: str
     only_if: str | None = None

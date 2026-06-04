@@ -1,0 +1,68 @@
+{
+  "msg_type": "interactive",
+  "card": {
+    "config": {"wide_screen_mode": true},
+    "header": {
+      "template": {{ severity | lark_header_color | tojson }},
+      "title": {
+        "tag": "plain_text",
+        "content": {{ (report.intent or "巡检报告") | tojson }}
+      }
+    },
+    "elements": [
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ ("**目标** " ~ report.target_name ~ " · **severity** " ~ severity) | tojson }}
+        }
+      },
+      {"tag": "hr"},
+      {% if report.findings %}
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ "**Findings**" | tojson }}
+        }
+      },
+      {% for f in report.findings %}
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ ((f.severity | sev_icon) ~ " " ~ f.message) | tojson }}
+        }
+      }{% if not loop.last %},{% endif %}
+      {% endfor %}
+      {% else %}
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ "无 findings" | tojson }}
+        }
+      }
+      {% endif %}
+      {% if report.hypotheses %}
+      ,{"tag": "hr"},
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ "**根因假设**" | tojson }}
+        }
+      },
+      {% for h in report.hypotheses %}
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ ("• " ~ h.description ~ " (" ~ h.confidence ~ ")") | tojson }}
+        }
+      }{% if not loop.last %},{% endif %}
+      {% endfor %}
+      {% endif %}
+    ]
+  }
+}

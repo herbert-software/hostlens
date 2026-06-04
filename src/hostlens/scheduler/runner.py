@@ -32,8 +32,15 @@ Dependencies are injected through the constructor (no module-level singleton):
 the `RunStore` / `ReportStore` / `Settings`, a `backend_factory` (one fresh
 `LLMBackend` per fire — the backend reaches only the agent loops, never a
 `ToolContext`, ADR-008), a `context_factory` (fresh `ToolContext` per
-dispatch), and the `TargetRegistry` used to resolve each manifest's single
-target's type.
+dispatch), the `TargetRegistry` used to resolve each manifest's single
+target's type, and (M5) the `channels` map (`{instance_name: Notifier}`,
+loaded from `notifiers.yaml` at assembly time). The constructor validates at
+**assembly time** that every ``notify.channel`` a manifest references resolves
+to a loaded channel — an unknown channel is fail-loud (it never enters the
+schedule). When the Report is persisted the job body routes it per
+``only_if`` and sends to each resolved channel concurrently, isolating any
+routing / render / send failure into a ``NotifyResult(failed)`` so it never
+bubbles out of the job body or changes the already-decided ``RunStatus``.
 """
 
 from __future__ import annotations
@@ -59,6 +66,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from hostlens.core.redact import redact_text
+from hostlens.notifiers.base import NotifyResult, redact_secret_text
+from hostlens.notifiers.routing import aggregate_severity, should_send
 from hostlens.orchestration.pipeline import run_diagnosis_pipeline
 from hostlens.reporting.models import Report, ReportStatus
 from hostlens.scheduler.store import Run, RunStatus, RunStore, compute_report_hash
@@ -71,8 +80,10 @@ if TYPE_CHECKING:
     from hostlens.agent.backend import LLMBackend
     from hostlens.agent.planner import PlannerResult
     from hostlens.core.config import Settings
+    from hostlens.notifiers.base import Notifier
+    from hostlens.reporting.models import Severity
     from hostlens.reporting.store import ReportStore
-    from hostlens.scheduler.schema import ScheduleManifest
+    from hostlens.scheduler.schema import NotifyConfig, ScheduleManifest
     from hostlens.targets.registry import TargetRegistry
     from hostlens.tools.base import ToolContext
 
@@ -101,6 +112,11 @@ _INTERVAL_MISFIRE_FLOOR_SECONDS = 30
 # CLI paths both go through ``cli/schedule.py:_build_runner``, which injects
 # that settings value — they never rely on this default.
 _GRACE_SECONDS = 30.0
+
+# Max channels sent in parallel per fire (design D-7 / proposal §Operational
+# Limits). Bounds concurrent outbound HTTP so a manifest with many channels
+# does not open an unbounded number of sockets at once.
+_NOTIFY_CONCURRENCY = 4
 
 
 def _interval_total_seconds(manifest: ScheduleManifest) -> int:
@@ -141,6 +157,7 @@ class SchedulerRunner:
         backend_factory: Callable[[], LLMBackend],
         context_factory: Callable[[], ToolContext],
         target_registry: TargetRegistry,
+        channels: dict[str, Notifier] | None = None,
         clock: Callable[[], datetime] | None = None,
         grace_seconds: float = _GRACE_SECONDS,
     ) -> None:
@@ -151,8 +168,14 @@ class SchedulerRunner:
         self._backend_factory = backend_factory
         self._context_factory = context_factory
         self._target_registry = target_registry
+        # Loaded channel instances ({instance_name: Notifier}); empty when no
+        # notifiers.yaml was wired. Assembly-time channel-existence validation
+        # below turns an unknown manifest reference into a fail-loud ValueError.
+        self._channels: dict[str, Notifier] = channels if channels is not None else {}
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         self._grace_seconds = grace_seconds
+
+        self._validate_notify_channels()
 
         # In-flight job tasks (design D-5). The ``AsyncIOExecutor`` creates the
         # job task internally and never hands it back, so each job body
@@ -178,6 +201,26 @@ class SchedulerRunner:
             self._on_scheduler_event,
             EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES | EVENT_JOB_ERROR | EVENT_JOB_EXECUTED,
         )
+
+    def _validate_notify_channels(self) -> None:
+        """Assembly-time channel-existence check (schedule-manifest spec).
+
+        Every ``notify.channel`` a manifest references must resolve to a
+        loaded channel instance; an unknown channel is fail-loud (it never
+        enters the schedule). This is the run-time half of the M5 two-stage
+        check — its counterpart, ``only_if`` syntax validation, runs at
+        manifest load time so ``schedule list`` never depends on
+        ``notifiers.yaml`` (design D-7).
+        """
+
+        for manifest in self._manifests.values():
+            for notify in manifest.notify:
+                if notify.channel not in self._channels:
+                    known = ", ".join(sorted(self._channels)) or "<none>"
+                    raise ValueError(
+                        f"manifest {manifest.name!r} notify references unknown channel "
+                        f"{notify.channel!r}; configured channels: {known}"
+                    )
 
     @property
     def scheduler(self) -> AsyncIOScheduler:
@@ -494,6 +537,12 @@ class SchedulerRunner:
         else:
             storage = "db"
 
+        # Notify dispatch: only on the Report path (ok/partial), after the
+        # Report is persisted and before the terminal Run is constructed. Any
+        # routing / render / send failure is isolated into a NotifyResult and
+        # never changes the already-decided RunStatus (design D-7).
+        notify_results = await self._dispatch_notify(manifest, report)
+
         inspectors = [ir.name for ir in report.meta.inspectors_used]
         return Run(
             run_id=run_id,
@@ -507,7 +556,87 @@ class SchedulerRunner:
             report_storage=storage,
             targets=[target_name],
             inspectors=inspectors,
+            notify_results=notify_results,
         )
+
+    # ------------------------------------------------------------------ #
+    # Notify dispatch (design D-7)
+    # ------------------------------------------------------------------ #
+
+    async def _dispatch_notify(
+        self, manifest: ScheduleManifest, report: Report
+    ) -> list[NotifyResult]:
+        """Route + send the Report to every configured channel, concurrently.
+
+        One ``NotifyResult`` per ``manifest.notify`` entry. Sends run under a
+        ``Semaphore(_NOTIFY_CONCURRENCY)`` so channels do not all open sockets
+        at once, and ``asyncio.gather(..., return_exceptions=True)`` so a
+        single channel raising never cancels the others. Every per-channel
+        coroutine catches ``Exception`` itself (routing / render / send) and
+        returns a ``failed`` result, so ``gather`` should never see a real
+        exception — the ``return_exceptions=True`` belt-and-braces only guards
+        against an unforeseen escape, which is converted to a ``failed`` result
+        rather than allowed to bubble out of the job body (the Report is
+        already persisted; notify must not change the Run's status).
+        """
+
+        if not manifest.notify:
+            return []
+
+        severity = aggregate_severity(report)
+        semaphore = asyncio.Semaphore(_NOTIFY_CONCURRENCY)
+        outcomes = await asyncio.gather(
+            *(self._send_one(notify, report, severity, semaphore) for notify in manifest.notify),
+            return_exceptions=True,
+        )
+
+        results: list[NotifyResult] = []
+        for notify, outcome in zip(manifest.notify, outcomes, strict=True):
+            if isinstance(outcome, NotifyResult):
+                results.append(outcome)
+            else:
+                results.append(
+                    NotifyResult(
+                        channel=notify.channel,
+                        status="failed",
+                        error=redact_secret_text(f"notify dispatch error: {outcome!r}"),
+                    )
+                )
+        return results
+
+    async def _send_one(
+        self,
+        notify: NotifyConfig,
+        report: Report,
+        severity: Severity,
+        semaphore: asyncio.Semaphore,
+    ) -> NotifyResult:
+        """Route + render + send one channel, isolating every failure.
+
+        ``should_send`` evaluates ``only_if`` (returning a ``skipped`` /
+        ``failed`` result, or ``None`` to proceed); render and send are wrapped
+        so a raising adapter becomes a ``failed`` result rather than bubbling.
+        The Report handed to the channel is already redacted upstream
+        (``reporting/_redact.py``); the channel re-renders it, not the raw
+        evidence.
+        """
+
+        async with semaphore:
+            routing = await should_send(notify.channel, notify.only_if, report)
+            if routing is not None:
+                # ``skipped`` (only_if false) or ``failed`` (only_if raised).
+                return routing
+
+            channel = self._channels[notify.channel]
+            try:
+                payload = channel.render(report, severity=severity)
+                return await channel.send(payload)
+            except Exception as exc:  # render/send isolation (design D-7)
+                return NotifyResult(
+                    channel=notify.channel,
+                    status="failed",
+                    error=redact_secret_text(f"render/send failed: {exc!r}"),
+                )
 
     # ------------------------------------------------------------------ #
     # Scheduling-layer listener

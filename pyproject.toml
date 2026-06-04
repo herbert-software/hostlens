@@ -40,6 +40,7 @@ dependencies = [
     "jinja2>=3.1,<4",
     "jsonschema>=4.20,<5",
     "anthropic>=0.45,<2",
+    "httpx>=0.27,<1",
     "APScheduler>=3.10,<4",
 ]
 

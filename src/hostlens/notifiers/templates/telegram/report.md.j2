@@ -1,0 +1,16 @@
+*{{ (report.intent or "巡检报告") | mdv2_escape }}*
+目标 `{{ report.target_name | mdv2_escape }}` · severity {{ severity | sev_icon }} *{{ severity | mdv2_escape }}*
+{% if report.findings %}
+{% for f in report.findings %}
+{{ f.severity | sev_icon }} {{ f.message | mdv2_escape }}
+{%- endfor %}
+{% else %}
+_无 findings_
+{%- endif %}
+{% if report.hypotheses %}
+
+*根因假设*
+{% for h in report.hypotheses %}
+• {{ h.description | mdv2_escape }} \({{ h.confidence | mdv2_escape }}\)
+{%- endfor %}
+{%- endif %}

@@ -536,6 +536,12 @@ def _is_ready(
     # targets / inspectors fail-loud posture and flip exit 1.
     if checks["schedules"].status == "error":
         return False
+    # ``channels`` is only present when ``--check-channels`` was passed; a
+    # failed probe (invalid token / missing env var / malformed file) is a
+    # real misconfiguration that flips exit 1, mirroring targets / schedules.
+    channels = checks.get("channels")
+    if channels is not None and channels.status == "error":
+        return False
     # Any target failing connectivity flips the whole doctor to exit 1
     # (spec §场景:某 target 连通失败 doctor exit 1).
     if any(row.connectivity == "failed" for row in targets):
@@ -780,13 +786,84 @@ def _check_schedules(settings: Settings) -> CheckResult:
     return CheckResult(status="ok", detail=detail)
 
 
-def _build_report(settings: Settings) -> DoctorReport:
+def _check_channels(settings: Settings) -> CheckResult:
+    """Notifier-channel connectivity / config probe for ``doctor --check-channels``.
+
+    Lands under ``DoctorReport.checks["channels"]`` (a new check_id in the
+    existing ``checks`` namespace — same add-only carrier as ``schedules``),
+    so the closed cli-foundation ``--json`` schema is untouched (no new field,
+    no version bump). Only emitted when ``--check-channels`` is passed.
+
+    Behaviour (spec §需求:`doctor --check-channels`):
+
+    - No ``notifiers.yaml`` → ``status="ok"`` with a "no channels configured"
+      detail (an absent file is a valid empty state).
+    - A malformed file / unknown type / missing env var / failed
+      ``validate_config`` (``ConfigError`` from ``load_channels``) →
+      ``status="error"`` carrying the loader's ``kind`` + reason. doctor MUST
+      NOT crash on a bad file.
+    - Per channel: Telegram gets a read-only ``getMe`` probe; Lark validates
+      config completeness only (no business message sent). Any channel
+      probing failed → ``status="error"`` with a compact per-channel summary
+      in ``detail``; all healthy → ``status="ok"``.
+
+    ``detail`` is the add-only carrier (no new ``CheckResult`` field) so every
+    channel's pass/fail + reason stays machine-greppable without changing the
+    per-check schema. Secrets never reach ``detail`` (the Telegram probe
+    scrubs the token; Lark never echoes the webhook).
+    """
+
+    from hostlens.cli.notify import _probe_telegram
+    from hostlens.notifiers.base import ChannelTypeRegistry, register_default_notifiers
+    from hostlens.notifiers.config import load_channels
+
+    if not settings.notifiers_config_path.exists():
+        return CheckResult(status="ok", detail="no channels configured")
+
+    registry = ChannelTypeRegistry()
+    register_default_notifiers(registry)
+    try:
+        channels = load_channels(settings, registry)
+    except ConfigError as exc:
+        kind = getattr(exc, "kind", type(exc).__name__)
+        return CheckResult(status="error", detail=f"{kind}: {exc}")
+
+    if not channels:
+        return CheckResult(status="ok", detail="channels=0")
+
+    # ``load_channels`` already env-expanded each config and ran
+    # ``validate_config``; reaching here means config is structurally sound.
+    # The per-type probe re-reads the now-resolved config off each adapter.
+    parts: list[str] = []
+    any_failed = False
+    for name, notifier in sorted(channels.items()):
+        ctype = notifier.name
+        if ctype == "telegram":
+            config = getattr(notifier, "_config", {})
+            ok, reason = _probe_telegram(config)
+            if ok:
+                parts.append(f"{name}=ok")
+            else:
+                any_failed = True
+                parts.append(f"{name}=failed({reason})")
+        else:
+            # Lark (and any future config-only type): config completeness was
+            # already validated by load_channels; no business message sent.
+            parts.append(f"{name}=ok(config)")
+
+    status: Literal["ok", "error"] = "error" if any_failed else "ok"
+    return CheckResult(status=status, detail=" ".join(parts))
+
+
+def _build_report(settings: Settings, *, check_channels: bool = False) -> DoctorReport:
     checks: dict[str, CheckResult] = {
         "python_version": check_python_version(),
         "anthropic_key": check_anthropic_key(),
         "config_dir": check_config_dir(),
         "schedules": _check_schedules(settings),
     }
+    if check_channels:
+        checks["channels"] = _check_channels(settings)
     targets = _check_targets(settings)
     inspectors = _check_inspectors(settings)
     backend_row = _check_backend(settings)
@@ -897,6 +974,13 @@ def _emit_remediation(report: DoctorReport, stderr: Console) -> None:
             "hint: hostlens requires Python >=3.11; upgrade your interpreter",
         )
 
+    channels = report.checks.get("channels")
+    if channels is not None and channels.status == "error":
+        stderr.print(
+            f"hint: notifier channel probe failed ({channels.detail}); check "
+            "notifiers.yaml types / ${VAR} env vars / bot tokens",
+        )
+
     # M1: warn (not exit 1) for inline plaintext credentials.
     for row in report.targets:
         if row.credential_source == "inline_plaintext":
@@ -924,7 +1008,7 @@ def _emit_remediation(report: DoctorReport, stderr: Console) -> None:
         )
 
 
-def run_doctor(json_output: bool) -> int:
+def run_doctor(json_output: bool, *, check_channels: bool = False) -> int:
     """Run all checks, emit output, return process exit code.
 
     Wires core/config + core/logging into the CLI entrypoint so that
@@ -938,7 +1022,7 @@ def run_doctor(json_output: bool) -> int:
     settings = load_settings()
     configure_logging(settings.log_mode)
 
-    report = _build_report(settings)
+    report = _build_report(settings, check_channels=check_channels)
     stdout = Console(highlight=False, soft_wrap=True)
     stderr = Console(stderr=True, highlight=False, soft_wrap=True)
 

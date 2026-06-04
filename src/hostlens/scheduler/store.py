@@ -37,6 +37,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from hostlens.notifiers.base import NotifyResult
 from hostlens.reporting.models import Report
 from hostlens.reporting.render_json import render
 
@@ -92,11 +93,13 @@ def compute_report_hash(report: Report) -> str:
 class Run(BaseModel):
     """One entry in the scheduler execution ledger.
 
-    `notify_results` is a placeholder that stays empty in M4 — the
-    `NotifyResult` type is part of the M5 Notifier subsystem and does not
-    exist yet, so the field is typed `list[object]` (not `list[Any]`,
-    which mypy --strict rejects under CLAUDE.md §6, and not a bare `list`,
-    which is equivalent). M5 tightens it to `list[NotifyResult]`.
+    `notify_results` is `list[NotifyResult]` from M5 on: the runner fills it
+    with one `NotifyResult` per routed channel after the Report is persisted,
+    and it stays `[]` for any no-Report status. The M4 placeholder typed it
+    `list[object]` (the `NotifyResult` type did not exist yet); the field is
+    serialized into `runs.db` as the same JSON column (schema unchanged), and
+    an M4 row whose `notify_results` is the empty array `[]` deserializes as
+    a valid empty list with no migration.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -109,7 +112,7 @@ class Run(BaseModel):
     status: RunStatus
     report_id: str | None = None
     error: str | None = None
-    notify_results: list[object] = Field(default_factory=list)
+    notify_results: list[NotifyResult] = Field(default_factory=list)
     targets: list[str]
     inspectors: list[str] = Field(default_factory=list)
     report_hash: str | None = None

@@ -418,14 +418,15 @@ APPROVE/CLEAR → git push → gh pr create
 
 ## 9. 当前阶段
 
-**M0–M4 已落地**（`src/` 有可运行代码、`hostlens` CLI 可装可跑、未发 PyPI）。已交付：
+**M0–M5 已落地**（`src/` 有可运行代码、`hostlens` CLI 可装可跑、未发 PyPI）。已交付：
 
 - **M0** 脚手架 + `hostlens doctor`
 - **M1** ExecutionTarget（local/ssh）/ Inspector 插件系统 / Report 数据模型 + `hostlens inspect` / `target` / `inspectors`
 - **M2** 手写 Agent loop（`agent/loop.py`）+ LLMBackend Protocol + Tool Registry + 离线 `hostlens demo`
 - **M3** Diagnostician + 根因假设 + Report 持久化（`reporting/store.py`）+ regression diff（`hostlens reports list/show/diff`）；M3.6 Path 1（容忍 inbound thinking）已落，**Path 2（support-extended-thinking，请求+消费推理 trace）仍待做**
 - **M4** Scheduler：`scheduler/{schema,loader,store,runner}.py` + `orchestration/pipeline.py`（编排函数上提）+ `hostlens schedule list/run/daemon/trigger/status`；cron/interval 定时、Run 留痕（独立 runs.db）、SIGTERM 优雅停机、doctor `checks.schedules`
+- **M5** Notifier：`notifiers/{base,config,routing,telegram,lark}.py` + Jinja2 模板——Notifier Protocol + Channel registry / Telegram（MarkdownV2）+ 飞书 Lark（HMAC 签名）适配器 / `notifiers.yaml`（`${ENV_VAR}` 注入）+ `only_if` 路由（复用硬化 DSL、severity rank 比较）/ Scheduler↔Notifier 接线（runner 在 Report 持久化后按路由派发、结果写 `Run.notify_results`，失败隔离不冒泡）/ `hostlens notify channels/render/test` CLI + `doctor --check-channels`
 
-**下一步：M5 Notifier**（Telegram + 飞书 Lark 适配器 + `only_if` 路由 + Scheduler↔Notifier 接线）。当前 manifest 的 `notify` 配置仅占位、不发送。
+**下一步：M6**（参考 docs/TODO.md 路线）。M5 已把「意图→采集→诊断→推送」整条链路打通；钉钉 / 企业微信 / Slack / Email / 通用 Webhook 仅靠 Protocol + registry 预留扩展点、本期未写适配器。
 
 **纪律红线**（不变）：每期开始前先用 OpenSpec 起 proposal，**不要跳过 spec 直接写代码**；改已有契约必更新对应 spec；实现完成后归档（change → `openspec/changes/archive/`，delta 合入 `openspec/specs/`）。

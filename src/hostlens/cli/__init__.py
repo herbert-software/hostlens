@@ -19,6 +19,7 @@ from hostlens.cli.demo import app as demo_app
 from hostlens.cli.doctor import run_doctor
 from hostlens.cli.inspect import inspect_cmd
 from hostlens.cli.inspectors import app as inspectors_app
+from hostlens.cli.notify import notify_app
 from hostlens.cli.reports import reports_app
 from hostlens.cli.schedule import schedule_app
 from hostlens.cli.target import target_app
@@ -53,11 +54,17 @@ def doctor_cmd(
         "--json",
         help="Emit machine-readable JSON to stdout instead of a Rich table.",
     ),
+    check_channels: bool = typer.Option(
+        False,
+        "--check-channels",
+        help="Probe each configured notifier channel (Telegram getMe / Lark "
+        "config validation) and add the result under `checks.channels`.",
+    ),
 ) -> None:
     """Check local environment health (Python version, env vars, config dir)."""
 
     try:
-        exit_code = run_doctor(json_output=json_output)
+        exit_code = run_doctor(json_output=json_output, check_channels=check_channels)
     except ConfigError as exc:
         # `run_doctor()` calls `load_settings()` which raises ConfigError on
         # invalid user config (e.g. `HOSTLENS_LOG_MODE=invalid`). core/config
@@ -75,6 +82,7 @@ app.add_typer(inspectors_app, name="inspectors")
 app.add_typer(demo_app, name="demo")
 app.add_typer(reports_app, name="reports")
 app.add_typer(schedule_app, name="schedule")
+app.add_typer(notify_app, name="notify")
 app.command("inspect")(inspect_cmd)
 
 

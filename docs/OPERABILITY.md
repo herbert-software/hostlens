@@ -177,20 +177,33 @@
 
 ---
 
-## 8. Notifier 可靠性合约
+## 8. Notifier 可靠性合约（M5 已落地）
 
-详见 [ARCHITECTURE.md §6](ARCHITECTURE.md#6-notifier-适配器模式)。本节定义运维参数：
+详见 [ARCHITECTURE.md §6](ARCHITECTURE.md#6-notifier-适配器模式) 与
+[operations/notify.md](operations/notify.md)。本节定义运维参数（值与
+`notifiers/base.py` 的 `DEFAULT_*` 常量对齐）：
 
-| 维度 | 默认值 | 配置键 |
+| 维度 | 默认值 | 说明 |
 |---|---|---|
-| 单条消息发送超时 | 10s | `notifier.send_timeout_seconds` |
-| 失败重试次数 | 3 | `notifier.max_retries` |
-| 重试退避 | 1s, 4s, 16s | `notifier.retry_backoff` |
-| 限流（429/503 with retry-after） | 严格 honor | — |
-| 死信存储 | `~/.local/share/hostlens/dead_letters/` | `notifier.dead_letter_dir` |
-| 死信保留 | 30 天 | `notifier.dead_letter_retention_days` |
+| 单 Run 多通道发送并发 | 4 | `asyncio.gather` + `Semaphore(4)`；与巡检采集并发（§1）分离、互不挤占 |
+| 单次 HTTP 请求超时 | 10s | 每次 `httpx` 请求的 per-attempt timeout |
+| 单通道硬超时（含重试） | 60s | `DEFAULT_CHANNEL_HARD_TIMEOUT_SECONDS`；超时计入 `failed` |
+| 失败重试次数 | 3 | `DEFAULT_MAX_ATTEMPTS`（首发 + 最多 2 次重试） |
+| 重试退避 | 1s, 2s, 4s + 抖动 | 指数退避 `base * 2**(n-1)` + uniform jitter |
+| 限流 429 | honor `Retry-After` | 等待受 60s 硬超时剩余预算封顶；无 header 走退避 |
+| 5xx | 退避重试 | 计入重试预算 |
+| 4xx（非 429） | 立即 `failed` 不重试 | 400/401 等无重试价值 |
+| 消息长度上限 | Telegram 4096 / Lark 卡片体量 | 超长在安全边界截断并标 `truncated=True`，不劈开转义序列 |
 
-`hostlens notify retry <run_id>` 可手动重发死信。
+**失败语义**：单通道发送失败（5xx/超时/4xx/`only_if` 运行期异常/渲染异常）
+仅记入 `Run.notify_results` 的 `NotifyResult(status="failed", error=...)`，
+**不**冒泡到 scheduler job 体、**不**改 `RunStatus`、**不**取消其它通道
+（`asyncio.gather` 失败隔离）。`error` 字段经 `redact_secret_text` 打码后才
+落 `runs.db`，防 token 经异常 str 泄漏。
+
+**重投策略**：M5 **不实现**死信队列 / 持久化重投——失败只留痕（含 error），
+重投留后续里程碑（见 add-notifier-channels 提案 §非目标）。至多 3 次重试 +
+无去重 = at-least-once 投递，重试可能产生重复消息（accepted risk）。
 
 ---
 
@@ -203,7 +216,7 @@
 | Anthropic API 完全宕机 | Planner 跳过，按 manifest 显式列出的 Inspector 跑（如有），输出无根因报告 | report status: `degraded_no_planner` |
 | 部分 Inspector 超时 | 该 Inspector 标记 `timeout`，其余照常 | finding-level: `inspector_status: timeout` |
 | 单个 target 不可达 | 该 target 全部 Inspector 标记 `target_unreachable`，其他 target 不受影响 | run status: `partial` |
-| Notifier 通道失败 | 其它通道不受影响；失败写入死信 | notify_result.<channel>.status: `dead_lettered` |
+| Notifier 通道失败 | 其它通道不受影响；失败记入 `Run.notify_results`（不冒泡、不改 RunStatus） | notify_result.<channel>.status: `failed` |
 | SQLite 写失败 | 报告临时写到 `~/.local/share/hostlens/orphan_reports/<run_id>.json`，doctor 提示 | doctor: `orphan_reports_count > 0` |
 | 配额耗尽（API budget） | 新巡检请求排队 5 分钟；超时则 `RunStatus.BUDGET_EXHAUSTED`（无 Report 产出） | `RunStatus.BUDGET_EXHAUSTED`（详见 ARCHITECTURE.md §7 RunStatus enum） |
 

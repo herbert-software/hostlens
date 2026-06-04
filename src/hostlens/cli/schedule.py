@@ -50,6 +50,8 @@ from hostlens.core.config import Settings, load_settings
 from hostlens.core.exceptions import BackendDaemonUnsafe, ConfigError
 from hostlens.core.logging import configure_logging
 from hostlens.core.redact import redact_text
+from hostlens.notifiers.base import ChannelTypeRegistry, register_default_notifiers
+from hostlens.notifiers.config import load_channels
 from hostlens.scheduler.loader import load_schedules
 from hostlens.scheduler.runner import SchedulerRunner
 from hostlens.scheduler.store import RunStore
@@ -63,6 +65,7 @@ if TYPE_CHECKING:
 
     from hostlens.agent.backend import LLMBackend
     from hostlens.inspectors.registry import InspectorRegistry
+    from hostlens.notifiers.base import Notifier
     from hostlens.scheduler.schema import ScheduleManifest
     from hostlens.scheduler.store import Run
     from hostlens.targets.registry import TargetRegistry
@@ -161,6 +164,23 @@ def _build_target_registry(settings: Settings) -> TargetRegistry:
         _fail_config(f"failed to load targets config: {exc}")
 
 
+def _build_channels(settings: Settings) -> dict[str, Notifier]:
+    """Load the notifier channels from ``notifiers.yaml`` (fail-loud, exit 2).
+
+    A missing / empty file yields an empty map (no channels configured is a
+    valid state); a malformed config (unknown type / unset env var / empty
+    required field / unparsable YAML) is fail-loud with a clean exit 2,
+    matching ``_build_target_registry`` — never a raw traceback.
+    """
+
+    registry = ChannelTypeRegistry()
+    register_default_notifiers(registry)
+    try:
+        return load_channels(settings, registry)
+    except ConfigError as exc:
+        _fail_config(f"failed to load notifier channels: {exc}")
+
+
 def _build_inspector_registry(settings: Settings) -> InspectorRegistry:
     from hostlens.inspectors.registry import build_registry_from_search_paths
 
@@ -228,6 +248,8 @@ def _build_runner(
     def backend_factory() -> LLMBackend:
         return create_backend(settings)
 
+    channels = _build_channels(settings)
+
     return SchedulerRunner(
         manifests,
         run_store=RunStore(),
@@ -236,6 +258,7 @@ def _build_runner(
         backend_factory=backend_factory,
         context_factory=_context_factory(settings, target_registry, inspector_registry, logger),
         target_registry=target_registry,
+        channels=channels,
         grace_seconds=settings.daemon.shutdown_grace_seconds,
     )
 

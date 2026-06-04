@@ -167,9 +167,14 @@ def test_notify_placeholder_parses() -> None:
     assert manifest.notify[0].only_if == "severity == 'critical'"
 
 
-def test_notify_config_accepts_m5_bound_extra_fields() -> None:
-    cfg = NotifyConfig.model_validate({"channel": "lark", "future_field": "x"})
-    assert cfg.channel == "lark"
+def test_notify_config_rejects_unknown_field() -> None:
+    # M5 tightens NotifyConfig to extra="forbid": a misspelled / unknown
+    # sub-field (e.g. only_iff) is fail-loud, matching the manifest's
+    # fail-loud basis (schedule-manifest spec §需求:notify 在 M5 被消费).
+    with pytest.raises(ValidationError) as exc:
+        NotifyConfig.model_validate({"channel": "lark", "only_iff": "x"})
+
+    assert "only_iff" in str(exc.value)
 
 
 def test_report_config_defaults() -> None:

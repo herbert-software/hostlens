@@ -216,6 +216,7 @@ class Settings(BaseSettings):
     daemon_mode: bool = False
     config_dir: Path = Path("~/.config/hostlens").expanduser()
     targets_config_path: Path = Path("~/.config/hostlens/targets.yaml").expanduser()
+    notifiers_config_path: Path = Path("~/.config/hostlens/notifiers.yaml").expanduser()
     ssh: SshSettings = Field(default_factory=SshSettings)
     # Daemon-level runtime params. Uses
     # ``default_factory`` (like ``ssh``, not optional like ``agent``) so
