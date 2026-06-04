@@ -65,6 +65,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from hostlens.core.exceptions import ConfigError
 from hostlens.core.redact import redact_text
 from hostlens.notifiers.base import NotifyResult, redact_secret_text
 from hostlens.notifiers.routing import aggregate_severity, should_send
@@ -217,9 +218,12 @@ class SchedulerRunner:
             for notify in manifest.notify:
                 if notify.channel not in self._channels:
                     known = ", ".join(sorted(self._channels)) or "<none>"
-                    raise ValueError(
-                        f"manifest {manifest.name!r} notify references unknown channel "
-                        f"{notify.channel!r}; configured channels: {known}"
+                    raise ConfigError(
+                        "manifest notify references unknown channel",
+                        kind="unknown_notify_channel",
+                        manifest=manifest.name,
+                        channel=notify.channel,
+                        configured=known,
                     )
 
     @property

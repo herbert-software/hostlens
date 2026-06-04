@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import structlog
+import typer
 import yaml
 from typer.testing import CliRunner
 
@@ -654,15 +655,36 @@ def test_build_runner_unknown_channel_fail_loud(env: Path, monkeypatch: pytest.M
     """A notify manifest with no notifiers.yaml → unknown channel → fail-loud.
 
     ``load_channels`` returns an empty map (no file), and the runner's
-    assembly-time channel-existence check raises on the unresolved reference.
+    assembly-time channel-existence check raises ``ConfigError`` on the
+    unresolved reference, which ``_build_runner`` maps to the CLI's clean
+    exit-2 (``typer.Exit(code=2)``) rather than a raw traceback.
     """
 
     _write_notify_manifest(env, name="nightly", channel="tg-main")
     missing = env / "no-such-notifiers.yaml"
     monkeypatch.setenv("HOSTLENS_NOTIFIERS_CONFIG_PATH", str(missing))
 
-    with pytest.raises(ValueError, match="unknown channel"):
+    with pytest.raises(typer.Exit) as exc:
         _cli_build_runner(env)
+    assert exc.value.exit_code == 2
+
+
+def test_trigger_unknown_channel_clean_exit_2_no_traceback(
+    runner: CliRunner, env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``schedule trigger`` over a notify manifest whose channel is not in
+    notifiers.yaml exits 2 with a clean message and no raw traceback."""
+
+    _write_notify_manifest(env, name="nightly", channel="ghost")
+    missing = env / "no-such-notifiers.yaml"
+    monkeypatch.setenv("HOSTLENS_NOTIFIERS_CONFIG_PATH", str(missing))
+    monkeypatch.setattr("hostlens.cli.schedule.os.geteuid", lambda: 1000)
+
+    result = runner.invoke(app, ["schedule", "trigger", "nightly"])
+    combined = result.stdout + result.stderr
+    assert result.exit_code == 2, combined
+    assert "unknown channel" in combined
+    assert "Traceback" not in combined
 
 
 def test_build_runner_no_notify_manifest_assembles_without_channels(

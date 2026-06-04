@@ -131,11 +131,10 @@ def channels_cmd(
 
     # ``load_channels`` is fail-loud (it raises on a malformed file / unknown
     # type / missing env var / failed validate_config). For ``channels`` we
-    # deliberately downgrade that to a per-channel "invalid" row instead of a
-    # crash, because the whole point of this command is to *surface* config
-    # problems. We first try the strict load; on any ConfigError we fall back
-    # to a raw scan that reports each channel's validation outcome
-    # individually.
+    # deliberately do NOT call it; instead ``_collect_channel_rows`` parses the
+    # raw yaml itself and validates each channel independently, so one broken
+    # channel surfaces as an "invalid" row instead of crashing the whole
+    # command — the whole point of ``channels`` is to *surface* config problems.
     rows = _collect_channel_rows(settings, registry)
 
     if json_output:
@@ -518,7 +517,8 @@ def test_cmd(
     no inspected-host state.
 
     Exit code: 0 on a successful send; 1 on the non-TTY-no-``--yes`` guard, a
-    failed send, or an unknown channel.
+    failed send, or an unknown channel; 2 on a configuration error (malformed
+    / unreadable ``notifiers.yaml``), per the module exit-code contract.
     """
 
     settings = _load_settings_or_exit("test")
@@ -553,8 +553,9 @@ def test_cmd(
 
 
 def _resolve_channel_or_exit_for_test(settings: Settings, channel: str) -> Notifier:
-    """Same resolution as ``render`` but unknown channel / bad config both
-    map to exit 1 (the ``test`` command's single business-failure code)."""
+    """Same resolution as ``render``: an unknown channel name maps to exit 1
+    (business failure), while a malformed ``notifiers.yaml`` (``ConfigError``)
+    maps to exit 2 (configuration error), per the module exit-code contract."""
 
     registry = _registry()
     try:

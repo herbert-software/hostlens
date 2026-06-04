@@ -30,6 +30,7 @@ import structlog
 from hostlens.agent.backend import LLMBackend
 from hostlens.agent.backends.fake import FakeBackend
 from hostlens.core.config import AgentSettings, Settings
+from hostlens.core.exceptions import ConfigError
 from hostlens.inspectors.registry import (
     InspectorRegistry,
     build_registry_from_search_paths,
@@ -364,7 +365,7 @@ async def test_no_report_status_does_not_dispatch(tmp_path: Path) -> None:
 def test_unknown_channel_fails_loud_at_assembly(tmp_path: Path) -> None:
     run_store, report_store = _stores(tmp_path)
     manifest = _manifest([NotifyConfig(channel="does-not-exist")])
-    with pytest.raises(ValueError, match="unknown channel"):
+    with pytest.raises(ConfigError, match="unknown channel"):
         _runner(
             manifest=manifest,
             channels={"some-other": cast(Notifier, _RecordingNotifier("some-other"))},
@@ -417,7 +418,6 @@ def test_load_with_notify_does_not_require_notifiers_yaml(tmp_path: Path) -> Non
 def test_load_rejects_invalid_only_if(tmp_path: Path) -> None:
     import textwrap
 
-    from hostlens.core.exceptions import ConfigError
     from hostlens.scheduler.loader import load_schedules
     from hostlens.targets.config import TargetsConfig
     from hostlens.targets.registry import build_registry_from_config

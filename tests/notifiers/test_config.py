@@ -231,6 +231,27 @@ def test_non_mapping_top_level_fail_loud(tmp_path: Path) -> None:
     assert exc.value.kind == "invalid_top_level"
 
 
+def test_unreadable_file_raises_configerror_not_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A present-but-unreadable notifiers.yaml must surface as a typed
+    # ``ConfigError`` (so the CLI / scheduler callers, which only catch
+    # ConfigError, map it to a clean exit) rather than a raw ``OSError``.
+    # ``chmod(0o000)`` does not reliably deny read to root, so we monkeypatch
+    # ``Path.read_text`` to raise ``OSError`` for determinism.
+    settings = _settings(_write(tmp_path, "channels: {}\n"))
+
+    def _raise(self: Path, *args: object, **kwargs: object) -> str:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _raise)
+
+    with pytest.raises(ConfigError) as exc:
+        load_channels(settings, _registry())
+
+    assert exc.value.kind == "notifiers_yaml_unreadable"
+
+
 # --------------------------------------------------------------------------- #
 # Real adapter construction contract (instance_name= alignment)
 # --------------------------------------------------------------------------- #

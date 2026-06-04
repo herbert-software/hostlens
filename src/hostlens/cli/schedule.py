@@ -250,17 +250,23 @@ def _build_runner(
 
     channels = _build_channels(settings)
 
-    return SchedulerRunner(
-        manifests,
-        run_store=RunStore(),
-        report_store=ReportStore(),
-        settings=settings,
-        backend_factory=backend_factory,
-        context_factory=_context_factory(settings, target_registry, inspector_registry, logger),
-        target_registry=target_registry,
-        channels=channels,
-        grace_seconds=settings.daemon.shutdown_grace_seconds,
-    )
+    try:
+        return SchedulerRunner(
+            manifests,
+            run_store=RunStore(),
+            report_store=ReportStore(),
+            settings=settings,
+            backend_factory=backend_factory,
+            context_factory=_context_factory(settings, target_registry, inspector_registry, logger),
+            target_registry=target_registry,
+            channels=channels,
+            grace_seconds=settings.daemon.shutdown_grace_seconds,
+        )
+    except ConfigError as exc:
+        # Assembly-time manifest/channel validation (e.g. a notify.channel not
+        # present in notifiers.yaml) is a configuration error — map it to the
+        # CLI's clean exit-2 instead of letting it surface as a raw traceback.
+        _fail_config(f"invalid schedule/notify wiring: {exc}")
 
 
 # --------------------------------------------------------------------------- #

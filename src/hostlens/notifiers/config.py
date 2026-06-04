@@ -122,7 +122,15 @@ def _parse_yaml(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
 
-    raw_text = path.read_text()
+    try:
+        raw_text = path.read_text()
+    except OSError as exc:
+        raise ConfigError(
+            "failed to read notifiers.yaml",
+            kind="notifiers_yaml_unreadable",
+            original=exc,
+            path=str(path),
+        ) from exc
     try:
         parsed = yaml.safe_load(raw_text)
     except yaml.YAMLError as exc:
