@@ -1,0 +1,85 @@
+name: net.dns.resolve
+version: 1.0.0
+description: >-
+  Resolve each caller-supplied DNS name with `dig +short A` and flag any name
+  that fails to resolve or returns no A record. Linux-only assumption is loose
+  (`dig` from bind-utils/dnsutils is the only hard dep). All probing happens in
+  the collector; the Finding DSL only compares the ready `results` array.
+tags: [linux, network, dns, resolve, dig]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [dig, grep]
+privilege: none
+
+parameters:
+  type: object
+  required: [names]
+  properties:
+    # `names` is interpolated into the collector loop, so the injection
+    # three-piece set (Authoring Contract): (a) each element flows through
+    # `| map('sh')` (shlex.quote); (b) the pattern restricts the charset to a
+    # DNS-label alphabet so `'; whoami; #` and friends can never reach a
+    # shell-evaluated position even before quoting; (c) it is never bare-spliced
+    # into an executable position. The hostname charset (letters / digits /
+    # dot / hyphen) deliberately excludes quotes, spaces, `;`, `|`, `$`, etc.
+    names:
+      type: array
+      items: { type: string, pattern: "^[a-zA-Z0-9.-]+$" }
+  additionalProperties: false
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): `dig` returning empty for a name is
+  # a legitimate "no A record" result, NOT a collector failure — so per-name
+  # `dig` is allowed to exit non-zero (NXDOMAIN / SERVFAIL) without aborting the
+  # whole run; we record `resolved: false` for that name. But a structurally
+  # broken loop (e.g. `printf` failing) would still surface as truncated JSON →
+  # parse exception. The empty-input case cannot occur (`names` is required and
+  # non-empty by schema), but the loop still prints a well-formed object.
+  #
+  # The output array key is `results` (NOT `names`) so it never collides with
+  # the `names` parameter in the merged Finding DSL context (wall 3) — a
+  # same-named output key would be shadowed by the parameter (a list of name
+  # strings) and the `for_each` would iterate strings, not result dicts.
+  # Each name flows through `| map('sh') | join(' ')` so the pattern-constrained
+  # label can never break out of the loop word.
+  command: |
+    printf '{"results":['
+    sep=""
+    for nm in {{ names | map('sh') | join(' ') }}; do
+      ans=$(dig +short A "$nm" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+      if [ -n "$ans" ]; then
+        printf '%s{"name":"%s","resolved":true,"address":"%s"}' "$sep" "$nm" "$ans"
+      else
+        printf '%s{"name":"%s","resolved":false,"address":""}' "$sep" "$nm"
+      fi
+      sep=","
+    done
+    printf ']}'
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          name:     { type: string }
+          resolved: { type: boolean }
+          address:  { type: string }
+        required: [name, resolved, address]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # `when` uses attribute access (simpleeval dict-key resolution); the message
+  # uses subscript form so str.format reads dict keys correctly.
+  - for_each: "results as r"
+    when: "r.resolved == False"
+    severity: critical
+    message: "DNS name {r[name]} failed to resolve (no A record)"

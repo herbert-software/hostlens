@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v pgrep",
+      "stdout": "/usr/bin/pgrep\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "printf '{\"results\":['\nsep=\"\"\nfor proc in sshd nginx; do\n  pgrep -x -- \"$proc\" >/dev/null 2>&1\n  rc=$?\n  if [ \"$rc\" -eq 0 ]; then\n    alive=true\n  elif [ \"$rc\" -eq 1 ]; then\n    alive=false\n  else\n    echo \"pgrep failed for $proc (rc=$rc)\" >&2\n    exit 1\n  fi\n  printf '%s{\"name\":\"%s\",\"alive\":%s}' \"$sep\" \"$proc\" \"$alive\"\n  sep=\",\"\ndone\nprintf ']}'",
+      "stdout": "{\"results\":[{\"name\":\"sshd\",\"alive\":true},{\"name\":\"nginx\",\"alive\":true}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

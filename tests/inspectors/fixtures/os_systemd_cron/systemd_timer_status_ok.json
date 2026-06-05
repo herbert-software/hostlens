@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v systemctl",
+      "stdout": "/usr/bin/systemctl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v jq",
+      "stdout": "/usr/bin/jq\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(systemctl list-timers --all -o json 2>/dev/null) || { echo \"list-timers failed\" >&2; exit 1; }\nnow_us=$(date +%s)000000\nprintf '%s' \"$raw\" | jq -c --argjson now \"$now_us\" '{\n  results: map({\n    unit: .unit,\n    next_elapse_usec: (.next_elapse_realtime // 0),\n    last_trigger_usec: (.last_trigger_usec // 0),\n    last_trigger_age_sec: (if (.last_trigger_usec // 0) > 0 then (($now - .last_trigger_usec) / 1000000 | floor) else -1 end)\n  })\n}' || { echo \"jq failed\" >&2; exit 1; }",
+      "stdout": "{\"results\":[{\"unit\":\"apt-daily.timer\",\"next_elapse_usec\":1704200000000000,\"last_trigger_usec\":1704190000000000,\"last_trigger_age_sec\":3600}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

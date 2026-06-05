@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v sort",
+      "stdout": "/usr/bin/sort\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "interval=1\ns1=$(cat /proc/diskstats) || { echo \"diskstats read 1 failed\" >&2; exit 1; }\nsleep \"$interval\"\ns2=$(cat /proc/diskstats) || { echo \"diskstats read 2 failed\" >&2; exit 1; }\nprintf '%s\\n===\\n%s\\n' \"$s1\" \"$s2\" | awk -v iv=\"$interval\" '\n  BEGIN{ phase=1; ms=iv*1000 }\n  /^===$/{ phase=2; next }\n  {\n    dev=$3\n    if (dev ~ /^(loop|ram|dm-)/) next\n    # /proc/diskstats fields: 4=reads 8=writes 13=io_ticks(ms in I/O)\n    if (phase==1){ r1[dev]=$4; w1[dev]=$8; t1[dev]=$13; seen[dev]=1 }\n    else        { r2[dev]=$4; w2[dev]=$8; t2[dev]=$13 }\n  }\n  END{\n    for (d in seen){\n      dt = t2[d]-t1[d]\n      ops = (r2[d]-r1[d]) + (w2[d]-w1[d])\n      util = (ms>0 ? dt/ms*100 : 0); if (util<0) util=0\n      awaitms = (ops>0 ? dt/ops : 0); if (awaitms<0) awaitms=0\n      printf \"%s\\t%.1f\\t%.2f\\t%d\\n\", d, util, awaitms, ops\n    }\n  }' \\\n  | sort \\\n  | awk -F'\\t' '\n    BEGIN{ printf \"{\\\"results\\\":[\"; sep=\"\" }\n    {\n      printf \"%s{\\\"device\\\":\\\"%s\\\",\\\"util_pct\\\":\\\"%s\\\",\\\"await_ms\\\":\\\"%s\\\",\\\"ops\\\":%d}\", sep, $1, $2, $3, $4\n      sep=\",\"\n    }\n    END{ printf \"]}\" }' || exit 1",
+      "stdout": "{\"results\":[{\"device\":\"nvme0n1\",\"util_pct\":\"12.0\",\"await_ms\":\"0.40\",\"ops\":300},{\"device\":\"sda\",\"util_pct\":\"98.5\",\"await_ms\":\"42.30\",\"ops\":1200}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

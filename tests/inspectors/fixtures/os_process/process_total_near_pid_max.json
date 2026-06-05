@@ -1,0 +1,37 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v ps",
+      "stdout": "/usr/bin/ps\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v wc",
+      "stdout": "/usr/bin/wc\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "total=$(ps -e --no-headers 2>/dev/null | wc -l) || { echo \"ps failed\" >&2; exit 1; }\n[ \"$total\" -gt 0 ] || { echo \"ps returned no processes\" >&2; exit 1; }\npid_max=$(cat /proc/sys/kernel/pid_max) || { echo \"pid_max unreadable\" >&2; exit 1; }\nawk -v t=\"$total\" -v m=\"$pid_max\" 'BEGIN{\n  printf \"{\\\"total\\\":%d,\\\"pid_max\\\":%d,\\\"used_pct\\\":\\\"%.1f\\\"}\", t, m, (m>0 ? t/m*100 : 0)\n}' || exit 1",
+      "stdout": "{\"total\":30000,\"pid_max\":32768,\"used_pct\":\"91.6\"}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

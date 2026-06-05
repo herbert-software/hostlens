@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v chronyc",
+      "stdout": "/usr/bin/chronyc\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(chronyc tracking) || { echo \"chronyc tracking failed\" >&2; exit 1; }\nprintf '%s\\n' \"$raw\" | awk '\n  /^Last offset/ { off=$4 }\n  /^Leap status/ { sub(/^Leap status[ ]*:[ ]*/, \"\"); leap=$0 }\n  /^Reference ID/ { synced=($0 ~ /00000000/) ? \"false\" : \"true\" }\n  END{\n    if (off==\"\") { print \"Last offset missing\" > \"/dev/stderr\"; exit 1 }\n    abs=(off<0)?-off:off\n    printf \"{\\\"offset_seconds\\\":%.9f,\\\"abs_offset_seconds\\\":%.9f,\\\"leap_status\\\":\\\"%s\\\",\\\"synced\\\":%s}\",\n      off, abs, leap, (synced==\"\"?\"true\":synced)\n  }' || exit 1",
+      "stdout": "{\"offset_seconds\":2.345678901,\"abs_offset_seconds\":2.345678901,\"leap_status\":\"Normal\",\"synced\":true}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

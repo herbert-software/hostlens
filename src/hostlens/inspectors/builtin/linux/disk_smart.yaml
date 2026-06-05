@@ -1,0 +1,106 @@
+name: linux.disk.smart
+version: 1.0.0
+description: >-
+  Surface per-block-device health hints from non-privileged sysfs and an
+  OPTIONAL `smartctl --json` overall-health bit. Linux-only (reads
+  /sys/block/*/queue/rotational and /sys/block/*/size). design D-6: this is
+  a SINGLE NON-PRIVILEGED inspector (privilege: none) — it never requires
+  root. `smartctl` overall-health is attached only when the binary is present
+  AND exits cleanly without privilege; the full root SMART self-test
+  attribute set (reallocated sectors, pending sectors, etc.) is deferred to a
+  separate privileged proposal and intentionally NOT collected here. A
+  rotational (spinning) disk reporting smart_health=FAILED — or any device
+  whose smartctl health bit is FAILED — is flagged.
+tags: [linux, disk, smart, block, health]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): enumerating /sys/block failing MUST
+  # exit non-zero with empty stdout (→ status=exception). A host with NO block
+  # devices (`ls /sys/block` succeeds, empty) genuinely emits {"results":[]}.
+  #
+  # All derivation happens HERE (load-bearing wall 1): rotational flag, size in
+  # GiB (sysfs size is in 512-byte sectors), and the optional smartctl health
+  # bit are computed in shell, then the per-device objects are wrapped in
+  # `{"results":[...]}` (`results` ≠ any parameter name → no shadowing,
+  # load-bearing wall 3). The Finding DSL only compares the ready scalars.
+  #
+  # smartctl is OPTIONAL: when absent (`command -v` fails) or it cannot read a
+  # device without privilege, smart_health is "unknown" — that is NOT a
+  # failure (design D-6: never force root). Only an explicit FAILED bit fires.
+  #
+  # The smart_status.passed bit is read with jq when jq is present (probed
+  # per-host with `command -v jq`, NOT added to requires_binaries — a host
+  # without jq must not become requires_unmet, it just falls back). The jq
+  # `if/elif` ladder is used instead of `// empty` because `false // empty`
+  # collapses a legitimate FAILED bit to empty in jq. When jq is absent the awk
+  # fallback flattens the output (`tr '\n' ' '`) and matches the `passed` token
+  # scoped INSIDE the `smart_status` object — the `[^}]*` between the
+  # `"smart_status":{` open-brace and `"passed"` cannot cross the object's
+  # closing brace, so a `passed` in any sibling block (e.g. a self-test entry,
+  # whether it appears before or after, in compact OR pretty-printed JSON) is
+  # never mistaken for the overall-health bit. `-H` (health-only) output carries
+  # no self-test/attribute table anyway, so in practice only smart_status.passed
+  # is present; the scoping is format-agnostic defence-in-depth.
+  command: |
+    devs=$(ls /sys/block) || { echo "sys/block unreadable" >&2; exit 1; }
+    have_smartctl=0
+    command -v smartctl >/dev/null 2>&1 && have_smartctl=1
+    have_jq=0
+    command -v jq >/dev/null 2>&1 && have_jq=1
+    printf '{"results":['
+    sep=""
+    for d in $devs; do
+      case "$d" in loop*|ram*|dm-*|sr*) continue ;; esac
+      rot=$(cat "/sys/block/$d/queue/rotational" 2>/dev/null) || rot=-1
+      sectors=$(cat "/sys/block/$d/size" 2>/dev/null) || sectors=0
+      size_gib=$(awk -v s="$sectors" 'BEGIN{printf "%.1f", s*512/1073741824}')
+      health="unknown"
+      if [ "$have_smartctl" = "1" ]; then
+        if out=$(smartctl -H --json "/dev/$d" 2>/dev/null); then
+          if [ "$have_jq" = "1" ]; then
+            passed=$(printf '%s' "$out" | jq -r 'if (.smart_status.passed == true) then "true" elif (.smart_status.passed == false) then "false" else "" end' 2>/dev/null)
+          else
+            passed=$(printf '%s' "$out" | tr '\n' ' ' | awk 'match($0, /"smart_status"[ \t]*:[ \t]*\{[^}]*"passed"[ \t]*:[ \t]*(true|false)/){ s=substr($0,RSTART,RLENGTH); if (s ~ /true$/) print "true"; else print "false" }')
+          fi
+          if [ "$passed" = "true" ]; then health="PASSED"; elif [ "$passed" = "false" ]; then health="FAILED"; fi
+        fi
+      fi
+      printf '%s{"device":"%s","rotational":%s,"size_gib":"%s","smart_health":"%s"}' \
+        "$sep" "$d" "$rot" "$size_gib" "$health"
+      sep=","
+    done
+    printf ']}'
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          device:       { type: string }
+          rotational:   { type: integer }
+          size_gib:     { type: string }
+          smart_health: { type: string }
+        required: [device, rotational, size_gib, smart_health]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # Only the explicit smartctl FAILED bit fires; "unknown" (no smartctl /
+  # needs privilege) never fires (design D-6: never force root). The DSL only
+  # does scalar equality over the ready field.
+  - for_each: "results as d"
+    when: "d.smart_health == 'FAILED'"
+    severity: critical
+    message: "Disk {d[device]} reports SMART overall-health FAILED ({d[size_gib]}GiB)"

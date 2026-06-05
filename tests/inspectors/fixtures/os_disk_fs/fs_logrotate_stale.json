@@ -1,0 +1,51 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v date",
+      "stdout": "/usr/bin/date\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v sort",
+      "stdout": "/usr/bin/sort\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v head",
+      "stdout": "/usr/bin/head\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v cut",
+      "stdout": "/usr/bin/cut\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(cat /var/lib/logrotate/status) || { echo \"logrotate status unreadable\" >&2; exit 1; }\n# Emit `sortkey<TAB>YYYY-M-D` per rotation line; newest = lexical max of key.\nnewest=$(printf '%s\\n' \"$raw\" | awk '\n  /^\"/ {\n    n=split($2, p, \"-\")\n    if (n < 3) next\n    printf \"%04d%02d%02d\\t%d-%d-%d\\n\", p[1], p[2], p[3], p[1], p[2], p[3]\n  }' | sort -r | head -n1 | cut -f2) || { echo \"awk/sort failed\" >&2; exit 1; }\n[ -n \"$newest\" ] || { echo \"no rotation timestamps in status file\" >&2; exit 1; }\ncount=$(printf '%s\\n' \"$raw\" | awk '/^\"/{c++} END{print c+0}') || { echo \"count awk failed\" >&2; exit 1; }\nlast_epoch=$(date -d \"$newest\" +%s) || { echo \"GNU date -d failed (needs GNU coreutils)\" >&2; exit 1; }\nnow_epoch=$(date +%s) || { echo \"date failed\" >&2; exit 1; }\ndays=$(awk -v a=\"$now_epoch\" -v b=\"$last_epoch\" 'BEGIN{d=(a-b)/86400; if(d<0)d=0; printf \"%.1f\", d}')\nprintf '{\"days_since_last\":\"%s\",\"last_date\":\"%s\",\"tracked_files\":%d}' \"$days\" \"$newest\" \"$count\"",
+      "stdout": "{\"days_since_last\":\"21.0\",\"last_date\":\"2024-1-15\",\"tracked_files\":12}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

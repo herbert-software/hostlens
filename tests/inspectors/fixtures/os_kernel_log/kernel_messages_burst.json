@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v journalctl",
+      "stdout": "/usr/bin/journalctl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v wc",
+      "stdout": "/usr/bin/wc\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "out=$(journalctl -k -p err --since \"2026-01-02 11:55:00\" --until \"2026-01-02 12:00:00\" --no-pager -q) || { echo \"journalctl -k failed\" >&2; exit 1; }\nif [ -z \"$out\" ]; then count=0; else count=$(printf '%s\\n' \"$out\" | wc -l); fi\nprintf 'error_count=%s\\nwindow_seconds=%s\\n' \"$count\" \"300\"",
+      "stdout": "error_count=37\nwindow_seconds=300\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

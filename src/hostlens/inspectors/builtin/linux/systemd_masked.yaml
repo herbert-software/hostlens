@@ -1,0 +1,57 @@
+name: linux.systemd.masked
+version: 1.0.0
+description: >-
+  List systemd unit files in the masked state. A masked unit is symlinked to
+  /dev/null and can never be started — an operator masking a unit by mistake
+  silently disables a service. Linux-only and systemd-only (drives
+  `systemctl list-unit-files`): requires a systemd host. The masked unit
+  names are extracted in awk so the Finding DSL only does a count comparison.
+tags: [linux, systemd, masked, scheduler]
+targets: [local, ssh]
+# Gate on the `systemctl` binary (preflight-probed), NOT the `systemd`
+# capability (lazy-probed → preflight `requires_unmet`). See
+# systemd_failed_units.yaml / Authoring Contract rule 9.
+requires_capabilities: [shell]
+requires_binaries: [systemctl, awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): a non-systemd host MUST exit
+  # non-zero with empty stdout (→ status=exception), not emit a fabricated
+  # `{"masked":[]}` blessed as "nothing masked". `systemctl ... --state=masked`
+  # is captured in a command substitution and gated `|| exit 1`; awk emits the
+  # unit-name JSON array. The empty case (systemctl succeeds, zero masked
+  # units) still prints a valid top-level object (`{"masked":[]}`) so the JSON
+  # parser never crashes (trap b). `masked` is not a parameter name → no
+  # output/parameter shadowing (load-bearing wall 3).
+  command: |
+    raw=$(systemctl list-unit-files --state=masked --no-legend --plain 2>/dev/null) || { echo "list-unit-files failed" >&2; exit 1; }
+    printf '%s\n' "$raw" | awk '
+      BEGIN{ printf "{\"masked\":[" }
+      { unit=$1; if (unit != "") { u=unit; gsub(/\\/,"\\\\",u); gsub(/"/,"\\\"",u); printf "%s{\"unit\":\"%s\"}", (n++ ? "," : ""), u } }
+      END{ printf "]}" }' || { echo "awk failed" >&2; exit 1; }
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    masked:
+      type: array
+      items:
+        type: object
+        properties:
+          unit: { type: string }
+        required: [unit]
+        additionalProperties: false
+  required: [masked]
+  additionalProperties: false
+
+findings:
+  # No `{len(...)}` in the message (str.format cannot call functions inside
+  # `{}`); the count stays in the `when` expression only.
+  - when: "len(masked) > 0"
+    severity: warning
+    message: "One or more systemd unit files are masked (see masked for details)"

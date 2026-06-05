@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "base=/sys/devices/system/cpu/cpu0/cpufreq\ngov=$(cat \"$base/scaling_governor\") || { echo \"scaling_governor unreadable\" >&2; exit 1; }\ncur=$(cat \"$base/scaling_cur_freq\") || { echo \"scaling_cur_freq unreadable\" >&2; exit 1; }\nmaxf=$(cat \"$base/cpuinfo_max_freq\") || { echo \"cpuinfo_max_freq unreadable\" >&2; exit 1; }\nprintf '%s\\n%s\\n%s\\n' \"$gov\" \"$cur\" \"$maxf\" | awk '\n  NR==1{g=$1} NR==2{c=$1} NR==3{m=$1}\n  END{\n    if (g==\"\" || m==\"\") { print \"cpufreq fields missing\" > \"/dev/stderr\"; exit 1 }\n    printf \"{\\\"governor\\\":\\\"%s\\\",\\\"cur_freq_khz\\\":%d,\\\"max_freq_khz\\\":%d,\\\"freq_pct\\\":\\\"%.1f\\\"}\",\n      g, c, m, (m>0 ? c/m*100 : 0)\n  }' || exit 1",
+      "stdout": "{\"governor\":\"powersave\",\"cur_freq_khz\":800000,\"max_freq_khz\":3600000,\"freq_pct\":\"22.2\"}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

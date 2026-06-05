@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v ps",
+      "stdout": "/usr/bin/ps\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "ps_out=$(ps axo stat=,pid=,comm=) || { echo \"ps failed\" >&2; exit 1; }\nprintf '%s\\n' \"$ps_out\" | awk '\n  $1 ~ /^Z/ {\n    c=$3; gsub(/\\\\/,\"\\\\\\\\\",c); gsub(/\"/,\"\\\\\\\"\",c)\n    if (n>0) sep=\",\"; else sep=\"\";\n    list = list sep \"{\\\"pid\\\":\" $2 \",\\\"comm\\\":\\\"\" c \"\\\"}\";\n    n++\n  }\n  END{\n    printf \"{\\\"zombie_count\\\":%d,\\\"results\\\":[%s]}\", n, list\n  }' || exit 1",
+      "stdout": "{\"zombie_count\":0,\"results\":[]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

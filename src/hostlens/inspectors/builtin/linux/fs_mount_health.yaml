@@ -1,0 +1,75 @@
+name: linux.fs.mount_health
+version: 1.0.0
+description: >-
+  Detect filesystems that have been remounted read-only (the classic symptom
+  of a kernel ext4/xfs error forcing the FS read-only to protect data) by
+  parsing `findmnt --json`. Linux-only (uses util-linux `findmnt`, which reads
+  /proc/self/mountinfo). The pseudo filesystems (proc / sysfs / cgroup / tmpfs
+  / devtmpfs / overlay etc.) are filtered out so only real on-disk mounts are
+  evaluated; for each real mount the read-only flag is extracted from the
+  comma-separated mount options inside the collector with jq, and the Finding
+  DSL only checks the ready boolean.
+tags: [linux, fs, mount, findmnt, readonly]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [findmnt, jq]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): `findmnt` and `jq` must EACH succeed
+  # else the collector exits non-zero with empty stdout (→ status=exception),
+  # rather than emit `{"results":[]}` which would be blessed as "all mounts
+  # healthy" while findmnt was in fact unavailable. They are gated SEPARATELY
+  # (findmnt in a command substitution, jq on its own line) because `||` on a
+  # pipeline only inspects the last stage — `set -o pipefail` is non-POSIX
+  # (target sh may be dash). A genuinely empty result (findmnt succeeds, jq
+  # filters everything) still emits a valid `{"results":[]}` object.
+  #
+  # All extraction is in jq (load-bearing wall 1): walk the mount tree
+  # recursively (..|.filesystems?), drop pseudo filesystems by fstype, project
+  # target/source/fstype and the read-only boolean derived from the options
+  # string, and wrap in `{"results":[...]}` (`results` ≠ any parameter name →
+  # no shadowing, load-bearing wall 3). The DSL only checks `c.read_only`.
+  command: |
+    mnt=$(findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS) || { echo "findmnt failed" >&2; exit 1; }
+    printf '%s' "$mnt" | jq -c '
+      [ .. | .filesystems? // empty | .[] ]
+      | map(select(.fstype | test("^(proc|sysfs|cgroup|cgroup2|tmpfs|devtmpfs|devpts|mqueue|debugfs|tracefs|securityfs|pstore|bpf|configfs|fusectl|overlay|squashfs|autofs|binfmt_misc|hugetlbfs|nsfs|ramfs)$") | not))
+      | {
+          results: map({
+            target: .target,
+            source: (.source // ""),
+            fstype: .fstype,
+            read_only: ((.options | split(",")) | any(. == "ro"))
+          })
+        }
+    ' || { echo "jq failed" >&2; exit 1; }
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          target:    { type: string }
+          source:    { type: string }
+          fstype:    { type: string }
+          read_only: { type: boolean }
+        required: [target, source, fstype, read_only]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # The DSL only checks the ready boolean — no parsing of the options string
+  # (that happened in jq, load-bearing wall 1).
+  - for_each: "results as m"
+    when: "m.read_only == True"
+    severity: critical
+    message: "Filesystem {m[target]} ({m[source]}, {m[fstype]}) is mounted read-only"

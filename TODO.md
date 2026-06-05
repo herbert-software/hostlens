@@ -431,15 +431,15 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 | 故障域 | 必须覆盖 | M2 计划基线（M2.8） | M6 新增 |
 |---|---|---|---|
-| 计算（CPU） | top processes / load avg / throttling / cpufreq | top_processes, load_avg | cpu.throttling, cpu.cpufreq |
-| 内存 | pressure / swap / OOM history / hugepages | memory.pressure, kernel.oom_killer | memory.swap, memory.hugepages |
-| 磁盘 / FS | usage / inode / IO / SMART / mount health / logrotate | disk.usage, fs.inode_pressure | disk.io, disk.smart, fs.mount_health, fs.logrotate |
-| 网络 | connections / listening ports / dependency probes / DNS / NTP | dependency.tcp_check | network.connections, network.listening_ports, dns.resolve, ntp.drift |
-| 进程 | zombies / FD 耗尽 / 总数 / 关键进程存活 | process.fd_usage | process.zombies, process.total, process.critical_alive |
-| 服务管理器 | systemd failed units / timers / masked units | systemd.failed_units | systemd.timer_status, systemd.masked |
-| 调度器 | cron 历史 / anacron / 失败 cron | — | cron.last_runs, cron.failures |
+| 计算（CPU） | top processes / load avg / throttling / cpufreq | top_processes, load_avg | cpu.throttling ✅, cpu.cpufreq ✅ |
+| 内存 | pressure / swap / OOM history / hugepages | memory.pressure, kernel.oom_killer | memory.swap ✅, memory.hugepages ✅ |
+| 磁盘 / FS | usage / inode / IO / SMART / mount health / logrotate | disk.usage, fs.inode_pressure | disk.io ✅, disk.smart ✅, fs.mount_health ✅, fs.logrotate ✅ |
+| 网络 | connections / listening ports / dependency probes / DNS / NTP | dependency.tcp_check | net.connections ✅, net.listening_ports ✅, net.dns.resolve ✅, net.ntp.drift ✅ |
+| 进程 | zombies / FD 耗尽 / 总数 / 关键进程存活 | process.fd_usage | process.zombies ✅, process.total ✅, process.critical_alive ✅ |
+| 服务管理器 | systemd failed units / timers / masked units | systemd.failed_units | systemd.timer_status ✅, systemd.masked ✅ |
+| 调度器 | cron 历史 / anacron / 失败 cron | — | cron.last_runs ✅, cron.failures ✅ |
 | TLS | cert 过期 / cert chain 有效性 | tls.cert_expiry | tls.chain_validity |
-| 内核 / 系统 | dmesg errors / kernel taint / reboot-required / uptime | — | system.kernel_messages, system.uptime, system.reboot_required, system.kernel_taint |
+| 内核 / 系统 | dmesg errors / kernel taint / reboot-required / uptime | — | system.kernel_messages ✅, system.uptime, system.reboot_required ✅, system.kernel_taint ✅ |
 | 安全基线 | failed logins / sudo history / 异常监听端口 | — | security.failed_logins, security.sudo_history, security.unexpected_listen |
 | 包管理 | 待升级包 / 安全补丁 | — | pkg.pending_updates, pkg.security_patches |
 | Web / Nginx | health / config test / 5xx rate / upstream health | — | nginx.health, nginx.config_test, nginx.error_rate, nginx.upstream |
@@ -450,7 +450,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 | K8s（M8 target 就位后） | pod OOM history / evicted / pending / node pressure | — | k8s.pods.oom_history, k8s.pods.evicted, k8s.pods.pending, k8s.nodes.pressure |
 | 运行时（JVM） | heap usage / GC pressure / thread count | — | jvm.heap, jvm.gc, jvm.threads |
 | 运行时（Go） | goroutine count / heap from pprof | — | go.goroutines, go.heap |
-| 日志 | error burst / exception 突增 | log.tail.error_burst | log.exception_burst |
+| 日志 | error burst / exception 突增 | log.tail.error_burst | log.exception_burst ✅ |
 
 > 说明：「M2 计划基线」列列出 §M2.8 **已交付**的 Inspector（见 `src/hostlens/inspectors/builtin/`，PR #38/#42）；M6 在此基础上按域扩充。每个 Inspector 落地时必须勾上覆盖矩阵对应单元格。
 

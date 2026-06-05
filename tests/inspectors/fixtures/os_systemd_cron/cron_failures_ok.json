@@ -1,0 +1,37 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v journalctl",
+      "stdout": "/usr/bin/journalctl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v grep",
+      "stdout": "/usr/bin/grep\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v wc",
+      "stdout": "/usr/bin/wc\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(journalctl -u cron --since \"2024-01-02 11:00:00\" --until \"2024-01-02 12:00:00\" --no-pager -q 2>/dev/null) || { echo \"journalctl failed\" >&2; exit 1; }\ncount=$(printf '%s\\n' \"$raw\" | grep -iE '\\(CRON\\) error|exit status [1-9]|command failed|sendmail.*(error|fail)|MAILTO.*(error|fail)' | wc -l) || true\nprintf 'failure_count=%s\\nwindow_seconds=%s\\n' \"$count\" \"3600\"",
+      "stdout": "failure_count=0\nwindow_seconds=3600\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

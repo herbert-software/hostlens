@@ -1,0 +1,61 @@
+name: net.ntp.drift
+version: 1.0.0
+description: >-
+  Read the system clock offset from `chronyc tracking` and flag excessive drift
+  or an unsynchronised reference. Requires the chrony daemon (`chronyd`) running
+  and `chronyc` on PATH; hosts using systemd-timesyncd or ntpd instead are out
+  of scope (preflight `requires_binaries: [chronyc]` skips them as
+  requires_unmet). The absolute offset in seconds is derived in awk so the
+  Finding DSL only compares an already-derived scalar.
+tags: [linux, network, ntp, clock, chrony]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [chronyc, awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): `chronyc tracking` failing (chronyd
+  # not running / chronyc absent) MUST exit non-zero with empty stdout (→
+  # status=exception) rather than emit a fabricated zero-offset object blessed
+  # as "clock in sync". `chronyc tracking` emits `Last offset : <signed> seconds`
+  # and a `Reference ID` / `Leap status` line; awk parses the offset, derives
+  # its absolute value (wall 1), and reports the leap/sync status as a scalar.
+  command: |
+    raw=$(chronyc tracking) || { echo "chronyc tracking failed" >&2; exit 1; }
+    printf '%s\n' "$raw" | awk '
+      /^Last offset/ { off=$4 }
+      /^Leap status/ { sub(/^Leap status[ ]*:[ ]*/, ""); leap=$0 }
+      /^Reference ID/ { synced=($0 ~ /00000000/) ? "false" : "true" }
+      END{
+        if (off=="") { print "Last offset missing" > "/dev/stderr"; exit 1 }
+        abs=(off<0)?-off:off
+        printf "{\"offset_seconds\":%.9f,\"abs_offset_seconds\":%.9f,\"leap_status\":\"%s\",\"synced\":%s}",
+          off, abs, leap, (synced==""?"true":synced)
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    offset_seconds:     { type: number }
+    abs_offset_seconds: { type: number }
+    leap_status:        { type: string }
+    synced:             { type: boolean }
+  required: [offset_seconds, abs_offset_seconds, leap_status, synced]
+  additionalProperties: false
+
+findings:
+  # Aggregate mode: the DSL only compares the ready scalar against thresholds
+  # (wall 1 — abs offset already derived in awk).
+  - when: "abs_offset_seconds >= 1.0"
+    severity: critical
+    message: "Clock drift {offset_seconds}s exceeds 1s (leap status: {leap_status})"
+  - when: "abs_offset_seconds >= 0.1 and abs_offset_seconds < 1.0"
+    severity: warning
+    message: "Clock drift {offset_seconds}s elevated (leap status: {leap_status})"
+  - when: "synced == False"
+    severity: warning
+    message: "Clock is not synchronised to a reference (leap status: {leap_status})"

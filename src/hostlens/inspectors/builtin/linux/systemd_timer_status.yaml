@@ -1,0 +1,87 @@
+name: linux.systemd.timer_status
+version: 1.0.0
+description: >-
+  List systemd timers and flag ones that look stuck — a timer whose next
+  elapse is unscheduled (NEXT empty) or whose last trigger is far in the
+  past. Linux-only and systemd-only (drives `systemctl list-timers`):
+  requires a systemd host whose `systemctl` supports `-o json` (systemd
+  v240+). The collector prefers `list-timers --all -o json` and computes the
+  "seconds since last trigger" derived scalar in jq so the Finding DSL only
+  compares already-derived numbers. NEXT/LAST are systemd epoch-microsecond
+  fields (`next_elapse_realtime` / `last_trigger_usec`); 0 means unset.
+tags: [linux, systemd, timers, scheduler]
+targets: [local, ssh]
+# Gate on the `systemctl` binary (preflight-probed), NOT the `systemd`
+# capability: `systemd` is lazily probed (added only after the first `exec`),
+# but preflight checks capabilities before any exec — requiring it makes a
+# systemd host fail preflight with `requires_unmet`. See Authoring Contract
+# rule 9. `shell` is a static baseline capability and is safe to require.
+requires_capabilities: [shell]
+requires_binaries: [systemctl, jq]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # A timer that has never fired and whose last trigger is older than this
+    # many seconds is flagged as stale. Numeric parameters need no `| sh`
+    # (shell cannot evaluate them as text), so no pattern is required.
+    stale_after_seconds:
+      type: integer
+      default: 86400
+  additionalProperties: false
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner does NOT check the main
+  # command's exit code, it only parses stdout. A non-systemd host (or one
+  # whose systemctl predates `-o json`) MUST exit non-zero with empty stdout
+  # (→ status=exception), not emit a fabricated `{"results":[]}` blessed as
+  # "no stuck timers". `systemctl ... -o json` is captured in a command
+  # substitution and gated `|| exit 1`; jq derives `last_trigger_age_sec`
+  # (now - last_trigger; load-bearing wall 1) and wraps the per-timer objects
+  # in `{"results": [...]}` — `results` (not a parameter name) avoids the
+  # output/parameter shadowing trap (load-bearing wall 3). A genuinely empty
+  # timer set (systemctl succeeds, zero timers) still emits `{"results":[]}`.
+  command: |
+    raw=$(systemctl list-timers --all -o json 2>/dev/null) || { echo "list-timers failed" >&2; exit 1; }
+    now_us=$(date +%s)000000
+    printf '%s' "$raw" | jq -c --argjson now "$now_us" '{
+      results: map({
+        unit: .unit,
+        next_elapse_usec: (.next_elapse_realtime // 0),
+        last_trigger_usec: (.last_trigger_usec // 0),
+        last_trigger_age_sec: (if (.last_trigger_usec // 0) > 0 then (($now - .last_trigger_usec) / 1000000 | floor) else -1 end)
+      })
+    }' || { echo "jq failed" >&2; exit 1; }
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          unit:                 { type: string }
+          next_elapse_usec:     { type: integer }
+          last_trigger_usec:    { type: integer }
+          last_trigger_age_sec: { type: integer }
+        required: [unit, next_elapse_usec, last_trigger_usec, last_trigger_age_sec]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # DSL only compares already-derived scalars (load-bearing wall 1).
+  - for_each: "results as t"
+    when: "t.next_elapse_usec == 0 and t.last_trigger_age_sec > stale_after_seconds"
+    severity: warning
+    message: "systemd timer {t[unit]} has no next elapse scheduled and last fired {t[last_trigger_age_sec]}s ago"
+  - for_each: "results as t"
+    when: "t.next_elapse_usec == 0 and t.last_trigger_usec == 0"
+    severity: warning
+    message: "systemd timer {t[unit]} has never fired and has no next elapse scheduled"

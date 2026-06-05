@@ -1,0 +1,68 @@
+name: linux.system.reboot_required
+version: 1.0.0
+description: >-
+  Detect a pending reboot on Debian/Ubuntu hosts by checking for the
+  `/var/run/reboot-required` flag file written by unattended-upgrades /
+  apt. Linux-only (Debian/Ubuntu convention): reads `/var/run/reboot-required`
+  and the companion `/var/run/reboot-required.pkgs`. The collector
+  distinguishes three states in the collector itself (load-bearing wall 1):
+  flag absent => `reboot_required=false` (NO finding), flag present =>
+  `reboot_required=true` plus the human reason / triggering package list.
+tags: [linux, system, reboot, debian, ubuntu, apt]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [cat]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner does NOT check the main
+  # command's exit code, it only parses stdout. The reboot-required flag is a
+  # presence test, so we must NOT treat "flag absent" as a failure — that is
+  # the normal "no reboot needed" state and emits `{"reboot_required":false}`.
+  # A genuine command failure (e.g. the read of an existing file failing) must
+  # exit non-zero with empty stdout (→ status=exception), NOT a fabricated
+  # `{"reboot_required":false}` that would be blessed as "no reboot needed".
+  #
+  # The flag/reason/pkgs strings are read verbatim and JSON-escaped in the
+  # collector; the DSL only does a boolean membership comparison. Tabs/newlines
+  # in the package list are normalised to single spaces so the JSON stays one
+  # line and the reason scalar is DSL-friendly.
+  command: |
+    flag=/var/run/reboot-required
+    pkgs_file=/var/run/reboot-required.pkgs
+    if [ ! -e "$flag" ]; then
+      printf '{"reboot_required":false,"reason":"","pkgs":""}'
+    else
+      reason=$(cat "$flag" 2>/dev/null) || { echo "reboot-required unreadable" >&2; exit 1; }
+      if [ -e "$pkgs_file" ]; then
+        pkgs=$(cat "$pkgs_file" 2>/dev/null) || { echo "reboot-required.pkgs unreadable" >&2; exit 1; }
+      else
+        pkgs=""
+      fi
+      printf '%s\n%s' "$reason" "$pkgs" | awk '
+        NR==1{r=$0; next}
+        {p=(p=="" ? $0 : p " " $0)}
+        END{
+          gsub(/\\/,"\\\\",r); gsub(/"/,"\\\"",r);
+          gsub(/\\/,"\\\\",p); gsub(/"/,"\\\"",p);
+          printf "{\"reboot_required\":true,\"reason\":\"%s\",\"pkgs\":\"%s\"}", r, p
+        }' || exit 1
+    fi
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    reboot_required: { type: boolean }
+    reason:          { type: string }
+    pkgs:            { type: string }
+  required: [reboot_required, reason, pkgs]
+  additionalProperties: false
+
+findings:
+  - when: "reboot_required == True"
+    severity: warning
+    message: "Reboot required: {reason} (pending packages: {pkgs})"

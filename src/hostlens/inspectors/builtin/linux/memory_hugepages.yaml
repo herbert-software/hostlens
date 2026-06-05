@@ -1,0 +1,56 @@
+name: linux.memory.hugepages
+version: 1.0.0
+description: >-
+  Report HugePages pool allocation vs free from /proc/meminfo to detect a
+  reserved-but-idle pool (memory pinned out of general use) or an exhausted
+  pool. Linux-only (reads /proc/meminfo). The free percentage of the pool
+  (HugePages_Free / HugePages_Total * 100) and the reserved-pool size are
+  computed in awk so the Finding DSL only compares already-derived scalars.
+  A host with no hugepages configured reports hugepages_total=0 (genuine).
+tags: [linux, memory, hugepages, performance]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): /proc/meminfo unreadable MUST
+  # exit non-zero with empty stdout (→ status=exception), not a fabricated
+  # object. awk derives hugepages_free_pct over the pool (load-bearing wall
+  # 1); the DSL only thresholds. When the pool is empty (Total=0) free_pct
+  # is reported 0.0 and findings keyed off Total>0 simply do not fire.
+  command: |
+    meminfo=$(cat /proc/meminfo) || { echo "meminfo unreadable" >&2; exit 1; }
+    printf '%s\n' "$meminfo" | awk '
+      /^HugePages_Total:/{t=$2}
+      /^HugePages_Free:/{f=$2}
+      /^Hugepagesize:/{sz=$2}
+      END{
+        printf "{\"hugepages_total\":%d,\"hugepages_free\":%d,\"hugepagesize_kb\":%d,\"hugepages_free_pct\":\"%.1f\"}",
+          t, f, sz, (t>0 ? f/t*100 : 0)
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    hugepages_total:    { type: integer }
+    hugepages_free:     { type: integer }
+    hugepagesize_kb:    { type: integer }
+    hugepages_free_pct: { type: string }
+  required: [hugepages_total, hugepages_free, hugepagesize_kb, hugepages_free_pct]
+  additionalProperties: false
+
+findings:
+  # A large reserved pool that is almost entirely free = memory pinned away
+  # from general use for nothing. Both conditions are ready scalars.
+  - when: "hugepages_total > 0 and hugepages_free_pct and float(hugepages_free_pct) >= 90.0"
+    severity: warning
+    message: "HugePages pool {hugepages_total} pages reserved but {hugepages_free_pct}% idle (free)"
+  # A configured pool fully consumed = allocations may start failing.
+  - when: "hugepages_total > 0 and hugepages_free == 0"
+    severity: warning
+    message: "HugePages pool fully consumed: 0 of {hugepages_total} pages free"

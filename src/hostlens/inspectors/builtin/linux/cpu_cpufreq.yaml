@@ -1,0 +1,56 @@
+name: linux.cpu.cpufreq
+version: 1.0.0
+description: >-
+  Report the CPU scaling governor and current-vs-max frequency ratio for
+  cpu0 to detect power-saving / capped clocks on performance-sensitive
+  hosts. Linux-only (reads /sys/devices/system/cpu/cpu0/cpufreq): requires
+  a kernel with the cpufreq sysfs interface present. The frequency ratio
+  (scaling_cur_freq / cpuinfo_max_freq * 100) is computed in awk so the
+  Finding DSL only compares already-derived scalars.
+tags: [linux, cpu, cpufreq, governor, performance]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): a host without the cpufreq sysfs
+  # interface (no driver / VM) MUST exit non-zero with empty stdout
+  # (→ status=exception), not emit a fabricated "ok" object. Each `cat` is
+  # gated `|| exit 1`; awk derives the percent ratio (load-bearing wall 1)
+  # and emits one JSON object. The governor string is read verbatim and the
+  # DSL only does membership comparison against it.
+  command: |
+    base=/sys/devices/system/cpu/cpu0/cpufreq
+    gov=$(cat "$base/scaling_governor") || { echo "scaling_governor unreadable" >&2; exit 1; }
+    cur=$(cat "$base/scaling_cur_freq") || { echo "scaling_cur_freq unreadable" >&2; exit 1; }
+    maxf=$(cat "$base/cpuinfo_max_freq") || { echo "cpuinfo_max_freq unreadable" >&2; exit 1; }
+    printf '%s\n%s\n%s\n' "$gov" "$cur" "$maxf" | awk '
+      NR==1{g=$1} NR==2{c=$1} NR==3{m=$1}
+      END{
+        if (g=="" || m=="") { print "cpufreq fields missing" > "/dev/stderr"; exit 1 }
+        printf "{\"governor\":\"%s\",\"cur_freq_khz\":%d,\"max_freq_khz\":%d,\"freq_pct\":\"%.1f\"}",
+          g, c, m, (m>0 ? c/m*100 : 0)
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    governor:     { type: string }
+    cur_freq_khz: { type: integer }
+    max_freq_khz: { type: integer }
+    freq_pct:     { type: string }
+  required: [governor, cur_freq_khz, max_freq_khz, freq_pct]
+  additionalProperties: false
+
+findings:
+  - when: "governor == 'powersave'"
+    severity: warning
+    message: "CPU scaling governor is 'powersave' (cpu0 at {freq_pct}% of max clock)"
+  - when: "freq_pct and float(freq_pct) < 40.0"
+    severity: warning
+    message: "CPU clock capped low: cpu0 at {freq_pct}% of max (governor={governor})"

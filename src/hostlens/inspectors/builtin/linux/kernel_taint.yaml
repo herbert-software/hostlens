@@ -1,0 +1,57 @@
+name: linux.kernel.taint
+version: 1.0.0
+description: >-
+  Report the kernel taint state by reading `/proc/sys/kernel/tainted` and
+  decoding the integer bitmask into human-readable taint flag semantics
+  (proprietary module loaded, forced module load/unload, machine check,
+  out-of-tree module, etc.). Linux-only (reads /proc): a non-zero value
+  means the kernel is tainted and bug reports may be unreliable. The bitmask
+  decode is done in awk (load-bearing wall 1) so the Finding DSL only
+  compares the already-derived integer scalar.
+tags: [linux, kernel, taint, proc]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner only parses stdout, so a
+  # missing /proc/sys/kernel/tainted (non-Linux / restricted /proc) MUST exit
+  # non-zero with empty stdout (→ status=exception), NOT a fabricated
+  # `{"tainted":0}` that would be blessed as "kernel clean".
+  #
+  # awk decodes the bitmask into the documented G/D/...-style flag letters and a
+  # comma-joined human description (load-bearing wall 1: ALL derivation in the
+  # collector). The DSL only does an integer comparison on `tainted`.
+  command: |
+    raw=$(cat /proc/sys/kernel/tainted) || { echo "tainted unreadable" >&2; exit 1; }
+    printf '%s\n' "$raw" | awk '
+      {
+        v=$1
+        if (v=="") { print "tainted value missing" > "/dev/stderr"; exit 1 }
+        n=split("proprietary-module-loaded,module-force-loaded,cpu-out-of-spec,module-force-unloaded,machine-check,bad-page,user-forced,kernel-died,acpi-table-overridden,kernel-warning,staging-driver-loaded,firmware-workaround,out-of-tree-module,unsigned-module,soft-lockup,live-patched,auxiliary-taint,struct-randomized", names, ",")
+        flags=""
+        for (i=0; i<n; i++) {
+          if (int(v / (2^i)) % 2 == 1) {
+            flags=(flags=="" ? names[i+1] : flags "," names[i+1])
+          }
+        }
+        printf "{\"tainted\":%d,\"flags\":\"%s\"}", v, flags
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    tainted: { type: integer }
+    flags:   { type: string }
+  required: [tainted, flags]
+  additionalProperties: false
+
+findings:
+  - when: "tainted != 0"
+    severity: warning
+    message: "Kernel is tainted (tainted={tainted}): {flags}"

@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "meminfo=$(cat /proc/meminfo) || { echo \"meminfo unreadable\" >&2; exit 1; }\nswappiness=$(cat /proc/sys/vm/swappiness) || { echo \"swappiness unreadable\" >&2; exit 1; }\nprintf '%s\\n' \"$meminfo\" | awk -v sw=\"$swappiness\" '\n  /^SwapTotal:/{t=$2}\n  /^SwapFree:/{f=$2}\n  END{\n    printf \"{\\\"swap_total_kb\\\":%d,\\\"swap_free_kb\\\":%d,\\\"swappiness\\\":%d,\\\"swap_used_pct\\\":\\\"%.1f\\\"}\",\n      t, f, sw, (t>0 ? (t-f)/t*100 : 0)\n  }' || exit 1",
+      "stdout": "{\"swap_total_kb\":8388608,\"swap_free_kb\":8388608,\"swappiness\":10,\"swap_used_pct\":\"0.0\"}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "meminfo=$(cat /proc/meminfo) || { echo \"meminfo unreadable\" >&2; exit 1; }\nprintf '%s\\n' \"$meminfo\" | awk '\n  /^HugePages_Total:/{t=$2}\n  /^HugePages_Free:/{f=$2}\n  /^Hugepagesize:/{sz=$2}\n  END{\n    printf \"{\\\"hugepages_total\\\":%d,\\\"hugepages_free\\\":%d,\\\"hugepagesize_kb\\\":%d,\\\"hugepages_free_pct\\\":\\\"%.1f\\\"}\",\n      t, f, sz, (t>0 ? f/t*100 : 0)\n  }' || exit 1",
+      "stdout": "{\"hugepages_total\":1024,\"hugepages_free\":1010,\"hugepagesize_kb\":2048,\"hugepages_free_pct\":\"98.6\"}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

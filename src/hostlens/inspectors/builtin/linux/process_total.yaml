@@ -1,0 +1,55 @@
+name: linux.process.total
+version: 1.0.0
+description: >-
+  Detect process-table exhaustion by comparing the live process count against
+  the kernel PID ceiling. Linux-only (reads /proc and /proc/sys/kernel/pid_max):
+  counts entries under /proc, reads `pid_max`, and derives the usage percent in
+  awk so the Finding DSL only compares an already-derived scalar against a
+  threshold (load-bearing wall 1). A host approaching `pid_max` cannot fork new
+  processes — this flags it before that happens.
+tags: [linux, process, pid-max, exhaustion]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [ps, awk, wc]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner does NOT check the main
+  # command's exit code, it only parses stdout. Both `ps` (the process count) and
+  # the `pid_max` read MUST succeed or the collector exits non-zero with empty
+  # stdout (→ status=exception) rather than emit a fabricated `{"used_pct":"0.0"}`
+  # that would be blessed as "plenty of headroom". Each source is captured in a
+  # command substitution gated by `|| exit 1` so a failure cannot be masked by a
+  # downstream stage exiting 0 (`set -o pipefail` is non-POSIX on dash). awk
+  # computes used_pct = total / pid_max * 100 (load-bearing wall 1) and emits one
+  # JSON object of bare aggregate scalars (no parameters, so no shadowing trap).
+  command: |
+    total=$(ps -e --no-headers 2>/dev/null | wc -l) || { echo "ps failed" >&2; exit 1; }
+    [ "$total" -gt 0 ] || { echo "ps returned no processes" >&2; exit 1; }
+    pid_max=$(cat /proc/sys/kernel/pid_max) || { echo "pid_max unreadable" >&2; exit 1; }
+    awk -v t="$total" -v m="$pid_max" 'BEGIN{
+      printf "{\"total\":%d,\"pid_max\":%d,\"used_pct\":\"%.1f\"}", t, m, (m>0 ? t/m*100 : 0)
+    }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    total:    { type: integer }
+    pid_max:  { type: integer }
+    used_pct: { type: string }
+  required: [total, pid_max, used_pct]
+  additionalProperties: false
+
+findings:
+  # The DSL only compares the already-derived used_pct scalar against thresholds
+  # — no derivation in the finding layer (load-bearing wall 1).
+  - when: "used_pct and float(used_pct) >= 90.0"
+    severity: critical
+    message: "Process table near pid_max: {total}/{pid_max} ({used_pct}% used)"
+  - when: "used_pct and float(used_pct) >= 70.0 and float(used_pct) < 90.0"
+    severity: warning
+    message: "Process count elevated: {total}/{pid_max} ({used_pct}% of pid_max)"

@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v dig",
+      "stdout": "/usr/bin/dig\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v grep",
+      "stdout": "/usr/bin/grep\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "printf '{\"results\":['\nsep=\"\"\nfor nm in safe-host.example; do\n  ans=$(dig +short A \"$nm\" 2>/dev/null | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$' | head -n1)\n  if [ -n \"$ans\" ]; then\n    printf '%s{\"name\":\"%s\",\"resolved\":true,\"address\":\"%s\"}' \"$sep\" \"$nm\" \"$ans\"\n  else\n    printf '%s{\"name\":\"%s\",\"resolved\":false,\"address\":\"\"}' \"$sep\" \"$nm\"\n  fi\n  sep=\",\"\ndone\nprintf ']}'",
+      "stdout": "{\"results\":[{\"name\":\"safe-host.example\",\"resolved\":true,\"address\":\"10.0.0.1\"}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

@@ -1,0 +1,56 @@
+name: linux.cpu.throttling
+version: 1.0.0
+description: >-
+  Detect CPU bandwidth throttling on cgroup v2 hosts by reading the root
+  cgroup `cpu.stat` and deriving the throttled-period ratio. Linux-only
+  (reads /sys/fs/cgroup): requires a cgroup v2 host with CPU controller
+  accounting (`nr_periods` / `nr_throttled` present in cpu.stat). The
+  throttled percentage (nr_throttled / nr_periods * 100) is computed in
+  awk so the Finding DSL only compares an already-derived scalar.
+tags: [linux, cpu, cgroup, throttling, performance]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner does NOT check the
+  # main command's exit code, it only parses stdout. So a missing
+  # /sys/fs/cgroup/cpu.stat (cgroup v1 / no CPU accounting) MUST exit
+  # non-zero with empty stdout (→ status=exception) rather than emit a
+  # fabricated `{"throttled_pct":"0.0"}` that would be blessed as
+  # "no throttling". The cat is gated with `|| exit 1`; awk computes the
+  # derived ratio (load-bearing wall 1) and emits one JSON object.
+  command: |
+    raw=$(cat /sys/fs/cgroup/cpu.stat) || { echo "cpu.stat unreadable" >&2; exit 1; }
+    printf '%s\n' "$raw" | awk '
+      /^nr_periods /{p=$2}
+      /^nr_throttled /{t=$2}
+      /^throttled_usec /{u=$2}
+      END{
+        if (p=="") { print "nr_periods missing" > "/dev/stderr"; exit 1 }
+        printf "{\"nr_periods\":%d,\"nr_throttled\":%d,\"throttled_usec\":%d,\"throttled_pct\":\"%.2f\"}",
+          p, t, u, (p>0 ? t/p*100 : 0)
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    nr_periods:     { type: integer }
+    nr_throttled:   { type: integer }
+    throttled_usec: { type: integer }
+    throttled_pct:  { type: string }
+  required: [nr_periods, nr_throttled, throttled_usec, throttled_pct]
+  additionalProperties: false
+
+findings:
+  - when: "throttled_pct and float(throttled_pct) >= 25.0"
+    severity: critical
+    message: "CPU throttled in {throttled_pct}% of periods ({nr_throttled}/{nr_periods})"
+  - when: "throttled_pct and float(throttled_pct) >= 5.0 and float(throttled_pct) < 25.0"
+    severity: warning
+    message: "CPU throttling elevated at {throttled_pct}% of periods ({nr_throttled}/{nr_periods})"

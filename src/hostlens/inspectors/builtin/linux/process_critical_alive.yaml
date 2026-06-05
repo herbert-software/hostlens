@@ -1,0 +1,88 @@
+name: linux.process.critical_alive
+version: 1.0.0
+description: >-
+  Check that a caller-supplied list of critical process names is alive. Linux-only
+  (uses `pgrep` against the /proc-backed process table): probes each name with
+  `pgrep -x` and emits one liveness record per name. An anomaly is any critical
+  process that is NOT alive. The per-name liveness projection is built entirely in
+  the collector (load-bearing wall 1) so the Finding DSL only iterates the
+  ready-made list and compares a boolean.
+tags: [linux, process, critical, liveness]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [pgrep]
+privilege: none
+
+parameters:
+  type: object
+  required: [names]
+  properties:
+    # `names` is interpolated into the collect command via `| map('sh') |
+    # join(' ')` (shlex.quote per element). The `pattern` restricts each element
+    # to a safe process-name charset so a pattern-constrained value can never
+    # break out of the shell loop word — the injection-safety triad
+    # (`| map('sh')` + `pattern` + never bare-interpolated) required by the
+    # Authoring Contract.
+    names:
+      type: array
+      items: { type: string, pattern: "^[a-zA-Z0-9._/-]+$" }
+      minItems: 1
+  additionalProperties: false
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): `pgrep` exits 0 when a match is found,
+  # 1 when there is NO match (process absent — the very signal we want), and 2/3
+  # on a usage/operational error. Treating exit 1 as "absent" but exit >=2 as a
+  # hard failure keeps "process not running" (an honest finding) distinct from
+  # "pgrep itself broke" (→ status=exception). Each name flows through
+  # `| map('sh') | join(' ')`; the per-name {name, alive} records are assembled in
+  # the collector (load-bearing wall 1) and wrapped in `{"results":[...]}` —
+  # `results` (not the `names` parameter) avoids the output/parameter shadowing
+  # trap (load-bearing wall 3). `parse.format: json` needs a top-level object, so
+  # the records are wrapped; with minItems:1 the list is never empty.
+  command: |
+    printf '{"results":['
+    sep=""
+    for proc in {{ names | map('sh') | join(' ') }}; do
+      pgrep -x -- "$proc" >/dev/null 2>&1
+      rc=$?
+      if [ "$rc" -eq 0 ]; then
+        alive=true
+      elif [ "$rc" -eq 1 ]; then
+        alive=false
+      else
+        echo "pgrep failed for $proc (rc=$rc)" >&2
+        exit 1
+      fi
+      printf '%s{"name":"%s","alive":%s}' "$sep" "$proc" "$alive"
+      sep=","
+    done
+    printf ']}'
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          name:  { type: string }
+          alive: { type: boolean }
+        required: [name, alive]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # `when` uses attribute access (resolves dict keys via simpleeval); the message
+  # uses subscript form so str.format reads dict keys correctly. The DSL only
+  # compares the ready boolean — no derivation (load-bearing wall 1).
+  - for_each: "results as p"
+    when: "p.alive == False"
+    severity: critical
+    message: "Critical process {p[name]} is not alive"

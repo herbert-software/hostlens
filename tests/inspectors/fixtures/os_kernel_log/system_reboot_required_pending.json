@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v cat",
+      "stdout": "/usr/bin/cat\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "flag=/var/run/reboot-required\npkgs_file=/var/run/reboot-required.pkgs\nif [ ! -e \"$flag\" ]; then\n  printf '{\"reboot_required\":false,\"reason\":\"\",\"pkgs\":\"\"}'\nelse\n  reason=$(cat \"$flag\" 2>/dev/null) || { echo \"reboot-required unreadable\" >&2; exit 1; }\n  if [ -e \"$pkgs_file\" ]; then\n    pkgs=$(cat \"$pkgs_file\" 2>/dev/null) || { echo \"reboot-required.pkgs unreadable\" >&2; exit 1; }\n  else\n    pkgs=\"\"\n  fi\n  printf '%s\\n%s' \"$reason\" \"$pkgs\" | awk '\n    NR==1{r=$0; next}\n    {p=(p==\"\" ? $0 : p \" \" $0)}\n    END{\n      gsub(/\\\\/,\"\\\\\\\\\",r); gsub(/\"/,\"\\\\\\\"\",r);\n      gsub(/\\\\/,\"\\\\\\\\\",p); gsub(/\"/,\"\\\\\\\"\",p);\n      printf \"{\\\"reboot_required\\\":true,\\\"reason\\\":\\\"%s\\\",\\\"pkgs\\\":\\\"%s\\\"}\", r, p\n    }' || exit 1\nfi",
+      "stdout": "{\"reboot_required\":true,\"reason\":\"*** System restart required ***\",\"pkgs\":\"linux-image-6.8.0-45-generic libssl3\"}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

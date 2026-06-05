@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(cat /proc/sys/kernel/tainted) || { echo \"tainted unreadable\" >&2; exit 1; }\nprintf '%s\\n' \"$raw\" | awk '\n  {\n    v=$1\n    if (v==\"\") { print \"tainted value missing\" > \"/dev/stderr\"; exit 1 }\n    n=split(\"proprietary-module-loaded,module-force-loaded,cpu-out-of-spec,module-force-unloaded,machine-check,bad-page,user-forced,kernel-died,acpi-table-overridden,kernel-warning,staging-driver-loaded,firmware-workaround,out-of-tree-module,unsigned-module,soft-lockup,live-patched,auxiliary-taint,struct-randomized\", names, \",\")\n    flags=\"\"\n    for (i=0; i<n; i++) {\n      if (int(v / (2^i)) % 2 == 1) {\n        flags=(flags==\"\" ? names[i+1] : flags \",\" names[i+1])\n      }\n    }\n    printf \"{\\\"tainted\\\":%d,\\\"flags\\\":\\\"%s\\\"}\", v, flags\n  }' || exit 1",
+      "stdout": "{\"tainted\":0,\"flags\":\"\"}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

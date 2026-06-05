@@ -1,0 +1,72 @@
+name: linux.fs.logrotate
+version: 1.0.0
+description: >-
+  Detect a stalled logrotate by deriving the number of days since the most
+  recent rotation recorded in /var/lib/logrotate/status. Linux-only and
+  requires GNU coreutils `date` (the `date -d` parsing is a GNU extension —
+  BSD/macOS `date` does not accept it). The status file records, per log file,
+  the timestamp of its last rotation as `"path" YYYY-M-D-h:m:s` (or the older
+  `"path" YYYY-M-D` form); the collector finds the NEWEST such timestamp,
+  converts it to an epoch with GNU `date -d`, and computes
+  `days_since_last = (now - newest) / 86400` so the Finding DSL only thresholds
+  the ready scalar. A logrotate that has not rotated anything for many days is
+  flagged (its config/cron likely broken). Aggregate output (bare scalar keys,
+  no `results` wrapper — matches existing system.uptime / linux.memory.pressure).
+tags: [linux, fs, logrotate, gnu-coreutils, staleness]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk, date, sort, head, cut]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the status file being unreadable
+  # (logrotate never run / not installed) MUST exit non-zero with empty stdout
+  # (→ status=exception), NOT a fabricated `{"days_since_last":0}` that would be
+  # blessed as "rotated today". `cat` is gated with `|| exit 1`; an empty status
+  # file (no rotation lines) likewise exits non-zero (newest stays empty → awk
+  # exit 1) rather than guessing.
+  #
+  # All derivation is in shell/awk/date (load-bearing wall 1): awk extracts the
+  # bare `YYYY-M-D` date token from the newest rotation line (lexical max over a
+  # normalised zero-padded key), GNU `date -d` converts it to epoch, and the
+  # day delta is computed with shell/awk arithmetic. The DSL only thresholds the
+  # ready `days_since_last`. Aggregate scalar keys (days_since_last / last_date /
+  # tracked_files) are all ≠ any parameter name (no parameters here anyway), so
+  # no output/parameter shadowing (load-bearing wall 3).
+  command: |
+    raw=$(cat /var/lib/logrotate/status) || { echo "logrotate status unreadable" >&2; exit 1; }
+    # Emit `sortkey<TAB>YYYY-M-D` per rotation line; newest = lexical max of key.
+    newest=$(printf '%s\n' "$raw" | awk '
+      /^"/ {
+        n=split($2, p, "-")
+        if (n < 3) next
+        printf "%04d%02d%02d\t%d-%d-%d\n", p[1], p[2], p[3], p[1], p[2], p[3]
+      }' | sort -r | head -n1 | cut -f2) || { echo "awk/sort failed" >&2; exit 1; }
+    [ -n "$newest" ] || { echo "no rotation timestamps in status file" >&2; exit 1; }
+    count=$(printf '%s\n' "$raw" | awk '/^"/{c++} END{print c+0}') || { echo "count awk failed" >&2; exit 1; }
+    last_epoch=$(date -d "$newest" +%s) || { echo "GNU date -d failed (needs GNU coreutils)" >&2; exit 1; }
+    now_epoch=$(date +%s) || { echo "date failed" >&2; exit 1; }
+    days=$(awk -v a="$now_epoch" -v b="$last_epoch" 'BEGIN{d=(a-b)/86400; if(d<0)d=0; printf "%.1f", d}')
+    printf '{"days_since_last":"%s","last_date":"%s","tracked_files":%d}' "$days" "$newest" "$count"
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    days_since_last: { type: string }
+    last_date:       { type: string }
+    tracked_files:   { type: integer }
+  required: [days_since_last, last_date, tracked_files]
+  additionalProperties: false
+
+findings:
+  # The DSL only thresholds the already-derived days_since_last scalar.
+  - when: "days_since_last and float(days_since_last) >= 14.0"
+    severity: critical
+    message: "logrotate stalled: last rotation {days_since_last} days ago ({last_date}, {tracked_files} files tracked)"
+  - when: "days_since_last and float(days_since_last) >= 3.0 and float(days_since_last) < 14.0"
+    severity: warning
+    message: "logrotate may be stale: last rotation {days_since_last} days ago ({last_date})"

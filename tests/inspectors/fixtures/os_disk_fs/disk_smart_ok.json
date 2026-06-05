@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "devs=$(ls /sys/block) || { echo \"sys/block unreadable\" >&2; exit 1; }\nhave_smartctl=0\ncommand -v smartctl >/dev/null 2>&1 && have_smartctl=1\nhave_jq=0\ncommand -v jq >/dev/null 2>&1 && have_jq=1\nprintf '{\"results\":['\nsep=\"\"\nfor d in $devs; do\n  case \"$d\" in loop*|ram*|dm-*|sr*) continue ;; esac\n  rot=$(cat \"/sys/block/$d/queue/rotational\" 2>/dev/null) || rot=-1\n  sectors=$(cat \"/sys/block/$d/size\" 2>/dev/null) || sectors=0\n  size_gib=$(awk -v s=\"$sectors\" 'BEGIN{printf \"%.1f\", s*512/1073741824}')\n  health=\"unknown\"\n  if [ \"$have_smartctl\" = \"1\" ]; then\n    if out=$(smartctl -H --json \"/dev/$d\" 2>/dev/null); then\n      if [ \"$have_jq\" = \"1\" ]; then\n        passed=$(printf '%s' \"$out\" | jq -r 'if (.smart_status.passed == true) then \"true\" elif (.smart_status.passed == false) then \"false\" else \"\" end' 2>/dev/null)\n      else\n        passed=$(printf '%s' \"$out\" | tr '\\n' ' ' | awk 'match($0, /\"smart_status\"[ \\t]*:[ \\t]*\\{[^}]*\"passed\"[ \\t]*:[ \\t]*(true|false)/){ s=substr($0,RSTART,RLENGTH); if (s ~ /true$/) print \"true\"; else print \"false\" }')\n      fi\n      if [ \"$passed\" = \"true\" ]; then health=\"PASSED\"; elif [ \"$passed\" = \"false\" ]; then health=\"FAILED\"; fi\n    fi\n  fi\n  printf '%s{\"device\":\"%s\",\"rotational\":%s,\"size_gib\":\"%s\",\"smart_health\":\"%s\"}' \\\n    \"$sep\" \"$d\" \"$rot\" \"$size_gib\" \"$health\"\n  sep=\",\"\ndone\nprintf ']}'",
+      "stdout": "{\"results\":[{\"device\":\"sda\",\"rotational\":1,\"size_gib\":\"931.5\",\"smart_health\":\"PASSED\"},{\"device\":\"nvme0n1\",\"rotational\":0,\"size_gib\":\"476.9\",\"smart_health\":\"unknown\"}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

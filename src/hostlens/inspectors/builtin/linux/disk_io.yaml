@@ -1,0 +1,111 @@
+name: linux.disk.io
+version: 1.0.0
+description: >-
+  Detect saturated block devices by sampling /proc/diskstats twice (read →
+  sleep → read) and deriving per-device IO utilisation and average request
+  latency (await) across the interval. Linux-only (reads /proc/diskstats).
+  design D-3: the runner samples the collector exactly ONCE, so the
+  counter-delta differencing is done by the command ITSELF (the two reads
+  and the subtraction live inside the shell pipeline) — sampling_window is
+  NOT used to difference counters. `collect.timeout_seconds` is set well
+  above the in-command `sleep 1` so the runner never kills the command
+  mid-interval. Loopback / ram / device-mapper pseudo devices are filtered
+  out so only real block devices are reported.
+tags: [linux, disk, io, diskstats, performance]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk, sort]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner does NOT check the
+  # main command's exit code, it only parses stdout. So either /proc/diskstats
+  # read failing MUST exit non-zero with empty stdout (→ status=exception)
+  # rather than emit a fabricated `{"results":[]}` blessed as "no busy disks".
+  #
+  # design D-3 — the differencing happens HERE, not via sampling_window: the
+  # collector reads /proc/diskstats, sleeps `interval`, reads again, and awk
+  # computes per-device IO utilisation (io_ticks delta / interval_ms * 100)
+  # and await (ticks spent in I/O / completed ops) across the snapshot pair.
+  # The Finding DSL only thresholds the already-derived util_pct / await_ms.
+  #
+  # `results` (not a parameter name) wraps the per-device array so it never
+  # collides with a parameter in the merged Finding DSL context (load-bearing
+  # wall 3). Devices with zero completed ops over the window are emitted with
+  # await_ms=0.0 (genuine idle, not a failure). Pseudo devices (loop*, ram*,
+  # dm-*) are skipped — they are not physical block devices.
+  #
+  # The first awk emits one `device<TAB>util<TAB>await<TAB>ops` row per device;
+  # `sort` makes the per-device order deterministic (POSIX awk array iteration
+  # order is undefined, which would make the multi-device fixture/snapshot
+  # unstable across hosts); the second awk wraps the sorted rows in the
+  # `{"results":[...]}` object.
+  command: |
+    interval=1
+    s1=$(cat /proc/diskstats) || { echo "diskstats read 1 failed" >&2; exit 1; }
+    sleep "$interval"
+    s2=$(cat /proc/diskstats) || { echo "diskstats read 2 failed" >&2; exit 1; }
+    printf '%s\n===\n%s\n' "$s1" "$s2" | awk -v iv="$interval" '
+      BEGIN{ phase=1; ms=iv*1000 }
+      /^===$/{ phase=2; next }
+      {
+        dev=$3
+        if (dev ~ /^(loop|ram|dm-)/) next
+        # /proc/diskstats fields: 4=reads 8=writes 13=io_ticks(ms in I/O)
+        if (phase==1){ r1[dev]=$4; w1[dev]=$8; t1[dev]=$13; seen[dev]=1 }
+        else        { r2[dev]=$4; w2[dev]=$8; t2[dev]=$13 }
+      }
+      END{
+        for (d in seen){
+          dt = t2[d]-t1[d]
+          ops = (r2[d]-r1[d]) + (w2[d]-w1[d])
+          util = (ms>0 ? dt/ms*100 : 0); if (util<0) util=0
+          awaitms = (ops>0 ? dt/ops : 0); if (awaitms<0) awaitms=0
+          printf "%s\t%.1f\t%.2f\t%d\n", d, util, awaitms, ops
+        }
+      }' \
+      | sort \
+      | awk -F'\t' '
+        BEGIN{ printf "{\"results\":["; sep="" }
+        {
+          printf "%s{\"device\":\"%s\",\"util_pct\":\"%s\",\"await_ms\":\"%s\",\"ops\":%d}", sep, $1, $2, $3, $4
+          sep=","
+        }
+        END{ printf "]}" }' || exit 1
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          device:   { type: string }
+          util_pct: { type: string }
+          await_ms: { type: string }
+          ops:      { type: integer }
+        required: [device, util_pct, await_ms, ops]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # The DSL only thresholds the already-derived util_pct / await_ms scalars —
+  # no differencing, no derivation (load-bearing wall 1).
+  - for_each: "results as d"
+    when: "float(d.util_pct) >= 90.0"
+    severity: critical
+    message: "Disk {d[device]} saturated at {d[util_pct]}% IO utilisation (await={d[await_ms]}ms)"
+  - for_each: "results as d"
+    when: "float(d.util_pct) >= 70.0 and float(d.util_pct) < 90.0"
+    severity: warning
+    message: "Disk {d[device]} busy at {d[util_pct]}% IO utilisation (await={d[await_ms]}ms)"
+  - for_each: "results as d"
+    when: "float(d.await_ms) >= 50.0 and d.ops > 0"
+    severity: warning
+    message: "Disk {d[device]} high latency: {d[await_ms]}ms average request time"

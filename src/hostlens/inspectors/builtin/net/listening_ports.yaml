@@ -1,0 +1,95 @@
+name: net.listening_ports
+version: 1.0.0
+description: >-
+  Enumerate listening TCP ports from `ss -tlnp` (local address, port, owning
+  process) and flag any port bound to a public-facing wildcard address that is
+  NOT in the caller-supplied `allowed_ports` whitelist. Linux-only (needs
+  iproute2 `ss`); process-name resolution needs the `-p` column, which on a
+  non-privileged user may show empty for other users' sockets (documented
+  limitation, not an error). All extraction happens in awk; the Finding DSL
+  only does membership/threshold comparison on the ready `results` array.
+tags: [linux, network, listening-ports, tcp, iproute2]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [ss, awk]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # `allowed_ports` is a whitelist of expected listening ports. It is NOT
+    # interpolated into the shell command (the comparison is done in the
+    # Finding DSL `not in` membership test), so it needs no `| sh`; but it is
+    # still pattern-constrained per element for defence-in-depth and to keep
+    # the parameter domain tight. Empty default = "every wildcard port is
+    # unexpected".
+    allowed_ports:
+      type: array
+      items: { type: integer }
+      default: []
+  additionalProperties: false
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): `ss` failing MUST exit non-zero
+  # with empty stdout (→ status=exception) rather than emit `{"results":[]}`
+  # blessed as "nothing listening". A host with zero listeners (ss succeeds,
+  # no data rows) honestly emits `{"results":[]}` — distinguishable.
+  #
+  # `parse.format: json` needs a top-level object, so the per-port records are
+  # wrapped in `{"results": [...]}` (`results`, not a parameter name, dodges
+  # the output/parameter shadowing trap — wall 3). All field extraction (split
+  # the `addr:port` Local Address column, pull the process name out of the
+  # `users:(("name",pid=N,...))` field, detect wildcard binds) happens in awk
+  # (wall 1); the Finding DSL only reads ready scalars.
+  command: |
+    raw=$(ss -tlnp) || { echo "ss failed" >&2; exit 1; }
+    printf '%s\n' "$raw" | awk '
+      function esc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+      BEGIN{ printf "{\"results\":["; sep="" }
+      NR>1 {
+        local=$4
+        # port = substring after the last colon; addr = the rest.
+        n=split(local, parts, ":"); port=parts[n]
+        addr=substr(local, 1, length(local)-length(port)-1)
+        wildcard=(addr=="0.0.0.0" || addr=="*" || addr=="[::]" || addr=="::") ? "true" : "false"
+        proc=""
+        if (match($0, /users:\(\("[^"]+"/)) {
+          seg=substr($0, RSTART, RLENGTH)
+          sub(/users:\(\(\"/, "", seg); sub(/\"$/, "", seg)
+          proc=seg
+        }
+        printf "%s{\"address\":\"%s\",\"port\":%d,\"wildcard\":%s,\"process\":\"%s\"}",
+          sep, esc(addr), port, wildcard, esc(proc)
+        sep=","
+      }
+      END{ printf "]}" }
+    ' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          address:  { type: string }
+          port:     { type: integer }
+          wildcard: { type: boolean }
+          process:  { type: string }
+        required: [address, port, wildcard, process]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # Single for_each binding over the already-built results array; the DSL only
+  # does membership (`port not in allowed_ports`) + boolean comparison (wall 1).
+  - for_each: "results as p"
+    when: "p.wildcard == True and p.port not in allowed_ports"
+    severity: warning
+    message: "Unexpected public listener on port {p[port]} ({p[address]}, process={p[process]})"

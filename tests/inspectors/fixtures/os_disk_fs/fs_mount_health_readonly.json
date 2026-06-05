@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v findmnt",
+      "stdout": "/usr/bin/findmnt\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v jq",
+      "stdout": "/usr/bin/jq\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "mnt=$(findmnt --json -o TARGET,SOURCE,FSTYPE,OPTIONS) || { echo \"findmnt failed\" >&2; exit 1; }\nprintf '%s' \"$mnt\" | jq -c '\n  [ .. | .filesystems? // empty | .[] ]\n  | map(select(.fstype | test(\"^(proc|sysfs|cgroup|cgroup2|tmpfs|devtmpfs|devpts|mqueue|debugfs|tracefs|securityfs|pstore|bpf|configfs|fusectl|overlay|squashfs|autofs|binfmt_misc|hugetlbfs|nsfs|ramfs)$\") | not))\n  | {\n      results: map({\n        target: .target,\n        source: (.source // \"\"),\n        fstype: .fstype,\n        read_only: ((.options | split(\",\")) | any(. == \"ro\"))\n      })\n    }\n' || { echo \"jq failed\" >&2; exit 1; }",
+      "stdout": "{\"results\":[{\"target\":\"/\",\"source\":\"/dev/sda1\",\"fstype\":\"ext4\",\"read_only\":false},{\"target\":\"/data\",\"source\":\"/dev/sdb1\",\"fstype\":\"xfs\",\"read_only\":true}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

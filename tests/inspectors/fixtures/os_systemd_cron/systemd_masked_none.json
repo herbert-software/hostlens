@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v systemctl",
+      "stdout": "/usr/bin/systemctl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(systemctl list-unit-files --state=masked --no-legend --plain 2>/dev/null) || { echo \"list-unit-files failed\" >&2; exit 1; }\nprintf '%s\\n' \"$raw\" | awk '\n  BEGIN{ printf \"{\\\"masked\\\":[\" }\n  { unit=$1; if (unit != \"\") { u=unit; gsub(/\\\\/,\"\\\\\\\\\",u); gsub(/\"/,\"\\\\\\\"\",u); printf \"%s{\\\"unit\\\":\\\"%s\\\"}\", (n++ ? \",\" : \"\"), u } }\n  END{ printf \"]}\" }' || { echo \"awk failed\" >&2; exit 1; }",
+      "stdout": "{\"masked\":[]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

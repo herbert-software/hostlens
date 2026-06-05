@@ -1,0 +1,103 @@
+name: linux.cron.last_runs
+version: 1.0.0
+description: >-
+  Derive, per cron user/job, how long ago cron last invoked a command by
+  parsing the cron journal. Linux-only and systemd-journal-only: reads
+  `journalctl -u cron` (Debian/Ubuntu) — narrow scope, assumes cron logs to
+  the systemd journal under the `cron` unit and emits the standard
+  `(user) CMD (...)` line format. Hosts that log cron to `/var/log/syslog`
+  via syslogd, or run the unit as `crond`, are out of scope for wave-1 (see
+  authoring contract: run prerequisites are documented, not a schema gate).
+  The "seconds since last invocation" derived scalar is computed in awk from
+  the journal `__REALTIME_TIMESTAMP` so the Finding DSL only compares numbers.
+tags: [linux, cron, scheduler, systemd, journal]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [journalctl, jq, awk, sort]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # A cron command whose most recent invocation is older than this many
+    # seconds (within the lookback window) is flagged. Numeric → no `| sh`.
+    stale_after_seconds:
+      type: integer
+      default: 7200
+  additionalProperties: false
+
+collect:
+  # sampling_window injects window_start/window_end as journalctl-friendly
+  # "YYYY-MM-DD HH:MM:SS" UTC strings (runner._build_window_context); this is
+  # an interval query (design D-3), NOT counter differencing, so the single
+  # collect run is correct.
+  #
+  # FAIL-LOUD (Authoring Contract rule 8): a host without the cron journal
+  # unit MUST exit non-zero with empty stdout (→ status=exception), not emit a
+  # fabricated `{"results":[]}` blessed as "all cron jobs fresh". journalctl
+  # is captured in a command substitution and gated `|| exit 1`. awk groups by
+  # the trailing command text, keeps the newest realtime timestamp per
+  # command, and computes the age in seconds (now - last_ts; load-bearing wall
+  # 1). The first awk emits `command<TAB>age` rows; `sort` makes the per-command
+  # order deterministic (POSIX awk array iteration order is undefined, which
+  # would make the fixture/snapshot unstable across hosts); the second awk wraps
+  # the sorted rows in `{"results": [...]}` (`results` is not a parameter name →
+  # no shadowing, load-bearing wall 3). A genuinely empty window (journalctl
+  # succeeds, zero CMD lines) still emits `{"results":[]}`.
+  command: |
+    raw=$(journalctl -u cron --since "{{ window_start }}" --until "{{ window_end }}" -o json --no-pager -q 2>/dev/null) || { echo "journalctl failed" >&2; exit 1; }
+    now_s=$(date +%s)
+    printf '%s' "$raw" | jq -r 'select(.MESSAGE | test("\\) CMD \\(")) | "\(.__REALTIME_TIMESTAMP) \(.MESSAGE)"' \
+      | awk -v now="$now_s" '
+        {
+          ts_us=$1
+          cmd=$0
+          sub(/^[0-9]+ /, "", cmd)
+          sub(/.* CMD \(/, "", cmd)
+          sub(/\)[[:space:]]*$/, "", cmd)
+          last[cmd]=ts_us
+        }
+        END{
+          for (c in last) {
+            age=int(now - last[c]/1000000)
+            printf "%s\t%d\n", c, age
+          }
+        }' \
+      | sort \
+      | awk -F'\t' '
+        BEGIN{ printf "{\"results\":["; sep="" }
+        {
+          cmd=$1
+          gsub(/\\/, "\\\\", cmd); gsub(/"/, "\\\"", cmd)
+          printf "%s{\"command\":\"%s\",\"last_run_age_sec\":%d}", sep, cmd, $2
+          sep=","
+        }
+        END{ printf "]}" }' || { echo "awk/sort failed" >&2; exit 1; }
+  timeout_seconds: 30
+  sampling_window:
+    duration_seconds: 86400
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          command:          { type: string }
+          last_run_age_sec: { type: integer }
+        required: [command, last_run_age_sec]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # DSL only compares the already-derived age scalar (load-bearing wall 1).
+  - for_each: "results as j"
+    when: "j.last_run_age_sec > stale_after_seconds"
+    severity: warning
+    message: "cron job {j[command]} last ran {j[last_run_age_sec]}s ago (exceeds staleness threshold)"

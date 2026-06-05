@@ -1,0 +1,73 @@
+name: linux.process.zombies
+version: 1.0.0
+description: >-
+  Detect zombie (defunct) processes by reading the process table and counting
+  entries in the `Z` state. Linux-only (relies on the Linux `ps` STAT codes and
+  the /proc-backed process table): runs `ps axo stat=,pid=,comm=` and tallies
+  zombies in awk. The zombie tally and the per-zombie list are both built in the
+  collector (load-bearing wall 1) so the Finding DSL only compares an
+  already-derived count and iterates an already-built list.
+tags: [linux, process, zombie, defunct]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [ps, awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner does NOT check the main
+  # command's exit code, it only parses stdout. So a failing `ps` (no proc table
+  # / sandbox) MUST exit non-zero with empty stdout (→ status=exception) rather
+  # than emit a fabricated `{"zombie_count":0,...}` that would be blessed as
+  # "no zombies". `ps` output is captured in a command substitution so its exit
+  # code is checked by `|| exit 1` BEFORE awk runs — piping `ps | awk` would let
+  # awk exit 0 on empty input and mask a dead `ps` (`set -o pipefail` is non-POSIX
+  # on dash). awk filters STAT codes beginning with `Z`, counts them, and emits a
+  # single JSON object: the `zombie_count` aggregate scalar plus a `results` list
+  # of the offending {pid, comm} (load-bearing wall 1). `results` (not a parameter
+  # name) avoids the output/parameter shadowing trap (load-bearing wall 3).
+  command: |
+    ps_out=$(ps axo stat=,pid=,comm=) || { echo "ps failed" >&2; exit 1; }
+    printf '%s\n' "$ps_out" | awk '
+      $1 ~ /^Z/ {
+        c=$3; gsub(/\\/,"\\\\",c); gsub(/"/,"\\\"",c)
+        if (n>0) sep=","; else sep="";
+        list = list sep "{\"pid\":" $2 ",\"comm\":\"" c "\"}";
+        n++
+      }
+      END{
+        printf "{\"zombie_count\":%d,\"results\":[%s]}", n, list
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    zombie_count: { type: integer }
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          pid:  { type: integer }
+          comm: { type: string }
+        required: [pid, comm]
+        additionalProperties: false
+  required: [zombie_count, results]
+  additionalProperties: false
+
+findings:
+  # The DSL only compares the ready aggregate scalar and iterates the ready list
+  # — no derivation, no string ops (load-bearing wall 1).
+  - when: "zombie_count >= 10"
+    severity: critical
+    message: "{zombie_count} zombie processes present (defunct, not reaped)"
+  - when: "zombie_count >= 1 and zombie_count < 10"
+    severity: warning
+    message: "{zombie_count} zombie process(es) present (defunct, not reaped)"
+  - for_each: "results as z"
+    when: "True"
+    severity: info
+    message: "zombie process pid={z[pid]} ({z[comm]})"

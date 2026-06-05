@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v ss",
+      "stdout": "/usr/bin/ss\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(ss -tlnp) || { echo \"ss failed\" >&2; exit 1; }\nprintf '%s\\n' \"$raw\" | awk '\n  function esc(s){ gsub(/\\\\/,\"\\\\\\\\\",s); gsub(/\"/,\"\\\\\\\"\",s); return s }\n  BEGIN{ printf \"{\\\"results\\\":[\"; sep=\"\" }\n  NR>1 {\n    local=$4\n    # port = substring after the last colon; addr = the rest.\n    n=split(local, parts, \":\"); port=parts[n]\n    addr=substr(local, 1, length(local)-length(port)-1)\n    wildcard=(addr==\"0.0.0.0\" || addr==\"*\" || addr==\"[::]\" || addr==\"::\") ? \"true\" : \"false\"\n    proc=\"\"\n    if (match($0, /users:\\(\\(\"[^\"]+\"/)) {\n      seg=substr($0, RSTART, RLENGTH)\n      sub(/users:\\(\\(\\\"/, \"\", seg); sub(/\\\"$/, \"\", seg)\n      proc=seg\n    }\n    printf \"%s{\\\"address\\\":\\\"%s\\\",\\\"port\\\":%d,\\\"wildcard\\\":%s,\\\"process\\\":\\\"%s\\\"}\",\n      sep, esc(addr), port, wildcard, esc(proc)\n    sep=\",\"\n  }\n  END{ printf \"]}\" }\n' || exit 1",
+      "stdout": "{\"results\":[{\"address\":\"0.0.0.0\",\"port\":22,\"wildcard\":true,\"process\":\"sshd\"},{\"address\":\"0.0.0.0\",\"port\":6379,\"wildcard\":true,\"process\":\"redis-server\"},{\"address\":\"127.0.0.1\",\"port\":5432,\"wildcard\":false,\"process\":\"postgres\"}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

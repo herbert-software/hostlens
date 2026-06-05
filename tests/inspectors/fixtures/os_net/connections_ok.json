@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v ss",
+      "stdout": "/usr/bin/ss\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(ss -tan) || { echo \"ss failed\" >&2; exit 1; }\nprintf '%s\\n' \"$raw\" | awk '\n  NR>1 {\n    st=$1; total++\n    if (st==\"ESTAB\") established++\n    else if (st==\"TIME-WAIT\") time_wait++\n    else if (st==\"CLOSE-WAIT\") close_wait++\n    else if (st==\"SYN-SENT\") syn_sent++\n    else if (st==\"SYN-RECV\") syn_recv++\n    else if (st==\"FIN-WAIT-1\" || st==\"FIN-WAIT-2\") fin_wait++\n    else if (st==\"LISTEN\") listen++\n  }\n  END{\n    printf \"{\\\"total\\\":%d,\\\"established\\\":%d,\\\"time_wait\\\":%d,\\\"close_wait\\\":%d,\\\"syn_sent\\\":%d,\\\"syn_recv\\\":%d,\\\"fin_wait\\\":%d,\\\"listen\\\":%d}\",\n      total, established, time_wait, close_wait, syn_sent, syn_recv, fin_wait, listen\n  }' || exit 1",
+      "stdout": "{\"total\":200,\"established\":120,\"time_wait\":30,\"close_wait\":2,\"syn_sent\":0,\"syn_recv\":0,\"fin_wait\":1,\"listen\":47}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

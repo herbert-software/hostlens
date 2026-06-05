@@ -1,0 +1,55 @@
+name: linux.kernel.messages
+version: 1.0.0
+description: >-
+  Count error-priority kernel ring-buffer messages within a recent time
+  window to detect a burst of kernel-level errors (hardware faults, driver
+  errors, filesystem errors). Linux + systemd-only: uses the non-privileged
+  `journalctl -k` (kernel journal) instead of privileged `dmesg` (design
+  D-6). This is an INTERVAL QUERY (design D-3): the `sampling_window`
+  `window_start` timestamp is passed to `--since` so journalctl returns the
+  events in the recent window — the collector runs ONCE, the window is a
+  time-range filter, NOT a counter-diff. The count is derived in the
+  collector (wc -l) so the Finding DSL only compares an integer.
+tags: [linux, kernel, logs, journal, systemd]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [journalctl, wc]
+privilege: none
+
+collect:
+  # sampling_window injects window_start/window_end as journalctl-friendly
+  # "YYYY-MM-DD HH:MM:SS" UTC strings (see runner._build_window_context). The
+  # recorder freezes the clock so these render byte-stably and ReplayTarget
+  # matches the exact command.
+  #
+  # FAIL-LOUD (Authoring Contract rule 8): `journalctl -k` is gated `|| exit 1`
+  # in a command substitution so a journalctl failure (no systemd journal /
+  # permission denied) exits non-zero with empty stdout (→ status=exception),
+  # NOT a fabricated `error_count=0` that would be blessed as "no kernel
+  # errors". The count is emitted as kv (parse_kv returns strings; cast with
+  # int() in the DSL). `-k` selects kernel messages, `-p err` error+ priority.
+  command: |
+    out=$(journalctl -k -p err --since "{{ window_start }}" --until "{{ window_end }}" --no-pager -q) || { echo "journalctl -k failed" >&2; exit 1; }
+    if [ -z "$out" ]; then count=0; else count=$(printf '%s\n' "$out" | wc -l); fi
+    printf 'error_count=%s\nwindow_seconds=%s\n' "$count" "{{ window_seconds }}"
+  timeout_seconds: 30
+  sampling_window:
+    duration_seconds: 300
+
+parse:
+  format: kv
+
+output_schema:
+  type: object
+  properties:
+    error_count:    { type: string }
+    window_seconds: { type: string }
+  additionalProperties: false
+
+findings:
+  - when: "error_count and int(error_count) >= 20"
+    severity: critical
+    message: "{error_count} kernel error messages in the last {window_seconds}s"
+  - when: "error_count and int(error_count) >= 5 and int(error_count) < 20"
+    severity: warning
+    message: "Elevated kernel error rate: {error_count} messages in the last {window_seconds}s"

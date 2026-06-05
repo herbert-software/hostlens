@@ -1,0 +1,70 @@
+name: net.connections
+version: 1.0.0
+description: >-
+  Summarise the host's TCP connection-state distribution from `ss -tan` and
+  flag pathological buildups (excess TIME_WAIT churn / CLOSE_WAIT leaks).
+  Linux-only (needs iproute2 `ss`): the per-state counts and the total are
+  tallied in awk so the Finding DSL only compares already-derived scalars.
+tags: [linux, network, connections, tcp, iproute2]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [ss, awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): the runner does NOT check the main
+  # command's exit code, it only parses stdout. So if `ss` is missing or errors
+  # the collector MUST exit non-zero with empty stdout (→ status=exception)
+  # rather than emit a fabricated all-zero tally blessed as "no connections".
+  # `ss -tan` lists every TCP socket with its state column; awk tallies the
+  # states we care about plus a grand total (the derived aggregate — wall 1)
+  # and emits one JSON object. A host with zero TCP sockets still emits an
+  # all-zero object honestly (ss succeeded), distinguishable from ss failing.
+  command: |
+    raw=$(ss -tan) || { echo "ss failed" >&2; exit 1; }
+    printf '%s\n' "$raw" | awk '
+      NR>1 {
+        st=$1; total++
+        if (st=="ESTAB") established++
+        else if (st=="TIME-WAIT") time_wait++
+        else if (st=="CLOSE-WAIT") close_wait++
+        else if (st=="SYN-SENT") syn_sent++
+        else if (st=="SYN-RECV") syn_recv++
+        else if (st=="FIN-WAIT-1" || st=="FIN-WAIT-2") fin_wait++
+        else if (st=="LISTEN") listen++
+      }
+      END{
+        printf "{\"total\":%d,\"established\":%d,\"time_wait\":%d,\"close_wait\":%d,\"syn_sent\":%d,\"syn_recv\":%d,\"fin_wait\":%d,\"listen\":%d}",
+          total, established, time_wait, close_wait, syn_sent, syn_recv, fin_wait, listen
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    total:       { type: integer }
+    established: { type: integer }
+    time_wait:   { type: integer }
+    close_wait:  { type: integer }
+    syn_sent:    { type: integer }
+    syn_recv:    { type: integer }
+    fin_wait:    { type: integer }
+    listen:      { type: integer }
+  required: [total, established, time_wait, close_wait, syn_sent, syn_recv, fin_wait, listen]
+  additionalProperties: false
+
+findings:
+  # Aggregate mode: the DSL only compares ready scalar counts against fixed
+  # thresholds (wall 1 — no derivation in findings).
+  - when: "time_wait >= 10000"
+    severity: warning
+    message: "High TIME_WAIT socket count ({time_wait}); ephemeral port / churn pressure likely"
+  - when: "close_wait >= 200"
+    severity: critical
+    message: "CLOSE_WAIT backlog of {close_wait} sockets; application is leaking unclosed connections"
+  - when: "syn_recv >= 256"
+    severity: warning
+    message: "Elevated SYN_RECV ({syn_recv}); possible SYN flood or accept-queue saturation"

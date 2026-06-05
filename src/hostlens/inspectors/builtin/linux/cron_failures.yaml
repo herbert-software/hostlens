@@ -1,0 +1,64 @@
+name: linux.cron.failures
+version: 1.0.0
+description: >-
+  Count cron job failures within a recent time window by scanning the cron
+  journal for non-zero exit / error lines. Linux-only and
+  systemd-journal-only: reads `journalctl -u cron` (Debian/Ubuntu) — narrow
+  scope, assumes cron logs to the systemd journal under the `cron` unit.
+  Failure lines are matched on the conventional cron MTA/exit markers
+  (`(CRON) error`, non-zero `exit status`, `command failed`, and explicit
+  sendmail/MAILTO *delivery-failure* lines — not bare MAILTO/sendmail tokens,
+  which appear on benign config/startup lines).
+  Hosts that route cron output elsewhere are out of scope for wave-1 (see
+  authoring contract: prerequisites are documented, not a schema gate). The
+  failure count is derived in the collector so the Finding DSL only compares
+  a number against a threshold.
+tags: [linux, cron, scheduler, systemd, journal, errors]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [journalctl, grep, wc]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # Flag when the failure count in the window meets/exceeds this. Numeric →
+    # no `| sh` quoting required.
+    failure_threshold:
+      type: integer
+      default: 1
+  additionalProperties: false
+
+collect:
+  # sampling_window injects window_start/window_end (interval query, design
+  # D-3; not counter differencing). FAIL-LOUD (Authoring Contract rule 8): a
+  # host without the cron journal unit MUST exit non-zero with empty stdout
+  # (→ status=exception), not emit a fabricated `failure_count=0` blessed as
+  # "no cron failures". journalctl is captured in a command substitution and
+  # gated `|| exit 1`. The `grep || true` guards grep's exit-1-on-no-match (a
+  # legitimately empty window is exit 1, NOT an error) before wc -l counts the
+  # matching lines. `failure_count` is not a parameter name → no shadowing.
+  command: |
+    raw=$(journalctl -u cron --since "{{ window_start }}" --until "{{ window_end }}" --no-pager -q 2>/dev/null) || { echo "journalctl failed" >&2; exit 1; }
+    count=$(printf '%s\n' "$raw" | grep -iE '\(CRON\) error|exit status [1-9]|command failed|sendmail.*(error|fail)|MAILTO.*(error|fail)' | wc -l) || true
+    printf 'failure_count=%s\nwindow_seconds=%s\n' "$count" "{{ window_seconds }}"
+  timeout_seconds: 30
+  sampling_window:
+    duration_seconds: 3600
+
+parse:
+  format: kv
+
+output_schema:
+  type: object
+  properties:
+    failure_count:  { type: string }
+    window_seconds: { type: string }
+  additionalProperties: false
+
+findings:
+  # parse.kv returns strings; cast with int() in the DSL (load-bearing wall 1
+  # is upheld — no derivation, only a threshold compare on a ready scalar).
+  - when: "failure_count and int(failure_count) >= failure_threshold"
+    severity: warning
+    message: "{failure_count} cron failure log entries in the last {window_seconds}s"

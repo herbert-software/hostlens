@@ -1,0 +1,53 @@
+name: linux.memory.swap
+version: 1.0.0
+description: >-
+  Report swap usage percentage and the configured vm.swappiness to detect
+  swap thrashing / over-reliance on swap. Linux-only (reads /proc/meminfo
+  and /proc/sys/vm/swappiness). The used-swap percentage
+  ((SwapTotal-SwapFree)/SwapTotal*100) is computed in awk so the Finding
+  DSL only compares already-derived scalars. A host with no swap
+  configured reports swap_used_pct=0.0 (genuine, not a failure).
+tags: [linux, memory, swap, performance]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8): /proc/meminfo unreadable MUST
+  # exit non-zero with empty stdout (→ status=exception), not a fabricated
+  # zero-usage object. swappiness is read separately (also gated); a kernel
+  # that lacks /proc/sys/vm/swappiness still fails loud rather than guessing.
+  # awk derives swap_used_pct (load-bearing wall 1); the DSL only thresholds.
+  command: |
+    meminfo=$(cat /proc/meminfo) || { echo "meminfo unreadable" >&2; exit 1; }
+    swappiness=$(cat /proc/sys/vm/swappiness) || { echo "swappiness unreadable" >&2; exit 1; }
+    printf '%s\n' "$meminfo" | awk -v sw="$swappiness" '
+      /^SwapTotal:/{t=$2}
+      /^SwapFree:/{f=$2}
+      END{
+        printf "{\"swap_total_kb\":%d,\"swap_free_kb\":%d,\"swappiness\":%d,\"swap_used_pct\":\"%.1f\"}",
+          t, f, sw, (t>0 ? (t-f)/t*100 : 0)
+      }' || exit 1
+  timeout_seconds: 10
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    swap_total_kb: { type: integer }
+    swap_free_kb:  { type: integer }
+    swappiness:    { type: integer }
+    swap_used_pct: { type: string }
+  required: [swap_total_kb, swap_free_kb, swappiness, swap_used_pct]
+  additionalProperties: false
+
+findings:
+  - when: "swap_used_pct and float(swap_used_pct) >= 80.0"
+    severity: critical
+    message: "Swap nearly exhausted at {swap_used_pct}% used (swappiness={swappiness})"
+  - when: "swap_used_pct and float(swap_used_pct) >= 50.0 and float(swap_used_pct) < 80.0"
+    severity: warning
+    message: "Swap usage high at {swap_used_pct}% (swappiness={swappiness})"

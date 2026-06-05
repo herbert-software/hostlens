@@ -1,0 +1,107 @@
+name: log.exception_burst
+version: 1.0.0
+description: >-
+  Group exceptions in a log file by exception-type / stack-trace signature
+  and flag any signature whose count exceeds a threshold (a burst of one
+  recurring exception). This differs from `log.tail.error_burst`, which
+  counts ALL error-priority lines in a journal window: this inspector reads
+  a FILE and aggregates by the exception class token (e.g.
+  `java.lang.NullPointerException`, `ValueError`, `KeyError`), so a single
+  exploding stack trace is surfaced distinctly from unrelated noise. Linux
+  assumptions are minimal (POSIX awk + a readable log file); the log path is
+  parameterised and flows through the injection-safety triad.
+tags: [logs, exceptions, stacktrace, burst]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk, sort]
+privilege: none
+
+parameters:
+  type: object
+  required: [log_path]
+  properties:
+    # `log_path` is interpolated into the collector. It flows through `| sh`
+    # (shlex.quote) and the pattern restricts it to a filesystem-path charset
+    # so it can never break out of the command word (injection-safety triad).
+    log_path:
+      type: string
+      pattern: "^[a-zA-Z0-9_./-]+$"
+    # A signature whose occurrence count meets this threshold is flagged.
+    # Numeric parameters cannot be shell-evaluated as text, so no pattern /
+    # `| sh` is required.
+    burst_threshold:
+      type: integer
+      default: 10
+  additionalProperties: false
+
+collect:
+  # All extraction + aggregation happens here (load-bearing wall 1): awk scans
+  # the file, matches exception-class tokens (a dotted FQCN ending in
+  # `Exception`/`Error`, or a bare `*Error`/`*Exception` Python class), tallies
+  # per-signature counts, and emits a `{"results":[...]}` object. The Finding
+  # DSL only iterates the array and compares the already-derived `count`.
+  #
+  # `parse.format: json` requires a top-level object (a top-level array is
+  # rejected), and the array key is `results` (NOT a parameter name) to avoid
+  # the output/parameter shadowing trap (load-bearing wall 3).
+  #
+  # FAIL-LOUD (Authoring Contract rule 8): `cat` of the log file is gated
+  # `|| exit 1` so an unreadable/missing path exits non-zero with empty stdout
+  # (→ status=exception), NOT a fabricated `{"results":[]}` that would be
+  # blessed as "no exception bursts". A genuinely exception-free (but readable)
+  # file legitimately emits `{"results":[]}`.
+  #
+  # `log_path` flows through `| sh`. The first awk tallies per-signature counts
+  # and emits `signature<TAB>count` lines; `sort` makes the ordering
+  # deterministic (POSIX awk has no array-sort, and unordered output would make
+  # the fixture/snapshot unstable); the second awk wraps the sorted lines into
+  # the `{"results":[...]}` JSON object.
+  command: |
+    raw=$(cat {{ log_path | sh }}) || { echo "log file unreadable" >&2; exit 1; }
+    printf '%s\n' "$raw" | awk '
+      {
+        for (i=1; i<=NF; i++) {
+          tok=$i
+          if (tok ~ /^([A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*(Exception|Error)$/) {
+            count[tok]++
+          }
+        }
+      }
+      END { for (sig in count) printf "%s\t%d\n", sig, count[sig] }' \
+      | sort \
+      | awk -F'\t' '
+        BEGIN { printf "{\"results\":["; sep="" }
+        {
+          sig=$1
+          gsub(/\\/,"\\\\",sig); gsub(/"/,"\\\"",sig)
+          printf "%s{\"signature\":\"%s\",\"count\":%d}", sep, sig, $2
+          sep=","
+        }
+        END { printf "]}" }' || exit 1
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          signature: { type: string }
+          count:     { type: integer }
+        required: [signature, count]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # The DSL only does a scalar threshold comparison over the already-aggregated
+  # per-signature count — no string ops, no derivation (load-bearing wall 1).
+  - for_each: "results as s"
+    when: "s.count >= burst_threshold"
+    severity: warning
+    message: "Exception burst: {s[signature]} occurred {s[count]} times"

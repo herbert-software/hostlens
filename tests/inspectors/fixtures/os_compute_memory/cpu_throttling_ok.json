@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(cat /sys/fs/cgroup/cpu.stat) || { echo \"cpu.stat unreadable\" >&2; exit 1; }\nprintf '%s\\n' \"$raw\" | awk '\n  /^nr_periods /{p=$2}\n  /^nr_throttled /{t=$2}\n  /^throttled_usec /{u=$2}\n  END{\n    if (p==\"\") { print \"nr_periods missing\" > \"/dev/stderr\"; exit 1 }\n    printf \"{\\\"nr_periods\\\":%d,\\\"nr_throttled\\\":%d,\\\"throttled_usec\\\":%d,\\\"throttled_pct\\\":\\\"%.2f\\\"}\",\n      p, t, u, (p>0 ? t/p*100 : 0)\n  }' || exit 1",
+      "stdout": "{\"nr_periods\":1000,\"nr_throttled\":0,\"throttled_usec\":0,\"throttled_pct\":\"0.00\"}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

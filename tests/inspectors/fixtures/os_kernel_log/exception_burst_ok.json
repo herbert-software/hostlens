@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v sort",
+      "stdout": "/usr/bin/sort\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(cat /var/log/app.log) || { echo \"log file unreadable\" >&2; exit 1; }\nprintf '%s\\n' \"$raw\" | awk '\n  {\n    for (i=1; i<=NF; i++) {\n      tok=$i\n      if (tok ~ /^([A-Za-z_][A-Za-z0-9_]*\\.)*[A-Za-z_][A-Za-z0-9_]*(Exception|Error)$/) {\n        count[tok]++\n      }\n    }\n  }\n  END { for (sig in count) printf \"%s\\t%d\\n\", sig, count[sig] }' \\\n  | sort \\\n  | awk -F'\\t' '\n    BEGIN { printf \"{\\\"results\\\":[\"; sep=\"\" }\n    {\n      sig=$1\n      gsub(/\\\\/,\"\\\\\\\\\",sig); gsub(/\"/,\"\\\\\\\"\",sig)\n      printf \"%s{\\\"signature\\\":\\\"%s\\\",\\\"count\\\":%d}\", sep, sig, $2\n      sep=\",\"\n    }\n    END { printf \"]}\" }' || exit 1",
+      "stdout": "{\"results\":[{\"signature\":\"java.lang.IllegalStateException\",\"count\":2}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

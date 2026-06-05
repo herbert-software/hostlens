@@ -1,0 +1,44 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v journalctl",
+      "stdout": "/usr/bin/journalctl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v jq",
+      "stdout": "/usr/bin/jq\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v sort",
+      "stdout": "/usr/bin/sort\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(journalctl -u cron --since \"2024-01-01 12:00:00\" --until \"2024-01-02 12:00:00\" -o json --no-pager -q 2>/dev/null) || { echo \"journalctl failed\" >&2; exit 1; }\nnow_s=$(date +%s)\nprintf '%s' \"$raw\" | jq -r 'select(.MESSAGE | test(\"\\\\) CMD \\\\(\")) | \"\\(.__REALTIME_TIMESTAMP) \\(.MESSAGE)\"' \\\n  | awk -v now=\"$now_s\" '\n    {\n      ts_us=$1\n      cmd=$0\n      sub(/^[0-9]+ /, \"\", cmd)\n      sub(/.* CMD \\(/, \"\", cmd)\n      sub(/\\)[[:space:]]*$/, \"\", cmd)\n      last[cmd]=ts_us\n    }\n    END{\n      for (c in last) {\n        age=int(now - last[c]/1000000)\n        printf \"%s\\t%d\\n\", c, age\n      }\n    }' \\\n  | sort \\\n  | awk -F'\\t' '\n    BEGIN{ printf \"{\\\"results\\\":[\"; sep=\"\" }\n    {\n      cmd=$1\n      gsub(/\\\\/, \"\\\\\\\\\", cmd); gsub(/\"/, \"\\\\\\\"\", cmd)\n      printf \"%s{\\\"command\\\":\\\"%s\\\",\\\"last_run_age_sec\\\":%d}\", sep, cmd, $2\n      sep=\",\"\n    }\n    END{ printf \"]}\" }' || { echo \"awk/sort failed\" >&2; exit 1; }",
+      "stdout": "{\"results\":[{\"command\":\"/usr/bin/refresh-cache\",\"last_run_age_sec\":120}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}
