@@ -71,6 +71,8 @@ import asyncio
 import json
 import os
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -193,6 +195,28 @@ def wait_healthy(service: str, *, attempts: int = 120, interval_s: float = 1.0) 
         # instant the healthcheck passes.
         subprocess.run(["sleep", str(interval_s)], check=True)
     raise RuntimeError(f"service {service!r} did not become healthy in time")
+
+
+def wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float,
+    interval_s: float = 0.5,
+) -> None:
+    """Block until ``predicate()`` returns True or ``timeout`` elapses.
+
+    Polls a *state condition* (the predicate's verdict), never a fixed blind
+    duration — the loop returns the instant the predicate is True. Raises
+    ``RuntimeError`` on timeout instead of silently passing.
+    """
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("wait_until timed out")
+        time.sleep(interval_s)
 
 
 class DockerExecTarget:

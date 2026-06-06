@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v redis-cli",
+      "stdout": "/usr/local/bin/redis-cli\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "if [ -n \"${HOSTLENS_REDIS_PASSWORD:-}\" ]; then\n  info=$(REDISCLI_AUTH=\"$HOSTLENS_REDIS_PASSWORD\" redis-cli --no-auth-warning -t 5 -h 127.0.0.1 -p 6379 INFO replication) || { echo \"redis INFO replication failed\" >&2; exit 1; }\nelse\n  info=$(redis-cli -t 5 -h 127.0.0.1 -p 6379 INFO replication) || { echo \"redis INFO replication failed\" >&2; exit 1; }\nfi\nrole=$(printf '%s' \"$info\" | awk -F: '/^role:/{gsub(/\\r/,\"\",$2);print $2}')\nif [ -z \"$role\" ]; then\n  echo \"role missing\" >&2\n  exit 1\nfi\nif [ \"$role\" != \"slave\" ]; then\n  printf '{\"replication_configured\":false,\"link_healthy\":false,\"lag_seconds\":null}'\n  exit 0\nfi\nlink_status=$(printf '%s' \"$info\" | awk -F: '/^master_link_status:/{gsub(/\\r/,\"\",$2);print $2}')\nlast_io=$(printf '%s' \"$info\" | awk -F: '/^master_last_io_seconds_ago:/{gsub(/\\r/,\"\",$2);print $2}')\ncase \"$link_status\" in\n  up|down) ;;\n  *)\n    echo \"master_link_status missing or invalid: $link_status\" >&2\n    exit 1\n    ;;\nesac\nif [ \"$last_io\" = \"-1\" ]; then\n  lag_json=null\nelse\n  case \"$last_io\" in\n    ''|*[!0-9]*)\n      echo \"master_last_io_seconds_ago non-numeric: $last_io\" >&2\n      exit 1\n      ;;\n    *)\n      lag_json=\"$last_io\"\n      ;;\n  esac\nfi\nif [ \"$link_status\" = \"up\" ]; then\n  if [ \"$lag_json\" = \"null\" ]; then\n    printf '{\"replication_configured\":true,\"link_healthy\":true,\"lag_seconds\":null}'\n  else\n    printf '{\"replication_configured\":true,\"link_healthy\":true,\"lag_seconds\":%s}' \"$lag_json\"\n  fi\nelse\n  if [ \"$lag_json\" = \"null\" ]; then\n    printf '{\"replication_configured\":true,\"link_healthy\":false,\"lag_seconds\":null}'\n  else\n    printf '{\"replication_configured\":true,\"link_healthy\":false,\"lag_seconds\":%s}' \"$lag_json\"\n  fi\nfi",
+      "stdout": "{\"replication_configured\":true,\"link_healthy\":true,\"lag_seconds\":0}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

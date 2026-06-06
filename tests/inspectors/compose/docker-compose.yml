@@ -245,3 +245,48 @@ services:
       interval: 2s
       timeout: 4s
       retries: 30
+
+  # === replication spike (wave-2) ===
+  # redis-repl-master / redis-repl-replica — master+replica topology for
+  # `redis.replication_lag` fixture recording. Both pin --repl-ping-replica-period
+  # 10 + a large --repl-timeout so DEBUG SLEEP on the master does NOT flip the
+  # replica link to down (stale vs down semantic separation — design D-5). Master
+  # alone gets --enable-debug-command yes (Redis 7.x defaults DEBUG off; recording
+  # lane only). Readiness is the compose healthcheck (redis-cli PING), polled via
+  # wait_healthy / wait_until — never a fixed sleep.
+  redis-repl-master:
+    image: redis:7.4.2-alpine
+    command:
+      - "redis-server"
+      - "--repl-ping-replica-period"
+      - "10"
+      - "--repl-timeout"
+      - "3600"
+      - "--enable-debug-command"
+      - "yes"
+    ports:
+      - "16381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  redis-repl-replica:
+    image: redis:7.4.2-alpine
+    command:
+      - "redis-server"
+      - "--replicaof"
+      - "redis-repl-master"
+      - "6379"
+      - "--repl-ping-replica-period"
+      - "10"
+      - "--repl-timeout"
+      - "3600"
+    ports:
+      - "16382:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

@@ -1,0 +1,137 @@
+name: redis.replication_lag
+version: 1.0.0
+# Replication-inspector-contract probe: replica-side link-freshness from
+# `INFO replication`. Requires Redis 6+ and a redis-cli supporting INFO.
+description: >-
+  Redis 复制链路新鲜度巡检(副本侧单连接)。需 Redis 6+ 与 redis-cli;经 HOSTLENS_REDIS_PASSWORD
+  env 注入鉴权(collector 内 remap 到 redis-cli 的 REDISCLI_AUTH,从不进 argv;HOSTLENS_
+  前缀对齐 ssh-execution-target 契约的 AcceptEnv HOSTLENS_* 投递路径)。只报聚合标量
+  (replication_configured / link_healthy / lag_seconds),不回吐高基数明细。lag_seconds
+  语义类为 link_freshness(master_last_io_seconds_ago=距上次主从 IO 的秒数,非数据 apply
+  滞后)。未配置复制(standalone/primary)→ ok 且无 finding;链路断或陈旧由 finding 表达。
+  服务不可达/NOAUTH → status=exception(诚实);缺 redis-cli → requires_unmet。
+  SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
+tags: [redis, redis6, service]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [redis-cli]
+secrets: [HOSTLENS_REDIS_PASSWORD]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    host:
+      type: string
+      pattern: "^[a-zA-Z0-9._-]+$"   # blocks shell injection in -h value
+      default: "127.0.0.1"
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      default: 6379
+    warn_seconds:
+      type: number
+      default: 15
+    critical_seconds:
+      type: number
+      default: 30
+  additionalProperties: false
+
+collect:
+  # All derivation in the collector (Authoring Contract rule 1): the normalized
+  # replication triple is computed here; the DSL only compares ready scalars.
+  # FAIL-LOUD (rule 8) is ROLE-CONTEXTUAL (design D-4): `role` is always
+  # required — missing role or redis-cli non-zero exit → exit 1 + empty stdout
+  # → status=exception. Replica-only fields (master_link_status /
+  # master_last_io_seconds_ago) are required ONLY when role==slave; standalone
+  # or primary (role!=slave) legitimately lacks them → unconfigured path
+  # (replication_configured=false / link_healthy=false / lag_seconds=null, NO
+  # exit 1). Sentinel master_last_io_seconds_ago:-1 (initial sync / link
+  # re-establish) normalizes to lag_seconds=null.
+  #
+  # Secret declared as HOSTLENS_REDIS_PASSWORD (HOSTLENS_ prefix per the
+  # ssh-execution-target contract: only AcceptEnv HOSTLENS_* survives SSH). The
+  # collector REMAPS it to redis-cli's native REDISCLI_AUTH env channel — the
+  # password NEVER reaches argv (can't leak via `ps`, and spaces/glob chars can't
+  # word-split into bogus args the way an unquoted `-a $pwd` would). It is never
+  # `{{ }}`-interpolated (contract: secret via env only). The no-auth branch
+  # (empty HOSTLENS_REDIS_PASSWORD — exported as "" so preflight's secret-presence
+  # gate passes) omits REDISCLI_AUTH entirely. `host` flows through `| sh`; `port` int.
+  command: |
+    if [ -n "${HOSTLENS_REDIS_PASSWORD:-}" ]; then
+      info=$(REDISCLI_AUTH="$HOSTLENS_REDIS_PASSWORD" redis-cli --no-auth-warning -t 5 -h {{ host | sh }} -p {{ port }} INFO replication) || { echo "redis INFO replication failed" >&2; exit 1; }
+    else
+      info=$(redis-cli -t 5 -h {{ host | sh }} -p {{ port }} INFO replication) || { echo "redis INFO replication failed" >&2; exit 1; }
+    fi
+    role=$(printf '%s' "$info" | awk -F: '/^role:/{gsub(/\r/,"",$2);print $2}')
+    if [ -z "$role" ]; then
+      echo "role missing" >&2
+      exit 1
+    fi
+    if [ "$role" != "slave" ]; then
+      printf '{"replication_configured":false,"link_healthy":false,"lag_seconds":null}'
+      exit 0
+    fi
+    link_status=$(printf '%s' "$info" | awk -F: '/^master_link_status:/{gsub(/\r/,"",$2);print $2}')
+    last_io=$(printf '%s' "$info" | awk -F: '/^master_last_io_seconds_ago:/{gsub(/\r/,"",$2);print $2}')
+    case "$link_status" in
+      up|down) ;;
+      *)
+        echo "master_link_status missing or invalid: $link_status" >&2
+        exit 1
+        ;;
+    esac
+    if [ "$last_io" = "-1" ]; then
+      lag_json=null
+    else
+      case "$last_io" in
+        ''|*[!0-9]*)
+          echo "master_last_io_seconds_ago non-numeric: $last_io" >&2
+          exit 1
+          ;;
+        *)
+          lag_json="$last_io"
+          ;;
+      esac
+    fi
+    if [ "$link_status" = "up" ]; then
+      if [ "$lag_json" = "null" ]; then
+        printf '{"replication_configured":true,"link_healthy":true,"lag_seconds":null}'
+      else
+        printf '{"replication_configured":true,"link_healthy":true,"lag_seconds":%s}' "$lag_json"
+      fi
+    else
+      if [ "$lag_json" = "null" ]; then
+        printf '{"replication_configured":true,"link_healthy":false,"lag_seconds":null}'
+      else
+        printf '{"replication_configured":true,"link_healthy":false,"lag_seconds":%s}' "$lag_json"
+      fi
+    fi
+  timeout_seconds: 15   # client -t 5 < collect timeout (Operational Limits)
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    replication_configured: { type: boolean }
+    link_healthy:           { type: boolean }
+    lag_seconds:            { type: [integer, "null"] }
+  required: [replication_configured, link_healthy, lag_seconds]
+  additionalProperties: false
+
+findings:
+  # Three-state replication health by-finding (design D-4): unconfigured emits
+  # no finding; link down is critical; stale freshness is warn/critical by lag.
+  # DSL compares only the normalized triple — no DB-specific raw fields.
+  - when: "replication_configured and not link_healthy"
+    severity: critical
+    message: "Redis replication link down"
+  - when: "link_healthy and lag_seconds != None and lag_seconds >= critical_seconds"
+    severity: critical
+    message: "Redis replication link stale: {lag_seconds}s since last master IO (critical threshold {critical_seconds}s)"
+  - when: "link_healthy and lag_seconds != None and lag_seconds >= warn_seconds and lag_seconds < critical_seconds"
+    severity: warning
+    message: "Redis replication link stale: {lag_seconds}s since last master IO (warn threshold {warn_seconds}s)"
