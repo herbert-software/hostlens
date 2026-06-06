@@ -49,5 +49,5 @@
 - [x] 7.2 `mypy --strict` + `ruff` + 全量 `pytest`（默认 ReplayTarget 回放，不消耗 API）全绿
 - [x] 7.3 跑 Demo Path（proposal 所列命令）
 - [x] 7.4 对本次变更跑对抗性 review（`/review-loop-codex`），triage + 修复到放行（含 secret/失败分类安全边界，属应 review 类）
-- [ ] 7.5 开 feature branch `feat/add-single-instance-service-inspectors` → commit → push → `\gh pr create --base main`，CI 绿后 squash-merge
-- [ ] 7.6 归档：`openspec-cn archive add-single-instance-service-inspectors`，delta 合入 `openspec/specs/service-inspector-suite/`
+- [x] 7.5 开 feature branch `feat/add-single-instance-service-inspectors` → commit → push → `\gh pr create --base main`，CI 绿后 squash-merge
+- [x] 7.6 归档：`openspec-cn archive add-single-instance-service-inspectors`，delta 合入 `openspec/specs/service-inspector-suite/`
