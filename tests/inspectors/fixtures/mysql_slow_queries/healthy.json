@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v mysql",
+      "stdout": "/usr/bin/mysql\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "set -e\nexport MYSQL_PWD=\"${HOSTLENS_MYSQL_PWD:-}\"\nout=$(mysql --batch -N --connect-timeout=5 \\\n  -h 127.0.0.1 -P 3306 -u root \\\n  -e \"SELECT @@global.slow_query_log, @@global.log_output, (SELECT COUNT(*) FROM mysql.slow_log WHERE start_time >= NOW() - INTERVAL 3600 SECOND)\") \\\n  || { echo 'mysql slow_queries failed' >&2; exit 1; }\nsql_log=$(printf '%s' \"$out\" | awk '{print $1}')\nlog_out=$(printf '%s' \"$out\" | awk '{print $2}')\ncnt=$(printf '%s' \"$out\" | awk '{print $3}')\ncase \"$cnt\" in ''|*[!0-9]*) echo 'non-numeric slow_query_count' >&2; exit 1;; esac\nenabled=false\nif [ \"$sql_log\" = \"1\" ] && printf '%s' \"$log_out\" | grep -qi 'TABLE'; then\n  enabled=true\nfi\nprintf '{\"slow_log_monitoring_enabled\":%s,\"slow_query_count\":%s}' \"$enabled\" \"$cnt\"",
+      "stdout": "{\"slow_log_monitoring_enabled\":true,\"slow_query_count\":0}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

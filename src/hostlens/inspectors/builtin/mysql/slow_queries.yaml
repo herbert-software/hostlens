@@ -1,0 +1,87 @@
+name: mysql.slow_queries
+version: 1.0.0
+description: >-
+  MySQL 慢查询巡检(单实例)。需 mysql client;secret 声明 HOSTLENS_MYSQL_PWD
+  (HOSTLENS_ 前缀对齐 ssh-execution-target 契约),collector 内 remap 到 client 原生
+  MYSQL_PWD(从不内联进 argv)。先探采慢查询 TABLE 日志是否启用
+  (slow_log_monitoring_enabled),再按 lookback_seconds 时间窗口从 mysql.slow_log
+  表服务端聚合 slow_query_count。前提:slow_query_log=ON 且 log_output 含 TABLE
+  (否则 slow_log_monitoring_enabled=false → warning「未启用」,不静默报健康)。
+  服务不可达/认证失败 → status=exception;缺 mysql → requires_unmet。
+  SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
+tags: [mysql, service, slow-queries, log-window]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [mysql]
+secrets: [HOSTLENS_MYSQL_PWD]
+privilege: none
+
+parameters:
+  type: object
+  required: [user]
+  properties:
+    host:
+      type: string
+      pattern: "^[a-zA-Z0-9._-]+$"
+      default: "127.0.0.1"
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      default: 3306
+    user:
+      type: string
+      pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+    lookback_seconds:
+      type: integer
+      minimum: 1
+      default: 3600
+    warn_count:
+      type: integer
+      minimum: 1
+      default: 1
+  additionalProperties: false
+
+collect:
+  # secret HOSTLENS_MYSQL_PWD remapped to client-native MYSQL_PWD (never argv).
+  # --connect-timeout=5 < timeout_seconds 15 → unreachable fails fast.
+  # One round-trip returns: @@global.slow_query_log, @@global.log_output, windowed COUNT.
+  # monitoring enabled = slow_query_log ON (1) AND log_output contains TABLE; emitted as
+  # a JSON bool literal (NOT integer 1/0, which {type: boolean} would reject). fail-loud:
+  # non-numeric count or mysql error → exit 1 + empty stdout → status=exception.
+  command: |
+    set -e
+    export MYSQL_PWD="${HOSTLENS_MYSQL_PWD:-}"
+    out=$(mysql --batch -N --connect-timeout=5 \
+      -h {{ host | sh }} -P {{ port }} -u {{ user | sh }} \
+      -e "SELECT @@global.slow_query_log, @@global.log_output, (SELECT COUNT(*) FROM mysql.slow_log WHERE start_time >= NOW() - INTERVAL {{ lookback_seconds }} SECOND)") \
+      || { echo 'mysql slow_queries failed' >&2; exit 1; }
+    sql_log=$(printf '%s' "$out" | awk '{print $1}')
+    log_out=$(printf '%s' "$out" | awk '{print $2}')
+    cnt=$(printf '%s' "$out" | awk '{print $3}')
+    case "$cnt" in ''|*[!0-9]*) echo 'non-numeric slow_query_count' >&2; exit 1;; esac
+    enabled=false
+    if [ "$sql_log" = "1" ] && printf '%s' "$log_out" | grep -qi 'TABLE'; then
+      enabled=true
+    fi
+    printf '{"slow_log_monitoring_enabled":%s,"slow_query_count":%s}' "$enabled" "$cnt"
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    slow_log_monitoring_enabled: { type: boolean }
+    slow_query_count: { type: integer }
+  required: [slow_log_monitoring_enabled, slow_query_count]
+  additionalProperties: false
+
+findings:
+  - when: "slow_log_monitoring_enabled == False"
+    severity: warning
+    message: "MySQL 慢查询 TABLE 日志未启用(slow_query_log/log_output),无法巡检慢查询"
+  - when: "slow_log_monitoring_enabled == True and slow_query_count >= warn_count"
+    severity: warning
+    message: "MySQL 近 {lookback_seconds}s 内累积 {slow_query_count} 条慢查询(>= {warn_count})"

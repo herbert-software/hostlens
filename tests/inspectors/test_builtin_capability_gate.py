@@ -147,6 +147,10 @@ _BINARY_GATE_CASES: list[tuple[str, str, str]] = [
     ("nginx.config_test", "nginx/config_test.yaml", "nginx"),
     ("docker.images.disk_usage", "docker/images_disk_usage.yaml", "docker"),
     ("docker.networks", "docker/networks.yaml", "docker"),
+    # add-log-and-fault-service-inspectors §5.2 — wave-2b client binaries.
+    ("mysql.slow_queries", "mysql/slow_queries.yaml", "mysql"),
+    ("postgres.long_queries", "postgres/long_queries.yaml", "psql"),
+    ("nginx.error_rate", "nginx/error_rate.yaml", "awk"),
 ]
 
 
@@ -170,7 +174,12 @@ def test_missing_binary_skips_with_requires_unmet(
         parameters = {"names": ["example.com"]}
     elif name == "log.exception_burst":
         parameters = {"log_path": "/var/log/app.log"}
-    elif name in ("mysql.connection_usage", "postgres.connection_usage"):
+    elif name in (
+        "mysql.connection_usage",
+        "postgres.connection_usage",
+        "mysql.slow_queries",
+        "postgres.long_queries",
+    ):
         parameters = {"user": "root"}
 
     # The secret-env gate (preflight step 4) runs BEFORE the binary probe
@@ -268,6 +277,19 @@ _SECRET_GATE_CASES: list[tuple[str, str, str, dict[str, object]]] = [
         "HOSTLENS_POSTGRES_PASSWORD",
         {"user": "postgres"},
     ),
+    # add-log-and-fault-service-inspectors §5.2 — wave-2b secret-declaring probes.
+    (
+        "mysql.slow_queries",
+        "mysql/slow_queries.yaml",
+        "HOSTLENS_MYSQL_PWD",
+        {"user": "root"},
+    ),
+    (
+        "postgres.long_queries",
+        "postgres/long_queries.yaml",
+        "HOSTLENS_POSTGRES_PASSWORD",
+        {"user": "postgres"},
+    ),
 ]
 
 
@@ -299,3 +321,63 @@ def test_missing_secret_env_skips_with_requires_unmet(
     assert result.status == "requires_unmet"
     assert result.findings == []
     assert f"env:{secret}" in result.missing, result.missing
+
+
+# --------------------------------------------------------------------------- #
+# add-log-and-fault-service-inspectors — requires_files preflight gate (§5.2)
+# --------------------------------------------------------------------------- #
+#
+# nginx.error_rate declares a static access log path in requires_files; when the
+# file is missing/unreadable, preflight must skip with requires_unmet (not exception).
+
+_NGINX_ACCESS_LOG = "/var/log/nginx/access.log"
+
+
+class _NoAccessLogTarget:
+    """Stub target where awk is present but the access log is not readable."""
+
+    type = "local"
+    name = "no-access-log-host"
+    capabilities: ClassVar[set[Capability]] = {Capability.SHELL, Capability.FILE_READ}
+
+    async def exec(
+        self,
+        cmd: str,
+        *,
+        timeout: int,
+        env: dict[str, str] | None = None,
+    ) -> ExecResult:
+        del timeout, env
+        if cmd.startswith("command -v "):
+            return ExecResult(
+                exit_code=0,
+                stdout="/usr/bin/awk\n",
+                stderr="",
+                duration_seconds=0.0,
+                timed_out=False,
+            )
+        if cmd.startswith("[ -r ") and _NGINX_ACCESS_LOG in cmd:
+            return ExecResult(
+                exit_code=1, stdout="", stderr="", duration_seconds=0.0, timed_out=False
+            )
+        raise AssertionError(f"collector must not run when access log is absent: {cmd!r}")
+
+    async def read_file(self, path: str) -> bytes:
+        raise AssertionError(f"read_file must not be reached: {path!r}")
+
+
+def test_nginx_error_rate_missing_access_log_skips_with_requires_unmet() -> None:
+    """Missing / unreadable access log → requires_files preflight → requires_unmet."""
+
+    manifest = load_manifest(_BUILTIN_DIR / "nginx" / "error_rate.yaml")
+    assert manifest.name == "nginx.error_rate"
+    assert _NGINX_ACCESS_LOG in manifest.requires_files
+
+    target = _NoAccessLogTarget()
+    result: InspectorResult = asyncio.run(
+        _runner().run(manifest, target, parameters={})  # type: ignore[arg-type]
+    )
+
+    assert result.status == "requires_unmet"
+    assert result.findings == []
+    assert any(m.startswith("file:") for m in result.missing), result.missing

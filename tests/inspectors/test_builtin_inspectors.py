@@ -242,6 +242,44 @@ class TestWave2aSuiteRegistration:
         assert not missing, f"wave-2a inspectors absent from registry: {sorted(missing)}"
 
 
+# --------------------------------------------------------------------------- #
+# add-log-and-fault-service-inspectors — wave-2b clean registration (§5.1)
+# --------------------------------------------------------------------------- #
+#
+# The 3 wave-2b log/window service inspectors, keyed by registry `name` → on-disk
+# yaml path (relative to `builtin/`). This is the 归档时冻结的 wave-2b 清单 the suite
+# spec ADDED wave-2b coverage requirement references.
+
+_WAVE2B_INSPECTORS: dict[str, str] = {
+    "mysql.slow_queries": "mysql/slow_queries.yaml",
+    "postgres.long_queries": "postgres/long_queries.yaml",
+    "nginx.error_rate": "nginx/error_rate.yaml",
+}
+
+
+class TestWave2bSuiteRegistration:
+    """tasks.md §5.1 — every wave-2b inspector loads clean + registers."""
+
+    def test_wave2b_count_is_frozen_at_3(self) -> None:
+        assert len(_WAVE2B_INSPECTORS) == 3
+
+    @pytest.mark.parametrize(
+        "name,rel_path",
+        sorted(_WAVE2B_INSPECTORS.items()),
+        ids=sorted(_WAVE2B_INSPECTORS),
+    )
+    def test_wave2b_manifest_loads_clean(self, name: str, rel_path: str) -> None:
+        manifest = load_manifest(_builtin_root() / rel_path)
+        assert manifest.name == name
+
+    def test_wave2b_inspectors_all_register_with_no_errors(self) -> None:
+        result = build_registry_from_search_paths([], settings=Settings())
+        assert result.errors == []
+        registered = set(result.registry.names())
+        missing = set(_WAVE2B_INSPECTORS) - registered
+        assert not missing, f"wave-2b inspectors absent from registry: {sorted(missing)}"
+
+
 class TestWave1SuiteRegistration:
     """tasks.md §10.1 — every wave-1 inspector loads clean + registers."""
 

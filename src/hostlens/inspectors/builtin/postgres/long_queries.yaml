@@ -1,0 +1,88 @@
+name: postgres.long_queries
+version: 1.0.0
+description: >-
+  PostgreSQL 长查询巡检(单实例)。需 psql client;secret 声明
+  HOSTLENS_POSTGRES_PASSWORD(HOSTLENS_ 前缀对齐 ssh-execution-target 契约),
+  collector 内 remap 到 PGPASSWORD(从不内联进 argv)。SQL 内聚合 active 且
+  运行时长超阈的后端为标量(long_query_count / max_duration_seconds),排除
+  inspector 自身连接(pid != pg_backend_pid())。聚合值在采样时算成标量、冻结进
+  输出;服务不可达/认证失败 → status=exception;缺 psql → requires_unmet。
+  SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
+tags: [postgres, service, long-queries, workload]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [psql]
+secrets: [HOSTLENS_POSTGRES_PASSWORD]
+privilege: none
+
+parameters:
+  type: object
+  required: [user]
+  properties:
+    host:
+      type: string
+      pattern: "^[a-zA-Z0-9._-]+$"          # blocks injection in -h value
+      default: "127.0.0.1"
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      default: 5432
+    user:
+      type: string
+      pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"   # anchored first char, aligned with connection_usage.yaml
+    dbname:
+      type: string
+      pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+      default: "postgres"
+    threshold_seconds:
+      type: number
+      minimum: 1
+      default: 60           # 一条 active 查询运行超过此秒数即计入 long query
+    warn_count:
+      type: integer
+      minimum: 1
+      default: 1            # 存在 >=1 条长查询即 warning(默认阈值,semantic-abnormal 须在此值下触发)
+  additionalProperties: false
+
+collect:
+  # secret HOSTLENS_POSTGRES_PASSWORD remapped to client-native PGPASSWORD (never -W/inline).
+  # PGCONNECT_TIMEOUT=5 < timeout_seconds 15 → unreachable backend fails fast.
+  # pid <> pg_backend_pid() excludes this inspector's own backend (else a healthy
+  # instance self-counts). now()-query_start collapsed to a frozen scalar at sample
+  # time (D-1): ReplayTarget returns the recorded stdout verbatim, no replay-time clock.
+  # fail-loud: non-numeric or psql error → exit 1 + empty stdout → status=exception.
+  command: |
+    set -e
+    out=$(PGPASSWORD="${HOSTLENS_POSTGRES_PASSWORD:-}" PGCONNECT_TIMEOUT=5 \
+      psql -tA -F'|' -h {{ host | sh }} -p {{ port }} -U {{ user | sh }} -d {{ dbname | sh }} \
+      -v ON_ERROR_STOP=1 \
+      -c "SELECT count(*),
+                 COALESCE(max(extract(epoch FROM now()-query_start)),0)::int
+          FROM pg_stat_activity
+          WHERE state='active'
+            AND pid <> pg_backend_pid()
+            AND now()-query_start >= interval '{{ threshold_seconds }} seconds'") \
+      || { echo 'psql long_queries failed' >&2; exit 1; }
+    cnt=$(printf '%s' "$out" | cut -d'|' -f1)
+    dur=$(printf '%s' "$out" | cut -d'|' -f2)
+    case "$cnt" in ''|*[!0-9]*) echo 'non-numeric count' >&2; exit 1;; esac
+    case "$dur" in ''|*[!0-9]*) echo 'non-numeric duration' >&2; exit 1;; esac
+    printf '{"long_query_count":%s,"max_duration_seconds":%s}' "$cnt" "$dur"
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    long_query_count:     { type: integer }
+    max_duration_seconds: { type: integer }
+  required: [long_query_count, max_duration_seconds]
+  additionalProperties: false
+
+findings:
+  - when: "long_query_count >= warn_count"
+    severity: warning
+    message: "存在 {long_query_count} 条运行超过 {threshold_seconds}s 的活动查询, 最长 {max_duration_seconds}s"

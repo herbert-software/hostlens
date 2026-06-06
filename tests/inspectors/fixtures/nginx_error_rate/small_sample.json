@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "[ -r /var/log/nginx/access.log ]",
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "LC_ALL=C awk -v sf=9 '\n  { total++; if ($sf ~ /^5/) e++ }\n  END {\n    if (total == 0) { rate = \"0.00\" }\n    else { rate = sprintf(\"%.2f\", (e / total) * 100) }\n    printf \"{\\\"total_requests\\\":%d,\\\"error_5xx_count\\\":%d,\\\"error_rate_pct\\\":%s}\", total, e, rate\n  }\n' /var/log/nginx/access.log",
+      "stdout": "{\"total_requests\":1,\"error_5xx_count\":1,\"error_rate_pct\":100.00}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

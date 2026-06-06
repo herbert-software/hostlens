@@ -1,0 +1,73 @@
+name: nginx.error_rate
+version: 1.0.0
+# Service-inspector-suite wave-2b probe: 5xx error rate from the current
+# /var/log/nginx/access.log file (log rotation = window boundary, design D-4).
+# Assumes combined/default log_format with the HTTP status code in field 9;
+# override `status_field` when using a non-combined format. The access log path
+# is STATIC (not parameterized) so `requires_files` preflight matches the path
+# the collector reads — missing/unreadable log → requires_unmet, not exception.
+description: >-
+  Nginx access log 5xx 错误率巡检(单实例)。单遍 LC_ALL=C awk 扫静态路径
+  /var/log/nginx/access.log(整文件 5xx/total,日志轮转即窗口边界;LC_ALL=C 防逗号小数
+  locale 破 JSON)。假设 combined/default log_format(状态码在第 9 列);非 combined 格式须
+  显式覆盖 status_field。缺 awk 或日志不可读 → requires_unmet;空日志 → ok 零对象。
+  无连接 secret。
+tags: [nginx, web, service, error-rate]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+requires_files: [/var/log/nginx/access.log]
+secrets: []
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    status_field:
+      type: integer
+      minimum: 1
+      default: 9
+    warn_pct:
+      type: number
+      minimum: 0
+      default: 5.0
+    min_requests:
+      type: integer
+      minimum: 1
+      default: 10
+  additionalProperties: false
+
+collect:
+  # All aggregation in the collector (Authoring Contract rule 1): total_requests,
+  # error_5xx_count, and error_rate_pct are computed here; the Finding DSL only
+  # threshold-compares the ready scalars. LC_ALL=C prevents comma-decimal locales
+  # from breaking JSON (e.g. 0,50). Use $status_field — NOT bare $status (awk has
+  # no named fields; $status indexes by variable status→0 → whole line $0).
+  # END{} emits a valid zero-object on empty input (divide-by-zero guard).
+  command: |
+    LC_ALL=C awk -v sf={{ status_field }} '
+      { total++; if ($sf ~ /^5/) e++ }
+      END {
+        if (total == 0) { rate = "0.00" }
+        else { rate = sprintf("%.2f", (e / total) * 100) }
+        printf "{\"total_requests\":%d,\"error_5xx_count\":%d,\"error_rate_pct\":%s}", total, e, rate
+      }
+    ' /var/log/nginx/access.log
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    error_rate_pct:  { type: number }
+    total_requests:  { type: integer }
+    error_5xx_count: { type: integer }
+  required: [error_rate_pct, total_requests, error_5xx_count]
+  additionalProperties: false
+
+findings:
+  - when: "error_rate_pct >= warn_pct and total_requests >= min_requests"
+    severity: warning
+    message: "Nginx 5xx error rate {error_rate_pct}% ({error_5xx_count}/{total_requests} requests)"

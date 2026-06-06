@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v psql",
+      "stdout": "/usr/local/bin/psql\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "set -e\nout=$(PGPASSWORD=\"${HOSTLENS_POSTGRES_PASSWORD:-}\" PGCONNECT_TIMEOUT=5 \\\n  psql -tA -F'|' -h e6a37446c53d -p 5432 -U postgres -d postgres \\\n  -v ON_ERROR_STOP=1 \\\n  -c \"SELECT count(*),\n             COALESCE(max(extract(epoch FROM now()-query_start)),0)::int\n      FROM pg_stat_activity\n      WHERE state='active'\n        AND pid <> pg_backend_pid()\n        AND now()-query_start >= interval '60 seconds'\") \\\n  || { echo 'psql long_queries failed' >&2; exit 1; }\ncnt=$(printf '%s' \"$out\" | cut -d'|' -f1)\ndur=$(printf '%s' \"$out\" | cut -d'|' -f2)\ncase \"$cnt\" in ''|*[!0-9]*) echo 'non-numeric count' >&2; exit 1;; esac\ncase \"$dur\" in ''|*[!0-9]*) echo 'non-numeric duration' >&2; exit 1;; esac\nprintf '{\"long_query_count\":%s,\"max_duration_seconds\":%s}' \"$cnt\" \"$dur\"",
+      "stdout": "",
+      "stderr": "psql: error: connection to server at \"e6a37446c53d\" (192.168.107.2), port 5432 failed: FATAL:  password authentication failed for user \"postgres\"\npsql long_queries failed\n",
+      "exit_code": 1,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

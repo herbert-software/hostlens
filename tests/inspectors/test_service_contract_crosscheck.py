@@ -13,13 +13,14 @@ etc.) — this file only validates the *common* cross-inspector contract.
 Manifest subsets enumerated below (every parametrize carries a count guard so a
 glob that matches nothing cannot make the suite pass vacuously):
 
-  * ``_SECRET_SERVICE_MANIFESTS`` (4): the service inspectors that declare a
+  * ``_SECRET_SERVICE_MANIFESTS`` (6): the service inspectors that declare a
     non-empty ``secrets`` list — redis.memory_usage / mysql.connection_usage /
-    redis.persistence / postgres.connection_usage. Secret-not-in-argv, the
-    secret-probe injection-safety positive control, and the secret-leak
-    regression enumerate THIS subset (the docker / nginx probes have no secret
-    surface, so scanning them for a password would be a vacuous assertion).
-  * ``_ALL_SERVICE_MANIFESTS`` (8 = 2 spike + 6 wave-2a): output aggregate-vs-
+    redis.persistence / postgres.connection_usage / mysql.slow_queries /
+    postgres.long_queries. Secret-not-in-argv, the secret-probe injection-safety
+    positive control, and the secret-leak regression enumerate THIS subset (the
+    docker / nginx probes have no secret surface, so scanning them for a
+    password would be a vacuous assertion).
+  * ``_ALL_SERVICE_MANIFESTS`` (11 = 2 spike + 6 wave-2a + 3 wave-2b): output aggregate-vs-
     list distinction, string-param pattern, timeout discipline, no-target-
     forking, and the bare-key/parameter-name disjointness enumerate THIS subset.
 
@@ -87,10 +88,10 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 # Manifest subsets (enumeration-driven — no per-client hard-coding).
 # --------------------------------------------------------------------------- #
 #
-# Two spike probes + six wave-2a inspectors. Keep this list in lockstep with the
-# manifests shipped under builtin/{redis,mysql,postgres,docker,nginx}/ — the
-# count guards below freeze the cohort size so neither a dropped nor a smuggled
-# manifest slips through silently.
+# Two spike probes + six wave-2a + three wave-2b inspectors. Keep this list in
+# lockstep with the manifests shipped under builtin/{redis,mysql,postgres,docker,
+# nginx}/ — the count guards below freeze the cohort size so neither a dropped
+# nor a smuggled manifest slips through silently.
 
 _ALL_SERVICE_MANIFESTS: dict[str, Path] = {
     # spike probes
@@ -103,6 +104,10 @@ _ALL_SERVICE_MANIFESTS: dict[str, Path] = {
     "docker.networks": _builtin_root() / "docker" / "networks.yaml",
     "nginx.health": _builtin_root() / "nginx" / "health.yaml",
     "nginx.config_test": _builtin_root() / "nginx" / "config_test.yaml",
+    # wave-2b cohort
+    "mysql.slow_queries": _builtin_root() / "mysql" / "slow_queries.yaml",
+    "postgres.long_queries": _builtin_root() / "postgres" / "long_queries.yaml",
+    "nginx.error_rate": _builtin_root() / "nginx" / "error_rate.yaml",
 }
 _ALL_IDS = sorted(_ALL_SERVICE_MANIFESTS)
 _ALL_ITEMS = sorted(_ALL_SERVICE_MANIFESTS.items())
@@ -115,6 +120,8 @@ _SECRET_SERVICE_MANIFESTS: dict[str, Path] = {
     "mysql.connection_usage": _ALL_SERVICE_MANIFESTS["mysql.connection_usage"],
     "redis.persistence": _ALL_SERVICE_MANIFESTS["redis.persistence"],
     "postgres.connection_usage": _ALL_SERVICE_MANIFESTS["postgres.connection_usage"],
+    "mysql.slow_queries": _ALL_SERVICE_MANIFESTS["mysql.slow_queries"],
+    "postgres.long_queries": _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
 }
 _SECRET_IDS = sorted(_SECRET_SERVICE_MANIFESTS)
 _SECRET_ITEMS = sorted(_SECRET_SERVICE_MANIFESTS.items())
@@ -143,8 +150,10 @@ _SECRET_CLIENT_RULES: dict[str, dict[str, Any]] = {
     "redis.memory_usage": {"native_env": "REDISCLI_AUTH", "forbidden_flags": ("-a ",)},
     "redis.persistence": {"native_env": "REDISCLI_AUTH", "forbidden_flags": ("-a ",)},
     "mysql.connection_usage": {"native_env": "MYSQL_PWD", "forbidden_flags": (" -p",)},
+    "mysql.slow_queries": {"native_env": "MYSQL_PWD", "forbidden_flags": (" -p",)},
     # psql: PGPASSWORD env channel; NO argv plaintext-password flag (`-p` is PORT).
     "postgres.connection_usage": {"native_env": "PGPASSWORD", "forbidden_flags": ()},
+    "postgres.long_queries": {"native_env": "PGPASSWORD", "forbidden_flags": ()},
 }
 
 
@@ -162,11 +171,11 @@ def _runner() -> InspectorRunner:
 
 
 def test_all_service_manifests_count_frozen() -> None:
-    assert len(_ALL_SERVICE_MANIFESTS) == 8, sorted(_ALL_SERVICE_MANIFESTS)
+    assert len(_ALL_SERVICE_MANIFESTS) == 11, sorted(_ALL_SERVICE_MANIFESTS)
 
 
 def test_secret_service_manifests_count_frozen() -> None:
-    assert len(_SECRET_SERVICE_MANIFESTS) == 4, sorted(_SECRET_SERVICE_MANIFESTS)
+    assert len(_SECRET_SERVICE_MANIFESTS) == 6, sorted(_SECRET_SERVICE_MANIFESTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -226,12 +235,47 @@ _INJECTABLE_PARAMS: list[tuple[str, Path, str, str]] = [
     ),
     ("nginx.health", _ALL_SERVICE_MANIFESTS["nginx.health"], "host", "web.internal"),
     ("nginx.health", _ALL_SERVICE_MANIFESTS["nginx.health"], "stub_status_path", "/stub_status"),
+    (
+        "mysql.slow_queries",
+        _ALL_SERVICE_MANIFESTS["mysql.slow_queries"],
+        "host",
+        "db.internal",
+    ),
+    (
+        "mysql.slow_queries",
+        _ALL_SERVICE_MANIFESTS["mysql.slow_queries"],
+        "user",
+        "monitor_user",
+    ),
+    (
+        "postgres.long_queries",
+        _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
+        "host",
+        "pg.internal",
+    ),
+    (
+        "postgres.long_queries",
+        _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
+        "user",
+        "monitor_user",
+    ),
+    (
+        "postgres.long_queries",
+        _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
+        "dbname",
+        "appdb",
+    ),
 ]
 _INJECTABLE_IDS = [f"{name}:{param}" for name, _, param, _ in _INJECTABLE_PARAMS]
 
 #: Manifests that require a `user` parameter (siblings must be supplied so the
 #: param-under-test reaches validation rather than tripping a required-field gate).
-_REQUIRES_USER = {"mysql.connection_usage", "postgres.connection_usage"}
+_REQUIRES_USER = {
+    "mysql.connection_usage",
+    "postgres.connection_usage",
+    "mysql.slow_queries",
+    "postgres.long_queries",
+}
 
 
 class _ProbeOnlyTarget:
@@ -306,6 +350,8 @@ def _ok_stdout(probe: str) -> str:
         "redis.persistence": '{"aof_enabled":1,"rdb_changes_since_last_save":0,"rdb_last_save_time":1}',
         "postgres.connection_usage": '{"used_connections":1,"max_connections":100,"used_pct":1.0}',
         "nginx.health": '{"healthy":true,"active_connections":1}',
+        "mysql.slow_queries": '{"slow_query_count":0,"slow_log_monitoring_enabled":true}',
+        "postgres.long_queries": '{"long_query_count":0,"max_duration_seconds":0}',
     }[probe]
 
 
@@ -435,6 +481,12 @@ _ALL_FIXTURES: list[Path] = (
     + sorted((_FIXTURES / "mysql").glob("*.json"))
     + sorted((_FIXTURES / "redis").glob("persistence_*.json"))
     + sorted((_FIXTURES / "postgres").glob("*.json"))
+    # wave-2b secret-bearing fixtures: the slow_queries / long_queries recorders
+    # inject MYSQL_ROOT_PW / POSTGRES_ROOT_PW + the wrong-password value, so the
+    # redaction guard MUST scan these dirs too (else the leak check is vacuous for
+    # them — §6.4). nginx_error_rate has no secret and is deliberately not scanned.
+    + sorted((_FIXTURES / "mysql_slow_queries").glob("*.json"))
+    + sorted((_FIXTURES / "postgres_long_queries").glob("*.json"))
 )
 
 #: EVERY literal secret VALUE any recorder actually injected via a HOSTLENS_*
@@ -479,8 +531,9 @@ class TestSecretNeverInArgvOrFixture:
     def test_at_least_the_expected_fixtures_scanned(self) -> None:
         # Guard against a glob that silently matches nothing. The spike batch had
         # >=6; the two wave-2a secret probes add persistence_* (3+) + postgres
-        # (5). Lower bound bumped to reflect the wider set.
-        assert len(_ALL_FIXTURES) >= 12, _ALL_FIXTURES
+        # (5); wave-2b adds mysql_slow_queries (5) + postgres_long_queries (4).
+        # Lower bound bumped to reflect the wider set.
+        assert len(_ALL_FIXTURES) >= 20, _ALL_FIXTURES
 
     @pytest.mark.parametrize("fixture", _ALL_FIXTURES, ids=lambda p: f"{p.parent.name}/{p.stem}")
     def test_fixture_carries_no_plaintext_secret(self, fixture: Path) -> None:
@@ -590,6 +643,8 @@ class TestNoTargetForking:
 class TestOutputKeyDisjointFromParameters:
     """spec 「聚合型裸键不与 parameter 同名」 — tasks 6.3."""
 
+    _RESERVED_WINDOW_NAMES = frozenset({"window_start", "window_end", "window_seconds"})
+
     @pytest.mark.parametrize("name,manifest_path", _ALL_ITEMS, ids=_ALL_IDS)
     def test_output_top_keys_disjoint_from_parameter_names(
         self, name: str, manifest_path: Path
@@ -599,6 +654,56 @@ class TestOutputKeyDisjointFromParameters:
         param_names = set(manifest.parameters.get("properties", {}))
         overlap = out_keys & param_names
         assert not overlap, f"{name}: output key(s) shadow parameter name(s): {sorted(overlap)}"
+
+    @pytest.mark.parametrize("name,manifest_path", _ALL_ITEMS, ids=_ALL_IDS)
+    def test_output_keys_not_reserved_window_names(self, name: str, manifest_path: Path) -> None:
+        """Runner-injected window context names must not appear as output keys."""
+
+        manifest = load_manifest(manifest_path)
+        out_keys = set(manifest.output_schema.get("properties", {}))
+        overlap = out_keys & self._RESERVED_WINDOW_NAMES
+        assert not overlap, f"{name}: output key(s) use reserved window name(s): {sorted(overlap)}"
+
+
+#: wave-2b cohort — deterministic replay (D-1): pure aggregate scalars only.
+_WAVE2B_MANIFESTS: dict[str, Path] = {
+    name: path
+    for name, path in _ALL_SERVICE_MANIFESTS.items()
+    if name in {"mysql.slow_queries", "postgres.long_queries", "nginx.error_rate"}
+}
+_WAVE2B_ITEMS = sorted(_WAVE2B_MANIFESTS.items())
+_WAVE2B_IDS = sorted(_WAVE2B_MANIFESTS)
+
+
+class TestDeterministicReplayDiscipline:
+    """wave-2b D-1 — output_schema has no timestamped-detail arrays; only frozen scalars."""
+
+    @pytest.mark.parametrize("name,manifest_path", _WAVE2B_ITEMS, ids=_WAVE2B_IDS)
+    def test_output_schema_has_no_detail_arrays(self, name: str, manifest_path: Path) -> None:
+        """Window aggregation must collapse to scalars at sample time — no array
+        fields that would require replay-time re-aggregation."""
+
+        manifest = load_manifest(manifest_path)
+        schema = manifest.output_schema
+        assert schema.get("type") == "object", name
+        for field, spec in schema.get("properties", {}).items():
+            ftype = spec.get("type")
+            if isinstance(ftype, list):
+                assert "array" not in ftype, f"{name}: field {field!r} is an array"
+            else:
+                assert ftype != "array", f"{name}: field {field!r} is an array"
+
+    def test_nginx_error_rate_uses_static_log_path(self) -> None:
+        """nginx.error_rate log path is static (not parameterized) so requires_files
+        preflight matches the collector read path."""
+
+        manifest = load_manifest(_WAVE2B_MANIFESTS["nginx.error_rate"])
+        static_path = "/var/log/nginx/access.log"
+        assert static_path in manifest.requires_files
+        assert static_path in manifest.collect.command
+        props = manifest.parameters.get("properties", {})
+        assert "access_log_path" not in props
+        assert "log_path" not in props
 
 
 # --------------------------------------------------------------------------- #
@@ -621,13 +726,15 @@ _CLIENT_TIMEOUT_TOKEN: dict[str, tuple[str, int]] = {
     "redis.memory_usage": ("-t 5", 5),
     "redis.persistence": ("-t 5", 5),
     "mysql.connection_usage": ("--connect-timeout=5", 5),
+    "mysql.slow_queries": ("--connect-timeout=5", 5),
     "postgres.connection_usage": ("PGCONNECT_TIMEOUT=5", 5),
+    "postgres.long_queries": ("PGCONNECT_TIMEOUT=5", 5),
     "nginx.health": ("--max-time 5", 5),
     "docker.images.disk_usage": ("timeout 20", 20),
     "docker.networks": ("timeout 20", 20),
 }
-#: Inspectors with no network round-trip (local exec) → no connect-timeout token.
-_NO_CONNECT_TIMEOUT = {"nginx.config_test"}
+#: Inspectors with no network round-trip (local exec / file read) → no connect-timeout token.
+_NO_CONNECT_TIMEOUT = {"nginx.config_test", "nginx.error_rate"}
 
 
 class TestTimeoutAndOutputDiscipline:
@@ -657,21 +764,23 @@ class TestTimeoutAndOutputDiscipline:
         assert value < timeout, (name, value, timeout)
 
     @pytest.mark.parametrize("name,manifest_path", _ALL_ITEMS, ids=_ALL_IDS)
-    def test_pct_format_awk_forces_c_locale(self, name: str, manifest_path: Path) -> None:
-        """The ``printf "%.2f"`` used_pct derivation (where present) must run
-        under ``LC_ALL=C`` — a comma-decimal locale would emit an invalid JSON
-        number and misclassify a HEALTHY service as exception. Only the two
-        connection-usage probes derive a percentage with awk; the others are
-        exempt."""
+    def test_float_emitting_awk_forces_c_locale(self, name: str, manifest_path: Path) -> None:
+        """Any collector ``awk`` that emits a float via ``printf``/``sprintf``
+        ``"%…f"`` must be prefixed with ``LC_ALL=C`` — comma-decimal locales
+        would emit invalid JSON and misclassify a HEALTHY service as exception.
+        Generic pattern match (not a connection_usage-specific literal)."""
 
         manifest = load_manifest(manifest_path)
         cmd = manifest.collect.command
-        if name in ("mysql.connection_usage", "postgres.connection_usage"):
-            assert "LC_ALL=C awk" in cmd, (
-                f'{name}: the `printf "%.2f"` awk must be prefixed with LC_ALL=C'
-            )
-            assert "LC_ALL=C awk -v u=" in cmd and 'printf "%.2f"' in cmd, (
-                f"{name}: expected the percentage-formatting awk to be LC_ALL=C-pinned"
+        float_fmt = re.compile(r'(?:printf|sprintf)\s*\(\s*"[^"]*%[\d.]*f')
+        for match in re.finditer(r"\bawk\b", cmd):
+            segment = cmd[match.start() :]
+            if not float_fmt.search(segment):
+                continue
+            prefix = cmd[max(0, match.start() - 30) : match.start()]
+            assert "LC_ALL=C" in prefix, (
+                f"{name}: awk emitting %f must be prefixed with LC_ALL=C "
+                f"(segment starts: {segment[:80]!r})"
             )
 
 
@@ -761,7 +870,7 @@ class TestOutputShapeDiscipline:
             )
 
     def test_only_docker_networks_is_list_shaped(self) -> None:
-        """The other 7 service inspectors are pure aggregate scalar (no array
+        """The other 10 service inspectors are pure aggregate scalar (no array
         top-level field) — a meta-guard that the parametrized branch above is
         non-vacuous (exactly one inspector takes the list-shaped branch)."""
 
@@ -795,13 +904,15 @@ class TestFailureClassificationCovered:
         "docker.networks": Path(__file__).parent / "test_docker_networks.py",
         "nginx.health": Path(__file__).parent / "test_nginx_health.py",
         "nginx.config_test": Path(__file__).parent / "test_nginx_config_test.py",
+        "mysql.slow_queries": Path(__file__).parent / "test_mysql_slow_queries.py",
+        "postgres.long_queries": Path(__file__).parent / "test_postgres_long_queries.py",
+        "nginx.error_rate": Path(__file__).parent / "test_nginx_error_rate.py",
     }
 
-    #: Every probe — including the finding-route nginx.config_test — now carries
-    #: an `exception` snapshot. nginx.config_test's exception path is the non-{0,1}
-    #: rc fallback (design D-5: an uninvokable / abnormally-exiting nginx is not "a
-    #: bad config" and must fail loud), covered by `test_unexpected_rc_fails_loud`.
-    _NO_EXCEPTION_SNAPSHOT: ClassVar[set[str]] = set()
+    #: Probes with no deterministic exception path (file-read / premise-only
+    #: failures). nginx.config_test's exception is the non-{0,1} rc fallback;
+    #: nginx.error_rate only has requires_unmet (missing log/awk) and ok.
+    _NO_EXCEPTION_SNAPSHOT: ClassVar[set[str]] = {"nginx.error_rate"}
 
     @pytest.mark.parametrize("probe", sorted(_PROBE_TEST_SOURCES), ids=sorted(_PROBE_TEST_SOURCES))
     def test_each_failure_class_asserted_in_probe_suite(self, probe: str) -> None:
