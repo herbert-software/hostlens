@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
 import structlog
 
 from hostlens.core.config import Settings
@@ -105,9 +107,15 @@ def _run_jq(rows: list[dict[str, object]]) -> subprocess.CompletedProcess[str]:
     ``-s`` slurps the lines into the array the program maps over, exactly as the
     collector pipes it."""
 
+    # Resolve jq via PATH (portable: Homebrew on macOS puts it at
+    # /opt/homebrew/bin/jq, not /usr/bin/jq); skip cleanly when absent rather
+    # than raising FileNotFoundError on a fixed absolute path.
+    jq = shutil.which("jq")
+    if jq is None:
+        pytest.skip("jq not found on PATH")
     stdin = "\n".join(json.dumps(row) for row in rows) + "\n"
     return subprocess.run(
-        ["/usr/bin/jq", "-sc", _manifest_jq_program()],
+        [jq, "-sc", _manifest_jq_program()],
         input=stdin,
         capture_output=True,
         text=True,

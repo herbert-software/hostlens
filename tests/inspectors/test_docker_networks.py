@@ -29,10 +29,12 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
 import structlog
 
 from hostlens.core.config import Settings
@@ -147,8 +149,13 @@ def test_jq_filter_excludes_swarm_and_builtin_networks() -> None:
         {"Name": "hostlens-used-net", "Containers": {"abc123": {"Name": "c1"}}},
     ]
 
+    # Resolve jq via PATH (portable: Homebrew on macOS puts it at
+    # /opt/homebrew/bin/jq, not /usr/bin/jq); skip cleanly when absent.
+    jq = shutil.which("jq")
+    if jq is None:
+        pytest.skip("jq not found on PATH")
     proc = subprocess.run(
-        ["/usr/bin/jq", "-c", _manifest_jq_program()],
+        [jq, "-c", _manifest_jq_program()],
         input=json.dumps(networks),
         capture_output=True,
         text=True,

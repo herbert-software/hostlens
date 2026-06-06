@@ -102,7 +102,12 @@ output_schema:
     # Informational human-readable strings, kept verbatim (never numericised).
     size:            { type: string }
     reclaimable:     { type: string }
-  required: [reclaimable_pct]
+  # All three are REQUIRED: the collector always emits Size/Reclaimable for the
+  # Images row, and the finding message interpolates {size}/{reclaimable}. Marking
+  # them required keeps the schema in lock-step with the collector so the finding's
+  # interpolated fields are guaranteed present (a schema that left them optional
+  # would let a malformed output silently break the finding).
+  required: [reclaimable_pct, size, reclaimable]
   additionalProperties: false
 
 findings:
