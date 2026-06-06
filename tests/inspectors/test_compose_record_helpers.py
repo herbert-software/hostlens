@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.inspectors._compose_record import wait_until
+from inspectors._compose_record import wait_until
 
 
 class TestWaitUntil:
