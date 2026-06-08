@@ -58,8 +58,11 @@ dev = [
     "syrupy>=4.6,<6",
     "types-PyYAML",
     "pip-audit>=2.7",
+    # CI (`pip install -e ".[dev]"`) needs the optional mcp SDK to run the
+    # tests/mcp_server suite; self-reference keeps the pin in one place.
+    "hostlens[mcp]",
 ]
-mcp = []
+mcp = ["mcp>=1.27"]
 docs = []
 
 [project.scripts]
@@ -105,6 +108,14 @@ exclude = ['tests/']
 [[tool.mypy.overrides]]
 module = ["simpleeval", "jsonschema", "apscheduler.*"]
 ignore_missing_imports = true
+
+# `mcp` is an optional dependency (pip install "hostlens[mcp]"); the lint/type
+# CI runs without it. follow_imports=skip forces the SDK to Any in BOTH the
+# installed and missing environments so type-checking is consistent either way.
+[[tool.mypy.overrides]]
+module = ["mcp.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

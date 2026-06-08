@@ -21,7 +21,7 @@ def _registry() -> ToolRegistry:
 
 def test_run_inspector_metadata_matches_spec_table() -> None:
     spec = _registry().get("run_inspector")
-    assert spec.surfaces == {"agent"}
+    assert spec.surfaces == {"agent", "mcp"}
     assert spec.side_effects == "read"
     assert spec.sensitive_output is True
     assert spec.requires_approval is False
@@ -32,7 +32,7 @@ def test_run_inspector_metadata_matches_spec_table() -> None:
 
 def test_list_inspectors_metadata_matches_spec_table() -> None:
     spec = _registry().get("list_inspectors")
-    assert spec.surfaces == {"agent"}
+    assert spec.surfaces == {"agent", "mcp"}
     assert spec.side_effects == "none"
     assert spec.sensitive_output is False
     assert spec.requires_approval is False
@@ -43,7 +43,7 @@ def test_list_inspectors_metadata_matches_spec_table() -> None:
 
 def test_list_targets_metadata_matches_spec_table() -> None:
     spec = _registry().get("list_targets")
-    assert spec.surfaces == {"agent"}
+    assert spec.surfaces == {"agent", "mcp"}
     assert spec.side_effects == "none"
     assert spec.sensitive_output is True
     assert spec.requires_approval is False

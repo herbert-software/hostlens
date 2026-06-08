@@ -19,6 +19,7 @@ from hostlens.cli.demo import app as demo_app
 from hostlens.cli.doctor import run_doctor
 from hostlens.cli.inspect import inspect_cmd
 from hostlens.cli.inspectors import app as inspectors_app
+from hostlens.cli.mcp import mcp_app
 from hostlens.cli.notify import notify_app
 from hostlens.cli.reports import reports_app
 from hostlens.cli.schedule import schedule_app
@@ -83,6 +84,7 @@ app.add_typer(demo_app, name="demo")
 app.add_typer(reports_app, name="reports")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(notify_app, name="notify")
+app.add_typer(mcp_app, name="mcp")
 app.command("inspect")(inspect_cmd)
 
 
