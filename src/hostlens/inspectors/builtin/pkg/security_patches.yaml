@@ -1,0 +1,71 @@
+name: pkg.security_patches
+version: 1.0.0
+description: >-
+  Count pending security patches. Adapts to the host package manager inside
+  the collector via `command -v`: Debian/Ubuntu filters `apt-get -s upgrade`
+  to security-suite sources (`-security`), RHEL/Fedora uses
+  `dnf updateinfo -q list security`. Hosts with neither fail loud
+  (status=exception), never a fake 0 count. A wrong security filter that
+  silently drops patches would be a false 0 (same failure shape as a missing
+  journald unit name); the security-source filter regex is locked at the
+  command-string level (verbatim-captured fixture command) and must be
+  verified on a real apt/dnf host (Demo Path) — the offline D-7 snapshot
+  fixture records the post-filter count, so it locks downstream count handling
+  + finding trigger, not the filter regex execution itself.
+tags: [linux, pkg, packages, security, apt, dnf]
+targets: [local, ssh]
+requires_capabilities: [shell]
+# See pkg.pending_updates: apt-get / dnf are NOT in requires_binaries (would
+# break the other distro family at preflight); `sh` is not a probed tool.
+# Package-manager presence is decided in-collector via `command -v` +
+# fail-loud. Only the always-present text tools are required.
+requires_binaries: [grep]
+privilege: none
+
+collect:
+  # FAIL-LOUD + pipe-safe (Authoring Contract rule 8 / design D-6).
+  #
+  # D-6.1 (pipe-safe): the main command output is captured into `raw=$()` and
+  # its exit code checked on the command itself BEFORE any pipe, so an apt-get
+  # / dnf failure is not swallowed by a downstream grep into a fake 0.
+  #
+  # D-6.4 (in-branch fail-loud): apt/dnf existing but failing → `exit 1`.
+  #
+  # D-6.3 boundary: `dnf updateinfo` does NOT use the exit-100 convention (that
+  # is `dnf check-update` only) — it returns 0 normally — so this dnf branch
+  # uses the STANDARD `|| exit 1`. Applying a 100-exemption here would swallow
+  # a real error. The apt branch greps the simulated upgrade for `-security`
+  # suite sources (the security-patch filter); a count of 0 with a successful
+  # apt-get is an honest "no security patches", distinguishable from a failure.
+  command: |
+    if command -v apt-get >/dev/null 2>&1; then
+      raw=$(apt-get -s upgrade 2>/dev/null) \
+        || { echo "apt-get -s upgrade failed" >&2; exit 1; }
+      count=$(printf '%s\n' "$raw" | grep '^Inst' | grep -c -- '-security' || true)
+    elif command -v dnf >/dev/null 2>&1; then
+      raw=$(dnf updateinfo -q list security 2>/dev/null) \
+        || { echo "dnf updateinfo failed" >&2; exit 1; }
+      count=$(printf '%s\n' "$raw" | grep -c '^[A-Za-z]' || true)
+    else
+      echo "no package manager (apt-get/dnf) found" >&2
+      exit 1
+    fi
+    printf '{"patches":%d}' "$count"
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    patches: { type: integer }
+  required: [patches]
+  additionalProperties: false
+
+findings:
+  # `patches` is a ready scalar; the DSL only does a threshold comparison.
+  # Any pending security patch is worth surfacing, so the trigger is `> 0`.
+  - when: "patches > 0"
+    severity: warning
+    message: "Security patches are pending (see patches for the count)"

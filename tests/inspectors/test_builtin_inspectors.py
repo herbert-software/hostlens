@@ -12,7 +12,9 @@ runner + ToolRegistry dispatch tests; here we pin the static contract:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -278,6 +280,147 @@ class TestWave2bSuiteRegistration:
         registered = set(result.registry.names())
         missing = set(_WAVE2B_INSPECTORS) - registered
         assert not missing, f"wave-2b inspectors absent from registry: {sorted(missing)}"
+
+
+# --------------------------------------------------------------------------- #
+# add-security-baseline-and-package-inspectors — os-shell wave-2 (security/pkg)
+# clean registration (tasks.md §4.1)
+# --------------------------------------------------------------------------- #
+#
+# The 6 security/pkg os-shell inspectors, keyed by registry `name` → on-disk yaml
+# path (relative to `builtin/`). This is the 归档时冻结的 cohort the
+# os-shell-inspector-suite spec §需求:安全基线与包管理域必须按域覆盖 references; it
+# must stay in lockstep with the manifests shipped under builtin/{security,pkg}/.
+#
+# IMPORTANT — this cohort is a DISTINCT suite from the service-inspector-suite's
+# `_WAVE2A_INSPECTORS` / `_WAVE2B_INSPECTORS` above. Both the service wave-2a
+# cohort and THIS os-shell wave-2 cohort happen to be exactly 6 inspectors, so a
+# DEDICATED, non-colliding symbol name (`_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS`
+# / `test_os_shell_wave2_count_is_frozen_at_6`) is used here on purpose: reusing
+# the service `_WAVE2A_INSPECTORS` symbol would shadow it within this module and
+# silently swallow the service cohort's count guard. These are independent dicts
+# that do not touch each other's counts.
+
+_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS: dict[str, str] = {
+    # 安全基线域 (builtin/security/)
+    "security.failed_logins": "security/failed_logins.yaml",
+    "security.sudo_history": "security/sudo_history.yaml",
+    "security.world_writable_dirs": "security/world_writable_dirs.yaml",
+    # 包管理域 (builtin/pkg/)
+    "pkg.pending_updates": "pkg/pending_updates.yaml",
+    "pkg.security_patches": "pkg/security_patches.yaml",
+    "pkg.held_back": "pkg/held_back.yaml",
+}
+
+
+class TestOsShellWave2SecurityPkgRegistration:
+    """tasks.md §4.1 — every security/pkg os-shell wave-2 inspector loads clean
+    + registers with errors == []. Distinct suite from the service wave-2a/2b
+    cohorts above (independent dict, no cross-cohort count coupling)."""
+
+    def test_os_shell_wave2_count_is_frozen_at_6(self) -> None:
+        # The suite spec freezes this os-shell security/pkg cohort at exactly 6
+        # inspectors (3 security + 3 pkg). A drift (a 7th added here without a new
+        # change) fails loud. Dedicated symbol — NOT the service `_WAVE2A_*` guard.
+        assert len(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS) == 6
+
+    @pytest.mark.parametrize(
+        "name,rel_path",
+        sorted(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS.items()),
+        ids=sorted(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS),
+    )
+    def test_os_shell_wave2_manifest_loads_clean(self, name: str, rel_path: str) -> None:
+        manifest = load_manifest(_builtin_root() / rel_path)
+        # `name` in the yaml must match the registry key we expect.
+        assert manifest.name == name
+
+    def test_os_shell_wave2_inspectors_all_register_with_no_errors(self) -> None:
+        result = build_registry_from_search_paths([], settings=Settings())
+        assert result.errors == []
+        registered = set(result.registry.names())
+        missing = set(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS) - registered
+        assert not missing, f"security/pkg inspectors absent from registry: {sorted(missing)}"
+
+
+class TestOsShellWave2NoExternalServiceDependency:
+    """tasks.md §4.3 — the security/pkg cohort is os-shell, NOT service domain.
+
+    The suite spec §场景:cohort 内 inspector 不得依赖外部服务或语言运行时 forbids
+    any inspector here from referencing an external-service client or a language-
+    runtime tool in `requires_binaries` or `collect.command`. The forbidden set is
+    an EXPLICIT frozenset (not an open "等" / membership-by-convention list) so the
+    assertion is non-vacuous — a smuggled `psql` / `docker` / `jstat` reference
+    fails loud.
+    """
+
+    #: Explicit, closed forbidden set (external-service clients + language-runtime
+    #: tools). NOT open-ended — a literal frozenset so the guard cannot pass
+    #: vacuously by "等" hand-waving.
+    _FORBIDDEN_EXTERNAL_TOOLS: ClassVar[frozenset[str]] = frozenset(
+        {"nginx", "mysql", "redis-cli", "psql", "docker", "jstat", "jcmd"}
+    )
+
+    @pytest.mark.parametrize(
+        "name,rel_path",
+        sorted(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS.items()),
+        ids=sorted(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS),
+    )
+    def test_requires_binaries_has_no_external_service_tool(self, name: str, rel_path: str) -> None:
+        manifest = load_manifest(_builtin_root() / rel_path)
+        leaked = set(manifest.requires_binaries) & self._FORBIDDEN_EXTERNAL_TOOLS
+        assert not leaked, (
+            f"{name}: requires_binaries references external-service/runtime "
+            f"tool(s) {sorted(leaked)} — this cohort is zero-external-dependency "
+            f"OS shell only"
+        )
+
+    @pytest.mark.parametrize(
+        "name,rel_path",
+        sorted(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS.items()),
+        ids=sorted(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS),
+    )
+    def test_collect_command_has_no_external_service_tool(self, name: str, rel_path: str) -> None:
+        manifest = load_manifest(_builtin_root() / rel_path)
+        cmd = manifest.collect.command
+        # Whole-word match so a substring (e.g. "dockerized" hypothetical, or a
+        # path segment) does not over-trigger; the forbidden tokens are command
+        # invocations, so a word-boundary match is the right granularity.
+        for tool in self._FORBIDDEN_EXTERNAL_TOOLS:
+            assert not re.search(rf"(?<![\w-]){re.escape(tool)}(?![\w-])", cmd), (
+                f"{name}: collect.command references external-service/runtime "
+                f"tool {tool!r} — this cohort is zero-external-dependency OS shell only"
+            )
+
+    def test_cohort_not_in_service_crosscheck_manifests(self) -> None:
+        """The security/pkg cohort must NOT be enumerated in the service
+        crosscheck's `_ALL_SERVICE_MANIFESTS` (each cohort owns an independent
+        dict; the two suites do not touch each other's frozen counts).
+
+        The service crosscheck names are pinned literally here (rather than
+        imported from the sibling test module — CI runs with pythonpath=src and
+        no `tests/__init__.py`, so a `from tests.inspectors...` import would
+        crash). The literal list is the 11 = 2 spike + 6 wave-2a + 3 wave-2b
+        service inspectors enumerated in test_service_contract_crosscheck.py's
+        `_ALL_SERVICE_MANIFESTS`; the disjointness assertion is what matters."""
+
+        service_crosscheck_names = {
+            "redis.memory_usage",
+            "mysql.connection_usage",
+            "redis.persistence",
+            "postgres.connection_usage",
+            "docker.images.disk_usage",
+            "docker.networks",
+            "nginx.health",
+            "nginx.config_test",
+            "mysql.slow_queries",
+            "postgres.long_queries",
+            "nginx.error_rate",
+        }
+        overlap = set(_OS_SHELL_WAVE2_SECURITY_PKG_INSPECTORS) & service_crosscheck_names
+        assert not overlap, (
+            f"security/pkg os-shell inspectors leaked into the service "
+            f"crosscheck cohort: {sorted(overlap)}"
+        )
 
 
 class TestWave1SuiteRegistration:

@@ -1,0 +1,70 @@
+name: security.world_writable_dirs
+version: 1.0.0
+description: >-
+  Enumerate world-writable directories under the system paths
+  (/etc /usr /var /tmp /opt) that LACK the sticky bit — a privilege-escalation
+  vector (any user can rename/delete others' files). Linux-only (uses `find`
+  with `-perm -0002 -not -perm -1000` + `-xdev`). All extraction happens in
+  awk; the Finding DSL only iterates the ready `results` array.
+tags: [security, linux, filesystem, privilege-escalation, world-writable]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [find, awk]
+privilege: none
+
+collect:
+  # FAIL-LOUD with an EXACT criterion (D-6.2). `find` exits non-zero on a
+  # partially-inaccessible subtree — that is NORMAL permission denial, NOT a
+  # collector crash. A bare `find ... || exit 1` would misreport that normal
+  # denial as status=exception (a false positive).
+  #
+  # Precise criterion: capture stdout into out=, capture rc=$?, and `exit 1`
+  # ONLY when rc != 0 AND stdout is empty:
+  #   - rc == 0                  → ok (incl. the legitimate empty result
+  #                                {"results":[]})
+  #   - rc != 0 AND out non-empty → partial subtree denial → ok (we still got
+  #                                 data)
+  #   - rc != 0 AND out empty     → scan roots all unreachable / find crashed
+  #                                 → exit 1 → status=exception
+  #
+  # awk wraps each path into {"results":[{"path":"..."}]} (results, not a
+  # parameter name, dodges output/parameter shadowing). NF>0 skips blank lines.
+  command: |
+    out=$(find /etc /usr /var /tmp /opt -xdev -type d -perm -0002 -not -perm -1000 2>/dev/null)
+    rc=$?
+    [ $rc -eq 0 ] || [ -n "$out" ] || { echo "find produced no output and failed" >&2; exit 1; }
+    printf '%s\n' "$out" | awk '
+      function esc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+      BEGIN{ printf "{\"results\":["; sep="" }
+      NF>0 {
+        printf "%s{\"path\":\"%s\"}", sep, esc($0)
+        sep=","
+      }
+      END{ printf "]}" }
+    '
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          path: { type: string }
+        required: [path]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # Single for_each binding over the ready results array; the DSL only iterates
+  # (no extraction). Each world-writable, non-sticky dir is a finding.
+  - for_each: "results as d"
+    when: "True"
+    severity: warning
+    message: "全局可写且缺 sticky bit 的目录（提权向量）：{d[path]}"

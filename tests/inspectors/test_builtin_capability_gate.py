@@ -381,3 +381,52 @@ def test_nginx_error_rate_missing_access_log_skips_with_requires_unmet() -> None
     assert result.status == "requires_unmet"
     assert result.findings == []
     assert any(m.startswith("file:") for m in result.missing), result.missing
+
+
+# --------------------------------------------------------------------------- #
+# add-security-baseline-and-package-inspectors — capability/binary gate (§4.2)
+# --------------------------------------------------------------------------- #
+#
+# Spec §场景:cohort 内 inspector 不得依赖外部服务或语言运行时 — every security/pkg
+# os-shell inspector must declare `privilege: none`, gate only on the statically-
+# present `{shell}` capability, and list ONLY real shell tools in
+# requires_binaries (never the interpreter `sh`, never an external-service /
+# language-runtime client). The expected binary sets below are pinned literally so
+# a manifest that drops a real tool or smuggles `sh` / a service client fails loud.
+
+# (registry name, yaml rel path, expected requires_binaries set)
+_OS_SHELL_WAVE2_BINARY_CASES: list[tuple[str, str, set[str]]] = [
+    ("security.failed_logins", "security/failed_logins.yaml", {"journalctl", "grep"}),
+    ("security.sudo_history", "security/sudo_history.yaml", {"journalctl", "grep"}),
+    ("security.world_writable_dirs", "security/world_writable_dirs.yaml", {"find", "awk"}),
+    ("pkg.pending_updates", "pkg/pending_updates.yaml", {"grep"}),
+    ("pkg.security_patches", "pkg/security_patches.yaml", {"grep"}),
+    ("pkg.held_back", "pkg/held_back.yaml", {"awk"}),
+]
+
+
+@pytest.mark.parametrize(
+    "name,rel_path,expected_binaries",
+    _OS_SHELL_WAVE2_BINARY_CASES,
+    ids=[c[0] for c in _OS_SHELL_WAVE2_BINARY_CASES],
+)
+def test_os_shell_wave2_capability_and_binary_gate(
+    name: str, rel_path: str, expected_binaries: set[str]
+) -> None:
+    manifest = load_manifest(_BUILTIN_DIR / rel_path)
+    assert manifest.name == name
+
+    # privilege: none — no sudo / root escalation.
+    assert manifest.privilege == "none", name
+
+    # Gate ONLY on the statically-present {shell} capability (preflight runs
+    # before any exec, so a lazily-probed capability would falsely requires_unmet
+    # on a capable host — Authoring Contract rule 9).
+    assert set(manifest.requires_capabilities) == {"shell"}, name
+
+    # requires_binaries are the EXACT real shell tools — never the interpreter
+    # `sh` (it is not a `command -v`-probed semantic tool) and never an external-
+    # service / runtime client.
+    binaries = set(manifest.requires_binaries)
+    assert binaries == expected_binaries, name
+    assert "sh" not in binaries, f"{name}: `sh` must not be a required binary"

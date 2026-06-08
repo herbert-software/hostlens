@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v find",
+      "stdout": "/usr/bin/find\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "out=$(find /etc /usr /var /tmp /opt -xdev -type d -perm -0002 -not -perm -1000 2>/dev/null)\nrc=$?\n[ $rc -eq 0 ] || [ -n \"$out\" ] || { echo \"find produced no output and failed\" >&2; exit 1; }\nprintf '%s\\n' \"$out\" | awk '\n  function esc(s){ gsub(/\\\\/,\"\\\\\\\\\",s); gsub(/\"/,\"\\\\\\\"\",s); return s }\n  BEGIN{ printf \"{\\\"results\\\":[\"; sep=\"\" }\n  NF>0 {\n    printf \"%s{\\\"path\\\":\\\"%s\\\"}\", sep, esc($0)\n    sep=\",\"\n  }\n  END{ printf \"]}\" }\n'",
+      "stdout": "{\"results\":[{\"path\":\"/var/tmp/world-writable\"}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}
