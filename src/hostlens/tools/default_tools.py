@@ -401,7 +401,7 @@ def build_run_inspector_spec(handler: _BroadHandler) -> ToolSpec:
             "contain process / port / connection metadata."
         ),
         cli_help=None,
-        surfaces={"agent"},
+        surfaces={"agent", "mcp"},
         side_effects="read",
         sensitive_output=True,
         timeout=30.0,
@@ -427,7 +427,7 @@ list_inspectors = tool(
         "kinds. No secrets."
     ),
     cli_help=None,
-    surfaces={"agent"},
+    surfaces={"agent", "mcp"},
     side_effects="none",
     sensitive_output=False,
     timeout=5.0,
@@ -450,7 +450,7 @@ list_targets = tool(
         "environment structure — gate MCP exposure accordingly."
     ),
     cli_help=None,
-    surfaces={"agent"},
+    surfaces={"agent", "mcp"},
     side_effects="none",
     sensitive_output=True,
     timeout=5.0,

@@ -305,8 +305,8 @@ def project_to_mcp(spec: ToolSpec) -> MCPToolDefinition | None:
 
 ### 实施节奏
 
-- **M2**：实现 Layer 1（ToolSpec + Registry + ToolContext）+ Agent surface adapter；MCP 与 CLI adapter 暂不实现
-- **M7**：实现 MCP surface adapter；把 M2 注册的 ToolSpec 增量加上 `surfaces ∋ "mcp"`，并在 adapter 强制校验 `sensitive_output` 与 `requires_approval`
+- **M2（已落地）**：实现 Layer 1（ToolSpec + Registry + ToolContext）+ Agent surface adapter；MCP 与 CLI adapter 暂不实现
+- **M7（已落地）**：`mcp_server/{tools_adapter.py, server.py}` —— `McpToolsAdapter.list_for_mcp()` / `dispatch()` 投影 `surfaces ∋ "mcp"` 的 ToolSpec，强制校验 `sensitive_output` 与 `requires_approval`；`build_server` + `run_stdio` stdio server；`hostlens mcp serve` CLI；只读三件套（`list_inspectors` / `list_targets` / `run_inspector`）显式 opt-in mcp surface；`hostlens doctor --json` 的 `checks.mcp`（`ok` / `missing`，非致命）；fail-closed 三处对称（`list_for_mcp` 投影 / `build_server` eager 自检 / `dispatch` 门）；**stdio-only**（HTTP transport 为 Non-Goal，见 `add-mcp-server-surface` proposal）
 - **未定**：CLI surface adapter 是否需要 —— 默认 CLI 命令仍由 Typer 直接写，只有"想让人类直接调用一个 Agent 能力"时才走 cli_adapter
 
 ---

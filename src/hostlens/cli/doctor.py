@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import os
 import re
 import sys
@@ -84,6 +85,7 @@ from hostlens.targets.registry import build_registry_from_config
 __all__ = [
     "check_anthropic_key",
     "check_config_dir",
+    "check_mcp",
     "check_python_version",
     "run_doctor",
 ]
@@ -120,6 +122,14 @@ def check_anthropic_key() -> CheckResult:
 
     if "ANTHROPIC_API_KEY" in os.environ:
         return CheckResult(status="present", detail=None)
+    return CheckResult(status="missing", detail=None)
+
+
+def check_mcp() -> CheckResult:
+    """Report whether the official ``mcp`` SDK is importable."""
+
+    if importlib.util.find_spec("mcp") is not None:
+        return CheckResult(status="ok", detail=None)
     return CheckResult(status="missing", detail=None)
 
 
@@ -860,6 +870,7 @@ def _build_report(settings: Settings, *, check_channels: bool = False) -> Doctor
         "python_version": check_python_version(),
         "anthropic_key": check_anthropic_key(),
         "config_dir": check_config_dir(),
+        "mcp": check_mcp(),
         "schedules": _check_schedules(settings),
     }
     if check_channels:
@@ -979,6 +990,14 @@ def _emit_remediation(report: DoctorReport, stderr: Console) -> None:
         stderr.print(
             f"hint: notifier channel probe failed ({channels.detail}); check "
             "notifiers.yaml types / ${VAR} env vars / bot tokens",
+        )
+
+    mcp = report.checks.get("mcp")
+    if mcp is not None and mcp.status == "missing":
+        # markup=False so Rich does not parse the `[mcp]` extra as a markup tag.
+        stderr.print(
+            'hint: MCP SDK not installed; run pip install "hostlens[mcp]"',
+            markup=False,
         )
 
     # M1: warn (not exit 1) for inline plaintext credentials.
