@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v mysql",
+      "stdout": "/usr/bin/mysql\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "status=$(MYSQL_PWD=\"${HOSTLENS_MYSQL_PWD:-}\" mysql -s --connect-timeout=5 -h 127.0.0.1 -P 3306 -u mon \\\n  -e 'SHOW REPLICA STATUS\\G') || { echo \"mysql show replica status failed\" >&2; exit 1; }\nif [ -z \"$status\" ]; then\n  printf '{\"replication_configured\":false,\"link_healthy\":false,\"lag_seconds\":null}'\n  exit 0\nfi\nio=$(printf '%s\\n' \"$status\" | awk -F': ' '/^[[:space:]]*Replica_IO_Running:/{gsub(/^[ \\t]+|[ \\t\\r]+$/,\"\",$2);print $2; exit}')\nsql=$(printf '%s\\n' \"$status\" | awk -F': ' '/^[[:space:]]*Replica_SQL_Running:/{gsub(/^[ \\t]+|[ \\t\\r]+$/,\"\",$2);print $2; exit}')\nsbs=$(printf '%s\\n' \"$status\" | awk -F': ' '/^[[:space:]]*Seconds_Behind_Source:/{gsub(/^[ \\t]+|[ \\t\\r]+$/,\"\",$2);print $2; exit}')\nif [ -z \"$io\" ] || [ -z \"$sql\" ]; then\n  echo \"replica status columns missing (Replica_IO_Running/Replica_SQL_Running)\" >&2\n  exit 1\nfi\nif [ \"$io\" = \"Yes\" ] && [ \"$sql\" = \"Yes\" ]; then\n  link=true\nelse\n  link=false\nfi\ncase \"$sbs\" in\n  NULL|'')\n    lag=null\n    ;;\n  *[!0-9]*)\n    echo \"Seconds_Behind_Source non-numeric: $sbs\" >&2\n    exit 1\n    ;;\n  *)\n    lag=$sbs\n    ;;\nesac\nprintf '{\"replication_configured\":true,\"link_healthy\":%s,\"lag_seconds\":%s}' \"$link\" \"$lag\"",
+      "stdout": "{\"replication_configured\":true,\"link_healthy\":false,\"lag_seconds\":null}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

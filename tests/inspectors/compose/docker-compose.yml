@@ -290,3 +290,52 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
+
+  # === wave-2c mysql replication ===
+  # mysql-repl-primary / mysql-repl-replica — primary+replica topology for
+  # `mysql.replication_lag` fixture recording (GTID auto-position). The recorder
+  # creates a replication account on the primary, points the replica at it with
+  # CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1; START REPLICA, and
+  # polls Replica_IO_Running/Replica_SQL_Running via wait_until (never a fixed
+  # sleep). mysql:8.0.40 gives the Replica_*/Seconds_Behind_Source column names.
+  mysql-repl-primary:
+    image: mysql:8.0.40
+    command: ["--server-id=1", "--log-bin", "--gtid-mode=ON", "--enforce-gtid-consistency=ON"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${HOSTLENS_MYSQL_ROOT_PW:?recorder must export HOSTLENS_MYSQL_ROOT_PW}
+      MYSQL_DATABASE: hostlens
+    ports:
+      - "13310:3306"
+    healthcheck:
+      test:
+        - "CMD"
+        - "mysqladmin"
+        - "ping"
+        - "-h"
+        - "127.0.0.1"
+        - "-uroot"
+        - "-p${HOSTLENS_MYSQL_ROOT_PW:?recorder must export HOSTLENS_MYSQL_ROOT_PW}"
+      interval: 2s
+      timeout: 4s
+      retries: 45
+
+  mysql-repl-replica:
+    image: mysql:8.0.40
+    command: ["--server-id=2", "--gtid-mode=ON", "--enforce-gtid-consistency=ON", "--read-only"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${HOSTLENS_MYSQL_ROOT_PW:?recorder must export HOSTLENS_MYSQL_ROOT_PW}
+      MYSQL_DATABASE: hostlens
+    ports:
+      - "13311:3306"
+    healthcheck:
+      test:
+        - "CMD"
+        - "mysqladmin"
+        - "ping"
+        - "-h"
+        - "127.0.0.1"
+        - "-uroot"
+        - "-p${HOSTLENS_MYSQL_ROOT_PW:?recorder must export HOSTLENS_MYSQL_ROOT_PW}"
+      interval: 2s
+      timeout: 4s
+      retries: 45

@@ -1,28 +1,31 @@
 """Cross-inspector acceptance for the ``replication-inspector-contract`` spec.
 
-Independent crosscheck for ``redis.replication_lag`` — the replication spike probe.
-This file is NOT part of the single-instance ``service-inspector-contract`` cohort
+Independent crosscheck enumerating every delivered replication inspector
+(``redis.replication_lag`` + ``mysql.replication_lag``). This file is NOT part
+of the single-instance ``service-inspector-contract`` cohort
 (``test_service_contract_crosscheck.py`` keeps its 11 / 6 manifest counts frozen).
 
-Coverage map (design D-6):
+Coverage map (design D-6 / W-5):
 
-  * **D-6a — inherited single-instance contract items** (mechanically re-run, not
-    merely documented):
+  * **D-6a — inherited single-instance contract items** (mechanically re-run per
+    replication inspector, not merely documented):
     - Injection safety: schema ``pattern`` rejects malicious payloads before the
       collector command is rendered or executed.
-    - Secret remap: ``HOSTLENS_REDIS_PASSWORD`` → ``REDISCLI_AUTH`` via shell
-      ``${...}`` expansion; never in argv (``-a ``) or Jinja2 ``{{ }}``.
+    - Secret remap: per-DB ``HOSTLENS_*`` → client-native env via shell
+      ``${...}`` expansion; never in argv or Jinja2 ``{{ }}``.
     - No target forking: same command serves local and ssh.
-    - Timeout discipline: client ``-t 5`` < ``collect.timeout_seconds``.
+    - Timeout discipline: client connect-timeout token < ``collect.timeout_seconds``.
     - Output shape: aggregate scalar object (no array top-level field).
     - ``targets == ["local", "ssh"]``.
 
   * **D-6b — replication-specific items**:
     - Normalized triple in ``output_schema``; ``lag_seconds`` type ``[integer, "null"]``.
-    - ``description`` declares lag semantic class ``link_freshness``.
-    - Three-state replication health by-finding (unconfigured / link-down / stale).
+    - ``description`` declares the DB's lag semantic class (``link_freshness`` /
+      ``apply_lag``).
+    - Three-state replication health by-finding (unconfigured / link-down / lag).
     - Parameter names avoid multi-instance substrings.
-    - Semantic-abnormal fixtures ``link_down`` and ``link_stale`` exist and are valid JSON.
+    - Two semantic-abnormal fixtures per DB (names differ: redis ``link_stale``,
+      mysql ``lagging``) exist, are valid JSON, and are semantically distinct.
 """
 
 from __future__ import annotations
@@ -43,8 +46,6 @@ from hostlens.inspectors.runner import InspectorRunner
 from hostlens.targets.base import Capability, ExecResult
 from hostlens.targets.registry import TargetRegistry
 from hostlens.targets.replay import ReplayTarget
-
-_FIXTURES = Path(__file__).parent / "fixtures" / "redis_replication_lag"
 
 _FORBIDDEN_MULTI_INSTANCE_SUBSTRINGS = (
     "replica",
@@ -70,12 +71,73 @@ def _builtin_root() -> Path:
     return Path(pkg_file).parent / "builtin"
 
 
-def _manifest_path() -> Path:
-    return _builtin_root() / "redis" / "replication_lag.yaml"
+# --------------------------------------------------------------------------- #
+# Replication cohort enumeration (W-5).
+# --------------------------------------------------------------------------- #
+
+_REPLICATION_MANIFESTS: dict[str, Path] = {
+    "redis.replication_lag": _builtin_root() / "redis" / "replication_lag.yaml",
+    "mysql.replication_lag": _builtin_root() / "mysql" / "replication_lag.yaml",
+}
+_REPLICATION_IDS = sorted(_REPLICATION_MANIFESTS)
+_REPLICATION_ITEMS = sorted(_REPLICATION_MANIFESTS.items())
+
+_REPL_FIXTURE_DIR: dict[str, Path] = {
+    "redis.replication_lag": Path(__file__).parent / "fixtures" / "redis_replication_lag",
+    "mysql.replication_lag": Path(__file__).parent / "fixtures" / "mysql_replication_lag",
+}
+_SEMANTIC_ABNORMAL_FIXTURES: dict[str, tuple[str, str]] = {
+    # (link_down_fixture, lag/stale_fixture) — link_healthy False vs True
+    "redis.replication_lag": ("link_down.json", "link_stale.json"),
+    "mysql.replication_lag": ("link_down.json", "lagging.json"),
+}
+
+# Per-DB connection / secret / timeout / replay expectations.
+_REPLICATION_DB_CONFIG: dict[str, dict[str, Any]] = {
+    "redis.replication_lag": {
+        "secret_env": "HOSTLENS_REDIS_PASSWORD",
+        "client_native_env": "REDISCLI_AUTH",
+        "forbidden_flags": ("-a ",),
+        "timeout_token": "-t 5",
+        "timeout_value": 5,
+        "semantic_class": "link_freshness",
+        "required_binary": "redis-cli",
+        "benign_host": "redis.internal",
+        "conn_refused_port": 6390,
+        "run_params": {},
+        "replay_params": {},
+    },
+    "mysql.replication_lag": {
+        "secret_env": "HOSTLENS_MYSQL_PWD",
+        "client_native_env": "MYSQL_PWD",
+        "forbidden_flags": (" -p",),
+        "timeout_token": "--connect-timeout=5",
+        "timeout_value": 5,
+        "semantic_class": "apply_lag",
+        "required_binary": "mysql",
+        "benign_host": "db.internal",
+        "conn_refused_port": 13399,
+        "run_params": {"user": "mon"},
+        "replay_params": {"user": "mon"},
+    },
+}
+
+_SEMANTIC_ABNORMAL_ITEMS: list[tuple[str, str]] = [
+    (inspector, fixture)
+    for inspector in _REPLICATION_IDS
+    for fixture in _SEMANTIC_ABNORMAL_FIXTURES[inspector]
+]
+_SEMANTIC_ABNORMAL_IDS = [
+    f"{inspector}/{fixture}" for inspector, fixture in _SEMANTIC_ABNORMAL_ITEMS
+]
 
 
-def _manifest():
-    return load_manifest(_manifest_path())
+def _db_config(name: str) -> dict[str, Any]:
+    return _REPLICATION_DB_CONFIG[name]
+
+
+def _fixture_dir(name: str) -> Path:
+    return _REPL_FIXTURE_DIR[name]
 
 
 def _logger() -> structlog.stdlib.BoundLogger:
@@ -158,8 +220,32 @@ _UNCONFIGURED_OK_STDOUT = '{"replication_configured":false,"link_healthy":false,
 
 
 @pytest.fixture(autouse=True)
-def _redis_password_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _replication_secret_envs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOSTLENS_REDIS_PASSWORD", "")
+    monkeypatch.setenv("HOSTLENS_MYSQL_PWD", "p w*d")
+
+
+# --------------------------------------------------------------------------- #
+# Count guards (non-vacuous: empty dict / missing manifests cannot pass).
+# --------------------------------------------------------------------------- #
+
+
+def test_replication_manifests_non_empty_before_parametrize() -> None:
+    assert len(_REPLICATION_MANIFESTS) > 0, "replication cohort dict must not be empty"
+
+
+def test_replication_manifests_count_frozen() -> None:
+    assert len(_REPLICATION_MANIFESTS) == 2, sorted(_REPLICATION_MANIFESTS)
+
+
+def test_replication_manifest_paths_exist() -> None:
+    assert len(_REPLICATION_MANIFESTS) > 0
+    for name, path in _REPLICATION_MANIFESTS.items():
+        assert path.is_file(), f"{name}: manifest missing at {path}"
+
+
+def test_at_least_two_semantic_abnormal_fixtures_mapped() -> None:
+    assert len(_SEMANTIC_ABNORMAL_ITEMS) >= 4, _SEMANTIC_ABNORMAL_ITEMS
 
 
 # --------------------------------------------------------------------------- #
@@ -170,78 +256,96 @@ def _redis_password_env(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestInheritedSingleInstanceContract:
     """Design D-6a — re-run inherited service-inspector-contract items."""
 
-    def test_manifest_loads_cleanly(self) -> None:
-        manifest = _manifest()
-        assert manifest.name == "redis.replication_lag"
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_manifest_loads_cleanly(self, name: str, manifest_path: Path) -> None:
+        manifest = load_manifest(manifest_path)
+        assert manifest.name == name
 
-    def test_targets_local_and_ssh(self) -> None:
-        manifest = _manifest()
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_targets_local_and_ssh(self, name: str, manifest_path: Path) -> None:
+        manifest = load_manifest(manifest_path)
         assert manifest.targets == ["local", "ssh"]
 
-    def test_string_params_carry_a_pattern(self) -> None:
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_string_params_carry_a_pattern(self, name: str, manifest_path: Path) -> None:
         """Every string parameter that flows into the command carries a ``pattern``."""
 
-        manifest = _manifest()
+        manifest = load_manifest(manifest_path)
         props = manifest.parameters.get("properties", {})
         for pname, spec in props.items():
             if spec.get("type") == "string":
-                assert "pattern" in spec, f"string param {pname!r} lacks a pattern"
+                assert "pattern" in spec, f"{name}: string param {pname!r} lacks a pattern"
 
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
     @pytest.mark.parametrize(
         "label,payload", _INJECTION_PAYLOADS, ids=[p[0] for p in _INJECTION_PAYLOADS]
     )
     async def test_injection_payload_rejected_before_command(
-        self, label: str, payload: str
+        self,
+        name: str,
+        manifest_path: Path,
+        label: str,
+        payload: str,
     ) -> None:
         """A malicious ``host`` value is rejected by the schema ``pattern`` before
         the collector command is ever rendered or run."""
 
-        manifest = _manifest()
+        manifest = load_manifest(manifest_path)
         target = _ProbeOnlyTarget(allow_collector=False)
+        params = {"host": payload, **_db_config(name)["run_params"]}
 
         result = await _runner().run(
             manifest,
             target,  # type: ignore[arg-type]
-            parameters={"host": payload},
+            parameters=params,
         )
 
-        assert result.status == "exception", (label, payload)
+        assert result.status == "exception", (name, label, payload)
         assert result.error is not None
         assert result.error.startswith("parameter_validation_failed"), result.error
         assert result.findings == []
         assert target.last_collector is None
 
-    async def test_benign_host_rides_sh_filter(self) -> None:
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    async def test_benign_host_rides_sh_filter(self, name: str, manifest_path: Path) -> None:
         """Positive control: a pattern-valid host is interpolated through
         ``shlex.quote`` (the ``| sh`` filter)."""
 
-        benign = "redis.internal"
-        manifest = _manifest()
+        cfg = _db_config(name)
+        benign = cfg["benign_host"]
+        manifest = load_manifest(manifest_path)
         target = _ProbeOnlyTarget(allow_collector=True, collector_stdout=_UNCONFIGURED_OK_STDOUT)
+        params = {"host": benign, **cfg["run_params"]}
 
         result = await _runner().run(
             manifest,
             target,  # type: ignore[arg-type]
-            parameters={"host": benign},
+            parameters=params,
         )
 
         assert result.status == "ok", result.error
         assert target.last_collector is not None
         assert shlex.quote(benign) in target.last_collector, (
+            name,
             benign,
             target.last_collector,
         )
 
-    def test_secret_remap_not_in_argv(self) -> None:
-        """``HOSTLENS_REDIS_PASSWORD`` is remapped to ``REDISCLI_AUTH`` via shell
-        ``${...}`` expansion — never in argv (``-a ``) or Jinja2 ``{{ }}``."""
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_secret_remap_not_in_argv(self, name: str, manifest_path: Path) -> None:
+        """Per-DB secret is remapped to the client-native env via shell ``${...}``
+        expansion — never in argv or Jinja2 ``{{ }}``."""
 
-        manifest = _manifest()
+        cfg = _db_config(name)
+        manifest = load_manifest(manifest_path)
         cmd = manifest.collect.command
-        assert manifest.secrets == ["HOSTLENS_REDIS_PASSWORD"]
+        secret_env = cfg["secret_env"]
+        native_env = cfg["client_native_env"]
 
-        assert "REDISCLI_AUTH" in cmd
-        assert "-a " not in cmd
+        assert manifest.secrets == [secret_env]
+        assert native_env in cmd
+        for forbidden in cfg["forbidden_flags"]:
+            assert forbidden not in cmd, f"{name}: forbidden argv flag {forbidden!r}"
 
         for secret in manifest.secrets:
             assert secret.startswith("HOSTLENS_"), secret
@@ -254,40 +358,49 @@ class TestInheritedSingleInstanceContract:
                     f"secret {secret!r} must not be `{{{{ }}}}`-interpolated (found in {block!r})"
                 )
 
-    def test_collector_command_has_no_target_type_branch(self) -> None:
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_collector_command_has_no_target_type_branch(
+        self, name: str, manifest_path: Path
+    ) -> None:
         """The collector command must not branch on the target TYPE."""
 
-        cmd = _manifest().collect.command
+        cmd = load_manifest(manifest_path).collect.command
         for forbidden in ("target.type", "{{ target", "$TARGET", "${TARGET", "TARGET_TYPE"):
-            assert forbidden not in cmd, f"per-target fork token {forbidden!r} present"
+            assert forbidden not in cmd, f"{name}: per-target fork token {forbidden!r} present"
 
-    def test_declares_timeout_seconds(self) -> None:
-        manifest = _manifest()
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_declares_timeout_seconds(self, name: str, manifest_path: Path) -> None:
+        manifest = load_manifest(manifest_path)
         timeout = manifest.collect.timeout_seconds
         assert timeout is not None and timeout > 0
 
-    def test_client_timeout_strictly_smaller_than_collect_timeout(self) -> None:
-        manifest = _manifest()
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_client_timeout_strictly_smaller_than_collect_timeout(
+        self, name: str, manifest_path: Path
+    ) -> None:
+        cfg = _db_config(name)
+        manifest = load_manifest(manifest_path)
         timeout = manifest.collect.timeout_seconds
         assert timeout is not None
         cmd = manifest.collect.command
-        token, value = "-t 5", 5
-        assert token in cmd, f"connect-timeout token {token!r} absent"
-        assert value < timeout, (value, timeout)
+        token, value = cfg["timeout_token"], cfg["timeout_value"]
+        assert token in cmd, f"{name}: connect-timeout token {token!r} absent"
+        assert value < timeout, (name, value, timeout)
 
-    def test_output_is_aggregate_scalar(self) -> None:
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_output_is_aggregate_scalar(self, name: str, manifest_path: Path) -> None:
         """Output is a pure aggregate scalar object — no array top-level field."""
 
-        manifest = _manifest()
+        manifest = load_manifest(manifest_path)
         schema = manifest.output_schema
         assert schema.get("type") == "object"
         assert _array_top_keys(schema) == []
         for field, spec in schema.get("properties", {}).items():
             ftype = spec.get("type")
             if isinstance(ftype, list):
-                assert "array" not in ftype, f"field {field!r} is an array"
+                assert "array" not in ftype, f"{name}: field {field!r} is an array"
             else:
-                assert ftype != "array", f"field {field!r} is an array"
+                assert ftype != "array", f"{name}: field {field!r} is an array"
 
 
 # --------------------------------------------------------------------------- #
@@ -298,8 +411,9 @@ class TestInheritedSingleInstanceContract:
 class TestReplicationSpecificContract:
     """Design D-6b — replication-inspector-contract items."""
 
-    def test_output_schema_normalized_triple(self) -> None:
-        manifest = _manifest()
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_output_schema_normalized_triple(self, name: str, manifest_path: Path) -> None:
+        manifest = load_manifest(manifest_path)
         schema = manifest.output_schema
         props = schema.get("properties", {})
         assert set(props) == {"replication_configured", "link_healthy", "lag_seconds"}
@@ -312,15 +426,18 @@ class TestReplicationSpecificContract:
             "lag_seconds",
         ]
 
-    def test_description_declares_link_freshness_semantic_class(self) -> None:
-        manifest = _manifest()
-        assert "link_freshness" in manifest.description
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_description_declares_lag_semantic_class(self, name: str, manifest_path: Path) -> None:
+        manifest = load_manifest(manifest_path)
+        semantic_class = _db_config(name)["semantic_class"]
+        assert semantic_class in manifest.description
 
-    def test_findings_cover_three_state_by_finding(self) -> None:
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_findings_cover_three_state_by_finding(self, name: str, manifest_path: Path) -> None:
         """Three-state replication health: unconfigured emits no finding; link-down
-        is critical; stale freshness is warn/critical by lag thresholds."""
+        is critical; lag is warn/critical by lag thresholds."""
 
-        manifest = _manifest()
+        manifest = load_manifest(manifest_path)
         findings = manifest.findings
         assert len(findings) == 3
 
@@ -343,47 +460,54 @@ class TestReplicationSpecificContract:
             if "replication_configured and not link_healthy" in when:
                 continue
             assert "link_healthy" in when, (
-                f"finding {when!r} could fire without replication_configured guard"
+                f"{name}: finding {when!r} could fire without replication_configured guard"
             )
 
-    def test_no_multi_instance_param_substrings(self) -> None:
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    def test_no_multi_instance_param_substrings(self, name: str, manifest_path: Path) -> None:
         """Parameter names must not contain multi-instance substrings."""
 
-        manifest = _manifest()
+        manifest = load_manifest(manifest_path)
         props = manifest.parameters.get("properties", {})
         for pname in props:
             for forbidden in _FORBIDDEN_MULTI_INSTANCE_SUBSTRINGS:
                 assert forbidden not in pname, (
-                    f"multi-instance substring {forbidden!r} in param {pname!r}"
+                    f"{name}: multi-instance substring {forbidden!r} in param {pname!r}"
                 )
 
     @pytest.mark.parametrize(
-        "fixture_name",
-        ["link_down.json", "link_stale.json"],
-        ids=["link_down", "link_stale"],
+        "inspector,fixture_name", _SEMANTIC_ABNORMAL_ITEMS, ids=_SEMANTIC_ABNORMAL_IDS
     )
-    def test_semantic_abnormal_fixture_exists_and_valid_json(self, fixture_name: str) -> None:
-        """Semantic-abnormal fixtures for link-down and link-stale must exist and
+    def test_semantic_abnormal_fixture_exists_and_valid_json(
+        self, inspector: str, fixture_name: str
+    ) -> None:
+        """Semantic-abnormal fixtures for link-down and lag/stale must exist and
         parse as valid JSON (recorded by the orchestrator separately)."""
 
-        path = _FIXTURES / fixture_name
-        assert path.is_file(), f"fixture missing: {path}"
+        path = _fixture_dir(inspector) / fixture_name
+        assert path.is_file(), f"{inspector}: fixture missing: {path}"
         data = json.loads(path.read_text(encoding="utf-8"))
         assert isinstance(data, dict)
 
-    async def test_semantic_abnormal_fixtures_trigger_at_defaults_and_are_distinct(self) -> None:
-        """D-6b: ``link_down`` and ``link_stale`` are TWO SEMANTICALLY DISTINCT
-        semantic-abnormal fixtures that BOTH trigger a critical at the manifest DEFAULT
-        thresholds — not merely valid JSON. ``link_down`` is a broken link
-        (``link_healthy=false``); ``link_stale`` is a stale-but-UP link
-        (``link_healthy=true``, ``lag_seconds>=critical_seconds``). A healthy-stdout
-        fixture, or two identical states, would fail here."""
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    async def test_semantic_abnormal_fixtures_trigger_at_defaults_and_are_distinct(
+        self, name: str, manifest_path: Path
+    ) -> None:
+        """D-6b: the two semantic-abnormal fixtures are SEMANTICALLY DISTINCT and
+        BOTH trigger a critical at the manifest DEFAULT thresholds — not merely
+        valid JSON. The link-down fixture has ``link_healthy=false``; the
+        lag/stale fixture has ``link_healthy=true`` with ``lag_seconds`` at or
+        above the default critical threshold."""
 
-        manifest = _manifest()
+        manifest = load_manifest(manifest_path)
         crit_default = manifest.parameters["properties"]["critical_seconds"]["default"]
+        cfg = _db_config(name)
+        replay_params = cfg["replay_params"]
+        fixtures = _fixture_dir(name)
+        link_down_name, lag_name = _SEMANTIC_ABNORMAL_FIXTURES[name]
 
-        down = ReplayTarget("replrec", fixture=_FIXTURES / "link_down.json")
-        down_result = await _runner().run(manifest, down, None)
+        down = ReplayTarget("replrec", fixture=fixtures / link_down_name)
+        down_result = await _runner().run(manifest, down, replay_params or None)
         assert down.misses == []
         assert down_result.status == "ok"
         assert down_result.output["replication_configured"] is True
@@ -391,17 +515,17 @@ class TestReplicationSpecificContract:
         assert [f.severity for f in down_result.findings] == ["critical"]
         assert "link down" in down_result.findings[0].message.lower()
 
-        stale = ReplayTarget("replrec", fixture=_FIXTURES / "link_stale.json")
-        stale_result = await _runner().run(manifest, stale, None)
-        assert stale.misses == []
-        assert stale_result.status == "ok"
-        assert stale_result.output["link_healthy"] is True
-        assert stale_result.output["lag_seconds"] is not None
-        assert stale_result.output["lag_seconds"] >= crit_default
-        assert [f.severity for f in stale_result.findings] == ["critical"]
+        lag = ReplayTarget("replrec", fixture=fixtures / lag_name)
+        lag_result = await _runner().run(manifest, lag, replay_params or None)
+        assert lag.misses == []
+        assert lag_result.status == "ok"
+        assert lag_result.output["link_healthy"] is True
+        assert lag_result.output["lag_seconds"] is not None
+        assert lag_result.output["lag_seconds"] >= crit_default
+        assert [f.severity for f in lag_result.findings] == ["critical"]
 
-        # SEMANTICALLY DISTINCT: link-down (healthy=false) vs link-up-stale (healthy=true).
-        assert down_result.output["link_healthy"] != stale_result.output["link_healthy"]
+        # SEMANTICALLY DISTINCT: link-down (healthy=false) vs link-up-lag (healthy=true).
+        assert down_result.output["link_healthy"] != lag_result.output["link_healthy"]
 
 
 class _NoBinaryTarget:
@@ -410,6 +534,9 @@ class _NoBinaryTarget:
     type = "local"
     name = "no-binary-host"
     capabilities: ClassVar[set[Capability]] = {Capability.SHELL, Capability.FILE_READ}
+
+    def __init__(self, *, required_binary: str) -> None:
+        self._required_binary = required_binary
 
     async def exec(
         self,
@@ -423,7 +550,9 @@ class _NoBinaryTarget:
             return ExecResult(
                 exit_code=1, stdout="", stderr="", duration_seconds=0.0, timed_out=False
             )
-        raise AssertionError(f"collector must not run when redis-cli is absent: {cmd!r}")
+        raise AssertionError(
+            f"collector must not run when {self._required_binary!r} is absent: {cmd!r}"
+        )
 
     async def read_file(self, path: str) -> bytes:
         raise AssertionError(f"read_file must not be reached: {path!r}")
@@ -434,23 +563,39 @@ class TestInheritedFailureClassification:
     failure three-state (requires_unmet / exception / ok) — spec req-6「复跑…失败三态…」—
     not merely the injection / secret / timeout / no-fork items."""
 
-    async def test_missing_redis_cli_requires_unmet(self) -> None:
-        result = await _runner().run(_manifest(), _NoBinaryTarget(), None)  # type: ignore[arg-type]
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    async def test_missing_client_requires_unmet(self, name: str, manifest_path: Path) -> None:
+        cfg = _db_config(name)
+        manifest = load_manifest(manifest_path)
+        result = await _runner().run(
+            manifest,
+            _NoBinaryTarget(required_binary=cfg["required_binary"]),  # type: ignore[arg-type]
+            cfg["run_params"] or None,
+        )
         assert result.status == "requires_unmet"
         assert result.findings == []
         assert any(m.startswith("bin:") for m in result.missing), result.missing
 
-    async def test_conn_refused_exception(self) -> None:
-        replay = ReplayTarget("replrec", fixture=_FIXTURES / "conn_refused.json")
-        result = await _runner().run(_manifest(), replay, {"port": 6390})
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    async def test_conn_refused_exception(self, name: str, manifest_path: Path) -> None:
+        cfg = _db_config(name)
+        manifest = load_manifest(manifest_path)
+        fixtures = _fixture_dir(name)
+        params = {**cfg["replay_params"], "port": cfg["conn_refused_port"]}
+        replay = ReplayTarget("replrec", fixture=fixtures / "conn_refused.json")
+        result = await _runner().run(manifest, replay, params)
         assert replay.misses == []
         assert result.status == "exception"
         assert result.output == {}
         assert result.findings == []
 
-    async def test_healthy_ok(self) -> None:
-        replay = ReplayTarget("replrec", fixture=_FIXTURES / "healthy.json")
-        result = await _runner().run(_manifest(), replay, None)
+    @pytest.mark.parametrize("name,manifest_path", _REPLICATION_ITEMS, ids=_REPLICATION_IDS)
+    async def test_healthy_ok(self, name: str, manifest_path: Path) -> None:
+        cfg = _db_config(name)
+        manifest = load_manifest(manifest_path)
+        fixtures = _fixture_dir(name)
+        replay = ReplayTarget("replrec", fixture=fixtures / "healthy.json")
+        result = await _runner().run(manifest, replay, cfg["replay_params"] or None)
         assert replay.misses == []
         assert result.status == "ok"
         assert result.findings == []

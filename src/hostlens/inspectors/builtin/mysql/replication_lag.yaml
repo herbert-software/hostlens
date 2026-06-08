@@ -1,0 +1,130 @@
+name: mysql.replication_lag
+version: 1.0.0
+# Replication-inspector-contract probe: replica-side apply-lag from
+# `SHOW REPLICA STATUS` (8.0.22+; 5.7-8.0.21 `SHOW SLAVE STATUS`). Mirrors
+# mysql.connection_usage's HOSTLENS_MYSQL_PWD -> MYSQL_PWD env remap (never -p<pwd>,
+# never argv). lag_seconds semantic class = apply_lag (Seconds_Behind_Source).
+description: >-
+  MySQL 复制 apply 滞后巡检(副本侧 SHOW REPLICA STATUS)。需 MySQL 8.0.22+ 与 mysql client
+  (列名前提 Replica_*/Seconds_Behind_Source,5.7-8.0.21 为 Slave_*/Seconds_Behind_Master;
+  tags 声明 mysql8)。secret 声明为 HOSTLENS_MYSQL_PWD(HOSTLENS_ 前缀对齐 ssh-execution-target
+  契约 AcceptEnv HOSTLENS_*),collector 内 remap 到 client 原生 MYSQL_PWD(从不内联、不用 -p<pwd>)。
+  巡检账户只读跑 SHOW REPLICA STATUS 需 REPLICATION CLIENT 权限(8.0+ 亦可 REPLICATION_SLAVE_ADMIN;
+  PROCESS 不足,它管 SHOW PROCESSLIST 而非 replica status)。巡检副本侧单复制通道(取
+  SHOW REPLICA STATUS 第一行;多源复制仅取第一通道,多通道聚合留前向规则)。只报归一三元组
+  (replication_configured / link_healthy / lag_seconds),不回吐高基数明细。lag_seconds 语义类为
+  apply_lag(Seconds_Behind_Source = SQL 应用线程落后秒数,NULL→null 不当 0;applier 停或追平且
+  receiver 停时 NULL,活跃追赶期返正整数)。未配置复制(空结果集)→ ok 且无 finding;链路断或滞后由
+  finding 表达。服务不可达/Access denied → status=exception(诚实);缺 mysql client → requires_unmet。
+  SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
+tags: [mysql, mysql8, service]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [mysql]
+secrets: [HOSTLENS_MYSQL_PWD]
+privilege: none
+
+parameters:
+  type: object
+  required: [user]
+  properties:
+    host:
+      type: string
+      pattern: "^[a-zA-Z0-9._-]+$"   # blocks shell injection in -h value
+      default: "127.0.0.1"
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      default: 3306
+    user:
+      type: string
+      pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"   # mysql identifier charset
+    warn_seconds:
+      type: number
+      default: 15
+    critical_seconds:
+      type: number
+      default: 30
+  additionalProperties: false
+
+collect:
+  # All derivation in the collector (Authoring Contract rule 1): the normalized
+  # replication triple is computed here; the DSL only compares ready scalars.
+  # FAIL-LOUD is ROLE-CONTEXTUAL (design W-2): an EMPTY result set from
+  # `SHOW REPLICA STATUS` is a legitimate NON-replica (standalone) instance ->
+  # unconfigured path (replication_configured=false / link_healthy=false /
+  # lag_seconds=null, status=ok, NO exit 1). A mysql client non-zero exit
+  # (down / Access denied) -> exit 1 + empty stdout -> status=exception. NEVER
+  # treat the empty result set as fail-loud.
+  #
+  # Secret declared as HOSTLENS_MYSQL_PWD (HOSTLENS_ prefix per ssh-execution-target
+  # contract); REMAPPED to the client-native MYSQL_PWD env on the invocation, read
+  # implicitly by mysql -- NEVER `-p<pwd>` (leaks in `ps`) and NEVER `{{ }}`-interpolated.
+  # `SHOW REPLICA STATUS\G` gives vertical Field: Value pairs; an empty result set
+  # yields empty stdout. host/user flow through `| sh`; port is int.
+  # --connect-timeout 5 < timeout_seconds 15 (covers TCP-connect phase).
+  #
+  # apply-stall classification (design W-1): Replica_SQL_Running=No while
+  # Replica_IO_Running=Yes -> link_healthy=false and SBS=NULL -> lag_seconds=null
+  # -> critical "link down" (NOT a lag finding), because mysql reports no SBS when
+  # the applier is stopped. This is intentional, covered by link_healthy=false.
+  command: |
+    status=$(MYSQL_PWD="${HOSTLENS_MYSQL_PWD:-}" mysql -s --connect-timeout=5 -h {{ host | sh }} -P {{ port }} -u {{ user | sh }} \
+      -e 'SHOW REPLICA STATUS\G') || { echo "mysql show replica status failed" >&2; exit 1; }
+    if [ -z "$status" ]; then
+      printf '{"replication_configured":false,"link_healthy":false,"lag_seconds":null}'
+      exit 0
+    fi
+    io=$(printf '%s\n' "$status" | awk -F': ' '/^[[:space:]]*Replica_IO_Running:/{gsub(/^[ \t]+|[ \t\r]+$/,"",$2);print $2; exit}')
+    sql=$(printf '%s\n' "$status" | awk -F': ' '/^[[:space:]]*Replica_SQL_Running:/{gsub(/^[ \t]+|[ \t\r]+$/,"",$2);print $2; exit}')
+    sbs=$(printf '%s\n' "$status" | awk -F': ' '/^[[:space:]]*Seconds_Behind_Source:/{gsub(/^[ \t]+|[ \t\r]+$/,"",$2);print $2; exit}')
+    if [ -z "$io" ] || [ -z "$sql" ]; then
+      echo "replica status columns missing (Replica_IO_Running/Replica_SQL_Running)" >&2
+      exit 1
+    fi
+    if [ "$io" = "Yes" ] && [ "$sql" = "Yes" ]; then
+      link=true
+    else
+      link=false
+    fi
+    case "$sbs" in
+      NULL|'')
+        lag=null
+        ;;
+      *[!0-9]*)
+        echo "Seconds_Behind_Source non-numeric: $sbs" >&2
+        exit 1
+        ;;
+      *)
+        lag=$sbs
+        ;;
+    esac
+    printf '{"replication_configured":true,"link_healthy":%s,"lag_seconds":%s}' "$link" "$lag"
+  timeout_seconds: 15   # client --connect-timeout 5 < collect timeout (Operational Limits)
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    replication_configured: { type: boolean }
+    link_healthy:           { type: boolean }
+    lag_seconds:            { type: [integer, "null"] }
+  required: [replication_configured, link_healthy, lag_seconds]
+  additionalProperties: false
+
+findings:
+  # Three-state replication health by-finding (design W-2): unconfigured emits no
+  # finding; link down is critical; apply lag is warn/critical by lag thresholds.
+  # DSL compares only the normalized triple -- no DB-specific raw fields.
+  - when: "replication_configured and not link_healthy"
+    severity: critical
+    message: "MySQL replication link down"
+  - when: "link_healthy and lag_seconds != None and lag_seconds >= critical_seconds"
+    severity: critical
+    message: "MySQL replication apply lag: {lag_seconds}s behind source (critical threshold {critical_seconds}s)"
+  - when: "link_healthy and lag_seconds != None and lag_seconds >= warn_seconds and lag_seconds < critical_seconds"
+    severity: warning
+    message: "MySQL replication apply lag: {lag_seconds}s behind source (warn threshold {warn_seconds}s)"

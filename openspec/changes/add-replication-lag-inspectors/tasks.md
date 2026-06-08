@@ -1,0 +1,32 @@
+## 1. mysql 录制 lane:primary+replica 拓扑
+
+- [x] 1.1 在 `tests/inspectors/compose/docker-compose.yml` 加 `mysql-repl-primary`(`mysql:8.0.40`、pin `--server-id=1 --log-bin --gtid-mode=ON --enforce-gtid-consistency=ON`)+ `mysql-repl-replica`(`--server-id=2 --gtid-mode=ON --enforce-gtid-consistency=ON --read-only`),各带 `mysqladmin ping` healthcheck;**禁固定 sleep**。验收:`docker compose config` 解析(env 桩 `HOSTLENS_MYSQL_ROOT_PW`)通过;手动 up 后 primary 可建复制账户、replica `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1; START REPLICA` 后 `SHOW REPLICA STATUS` 显示 `Replica_IO_Running=Yes`、`Replica_SQL_Running=Yes`。
+- [x] 1.2 在 `_record_mysql_replication_lag.py`(或复用 `_compose_record` helper)写共享-project 起 primary+replica + 建复制账户 + 接入复制的引导逻辑(`wait_until` poll `Replica_*_Running`,非 sleep)。验收:引导后 `Seconds_Behind_Source` 可读(数值或 NULL);teardown `compose down -v`。
+
+## 2. mysql.replication_lag manifest
+
+- [x] 2.1 写 `src/hostlens/inspectors/builtin/mysql/replication_lag.yaml`:`targets:[local,ssh]`、`requires_capabilities:[shell]`、`requires_binaries:[mysql]`、`secrets:[HOSTLENS_MYSQL_PWD]`、参数 `host`/`port`/`user`(带 pattern,user required)+ `warn_seconds`(默认 15)/`critical_seconds`(默认 30)(参数名回避 `replica`/`lag`/`primary` 等子串)。`description` 声明 `lag_seconds` 语义类=`apply_lag`(`Seconds_Behind_Source`)+ inspector 巡检账户需 `REPLICATION CLIENT`(8.0+ 亦可 `REPLICATION_SLAVE_ADMIN`;**非 `PROCESS`**)+ 版本列名前提(tags `mysql8`)。collector 跑 `SHOW REPLICA STATUS`(TSV/`\G` 解析)、在命令内派生归一三元组;secret 经 `MYSQL_PWD` remap、不进 argv、不 `-p<pwd>`(逐字对齐 `mysql.connection_usage`)。验收:`load_manifest` 通过;连接 connect-timeout < `timeout_seconds`;secret 不进 argv。
+- [x] 2.2 写 findings(三态 by-finding,W-2):未配置(空结果集)→无 finding;`replication_configured && !link_healthy`→critical「replication link down」;`link_healthy && lag_seconds>=critical_seconds`→critical;`link_healthy && lag_seconds>=warn_seconds`→warning。`lag_seconds` null-guard(`Seconds_Behind_Source` NULL→null,W-1)。验收:DSL 只比三元组标量;`output_schema` 三元组、`lag_seconds` 类型 `[integer,"null"]`。
+- [x] 2.3 「非 root 用户跑通」验收:以非 root 在本地对一个**非复制** mysql(空 `SHOW REPLICA STATUS`)实跑(经 DockerExecTarget,本地无 mysql client 时)→ status=ok、`replication_configured=false`、findings 空(W-2 未配置态)。
+
+## 3. mysql 双轨 fixture + per-probe snapshot
+
+- [x] 3.1 `_record_mysql_replication_lag.py` 产 fixture:`healthy`(link up、lag 小、默认阈值无 finding)、`finding_trigger`(`warn_seconds=0` 只证接线)、`link_down`(`STOP REPLICA IO_THREAD` 或停 primary,poll 到 `Replica_IO_Running=No` 后冻结,`link_healthy=false`;此态 SBS 可能 NULL，无所谓)、`lagging`(**唯一可行 recipe**,W-4:`STOP REPLICA SQL_THREAD` → primary 写**足量大事务**积压 relay → `START REPLICA SQL_THREAD` → **追赶期间** poll 到 `Seconds_Behind_Source>=30`〔非 NULL〕**且** `Replica_IO_Running=Yes` **且** `Replica_SQL_Running=Yes` 后冻结,`link_healthy=true`、真实 apply 滞后。**禁止「SQL_THREAD 停期间 poll SBS」——applier 停时 SBS=NULL、物理不可能**;积压须够大使 SBS 在阈值上停留 ≥ 一个 poll 周期)、`conn_refused`(关闭端口、fail-loud)。两个 semantic-abnormal **语义不同**:录制断言 `link_down` 的 `Replica_IO_Running=No`、`lagging` 的 `Replica_IO_Running=Yes && Replica_SQL_Running=Yes` 且 SBS 非 NULL 且 lag 高。**禁固定 sleep**(W-4)。验收:录制器头注释写重录步骤;readiness 全走 `wait_until`。
+- [x] 3.2 写 `tests/inspectors/test_mysql_replication_lag.py`,对每个 fixture 走 ReplayTarget 回放 + snapshot:三态覆盖(requires_unmet 无二进制 stub / ok healthy / exception conn_refused);`link_down` 默认阈值 critical「link down」;`lagging` 默认阈值按真实 `Seconds_Behind_Source` 触发(link up 分支);未配置 stub → ok+configured=false+无 finding。验收:CI 只回放;snapshot 容忍尾换行。
+- [x] 3.3 「密钥不进日志/报告」脱敏验收:`link_down`/`lagging` 录制注入复制账户密码,断言冻结 fixture 不含明文、无 per-command `env` 字段。**扫描值用 `test_mysql_replication_lag.py` 内本地定义的 secret 常量**(mirror redis per-probe 先例 `test_redis_replication_lag.py` 的 `_SPECIAL_PW`),**禁动**单实例 cohort 的 `test_service_contract_crosscheck._RECORDED_SECRET_VALUES`(那是冻结的单实例 cohort、与复制无关)。
+
+## 4. 复制 crosscheck 泛化 + 无回归核验
+
+- [x] 4.1 把 `tests/inspectors/test_replication_contract_crosscheck.py` 从硬编码 redis 单 manifest 改为枚举 `_REPLICATION_MANIFESTS`(redis.replication_lag + mysql.replication_lag)参数化(W-5):每条复跑继承项(注入安全 / secret remap 不进 argv / 失败三态 / 超时 / 无分叉 / 输出形态)+ 复制专属项(三元组 + 语义类声明 / 三态 by-finding / 两个语义不同 semantic-abnormal 默认触发)。**注**:两个 semantic-abnormal fixture 文件名**跨 DB 不同**(redis: `link_down`/`link_stale`;mysql: `link_down`/`lagging`),故枚举须带 **per-DB fixture 名映射**,不能硬编码单一文件名。加计数守卫(`==2`)。验收:redis + mysql 两条全绿;空 dict / glob 不许真空过。
+- [x] 4.2 核查无回归(继承 spike D-6 rglob 消费面):① `test_service_contract_crosscheck.py` 的 `_ALL_SERVICE_MANIFESTS`(11)/`_SECRET_SERVICE_MANIFESTS`(6)计数仍 11/6、`test_no_multi_instance_params` 不红(mysql.replication_lag 不进单实例 cohort、参数名无多实例子串)——注:11/6 是**手维显式 dict 非 glob**,故第 7 个 secret-bearing builtin **不自动并入**,核验即可不需改;② `test_builtin_capability_gate.py`(rglob)新 manifest 通过 `requires_only_static_capabilities` + 计数下界;③ `test_builtin_inspectors.py` 三个 `*_all_register_with_no_errors` 因干净加载仍绿;④ `test_service_contract_crosscheck.py:536` 的 `_ALL_FIXTURES >= 20` 下界守卫——确认其 glob 不含 `mysql_replication_lag/`(复制 fixture 放新目录、不进单实例扫描集),floor 不受影响。验收:`pytest tests/inspectors -q` 全绿(0 error),逐一点名四处。
+
+## 5. postgres 录制验证门(条件交付,W-6)
+
+- [x] 5.1 起 `pg-repl-primary` + `pg-repl-standby`(streaming replication)compose,**录制验证**副本侧 `now()-pg_last_xact_replay_timestamp()` 能否干净归一成 `apply_lag` 三元组:重点验 **idle-guard**——候选判据 `pg_is_in_recovery()` + `pg_last_wal_receive_lsn()==pg_last_wal_replay_lsn()`(本地追平)→ 0/null。**必须验证已知两漏洞能否补上**(W-6):① 相等只证本地无积压、不证与 primary 同步(receiver 断/上游 stalled 时本地可相等而 source 滞后未知);② `receive_lsn` 未流式复制时 NULL。验收:产出「干净 / 撑破」裁定 + 证据(idle / 有-workload / receiver-断 三种状态的归一输出),裁定补 receiver 健康检查 / source LSN 比对后能否干净归一,否则推 wave-3。
+- [x] 5.2 **据 5.1 结果二选一**:① **干净** → 铺 `builtin/postgres/replication_lag.yaml` + pg 双轨 fixture + `test_postgres_replication_lag.py` + 纳入 4.1 枚举(计数守卫改 `==3`)+ 覆盖矩阵 postgres 单元格=delivered;② **撑破** → 在 design「未决/裁定」与覆盖矩阵 spec 场景记录 postgres=deferred-to-wave-3(本批次 mysql-only),并起 wave-3 scaffold 占位。验收:spec 覆盖矩阵的 postgres 场景与实际交付一致(delivered 或 deferred,二者其一,不留 TBD)。
+
+## 6. 固化 + 收尾
+
+- [x] 6.1 把覆盖矩阵(redis link_freshness / mysql apply_lag / postgres 门结果)+ lag 语义异构兑现固化进 spec 的「复制 inspector 覆盖矩阵随 wave 追加冻结」需求与 design。验收:spec 含 mysql 归一 / 非复制 unconfigured / postgres 门 / crosscheck 枚举四条场景,与实现一致。
+- [x] 6.2 `openspec-cn validate add-replication-lag-inspectors --strict` 通过;临时副本实测 `openspec-cn archive` rebuild 不报中文标题 / RENAMED 类错误(本 delta 全 ADDED、不改既有 7 需求,预期无 RENAMED)。验收:两命令均 0 退出。
+- [x] 6.3 全量 `pytest tests/inspectors -q` + `mypy --strict src/hostlens` + ruff check/format 绿;PR 前按 §5.3 自评跑对抗 review(含 src manifest + 新测试 + crosscheck 泛化 + spec delta,倾向跑)。验收:CI 三检查(lint+type+test py3.11/py3.12)预期绿。
