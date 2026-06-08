@@ -2,7 +2,7 @@
 
 ## 目的
 
-定义离线诊断验证包契约——八场景诊断覆盖、每场景具备离线确定性验证、回放数据漂移必须响亮失败。
+定义 M2.8 最小可用「事故诊断包」（Incident Pack）的契约：随包提供覆盖 8 个真实运维故障场景（CPU 饱和 / 内存压力·OOM / 磁盘满·inode 耗尽 / systemd 失败单元 / 最近错误突增 / 文件描述符耗尽 / 依赖服务连通性 / TLS 证书过期）的 builtin Inspector（纯 YAML manifest + Finding DSL，不依赖 `hook.py` 或 `parse.format: sql_result`），每个场景配 `ReplayTarget` fixture + cassette 做离线确定性验证（无需 SSH / 付费 API），并要求回放数据漂移时**响亮失败**而非静默放过——确保「Agent 能诊断的第一个真实故障」始终可在干净机器上 reproduce。
 
 ## 需求
 ### 需求:八场景诊断覆盖

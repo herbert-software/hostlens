@@ -17,9 +17,9 @@
 | M2 | 手写 Agent loop | 自然语言意图 → Agent 自选 Inspector → 出 markdown 报告 | ✅ |
 | M3 | Diagnostician + 报告体系 | 跨信号关联 + 根因假设 + regression diff | ✅ |
 | M4 | Scheduler | cron 定时跑 + 历史 run 持久化 | ✅ |
-| M5 | Notifier 抽象 + Telegram + 飞书 | 定时报告自动推送到 TG / 飞书 | ⬜ |
-| M6 | 内置 Inspector 库扩充 | 覆盖 Linux/Nginx/MySQL/Redis/Docker 真实场景 | ⬜ |
-| M7 | MCP Server | Claude Code / Cursor 能直接调用 Hostlens | ⬜ |
+| M5 | Notifier 抽象 + Telegram + 飞书 | 定时报告自动推送到 TG / 飞书 | ✅ |
+| M6 | 内置 Inspector 库扩充 | 覆盖 Linux/Nginx/MySQL/Redis/Docker 真实场景 | 🚧 进行中 |
+| M7 | MCP Server | Claude Code / Cursor 能直接调用 Hostlens | ✅ |
 | M8 | Docker + K8s ExecutionTarget | 容器与集群场景 | ⬜ |
 | M9 | 受控修复（Remediation） | plan → approve → execute → rollback 闭环 | ⬜ |
 | M10 | 通道扩展 + 文档发布 | 钉钉/企微/Slack/Email/Webhook + PyPI 1.0 | ⬜ |
@@ -378,6 +378,8 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 **目标**：实现"业务通用化、可扩展"的核心证明 —— Notifier 适配器模式。内置 Telegram 和飞书两个通道，做好抽象让后续加通道只是"新增一个文件"。
 
+**状态：✅ 已落地**。`notifiers/{base,config,routing,telegram,lark}.py` + Jinja2 模板 —— Notifier Protocol + Channel registry / Telegram（MarkdownV2）+ 飞书 Lark（HMAC 签名）/ `notifiers.yaml`（`${ENV_VAR}` 注入）+ `only_if` 路由 / Scheduler↔Notifier 接线（失败隔离不冒泡）/ `hostlens notify channels/render/test` + `doctor --check-channels`。已归档 `add-notifier-channels`。钉钉 / 企微 / Slack / Email / 通用 Webhook 仅靠 Protocol + registry 预留扩展点，本期未写适配器（留 M10）。
+
 **对应 OpenSpec proposal**：
 - `add-notifier-abstraction`
 - `add-telegram-notifier`
@@ -423,9 +425,11 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 **目标**：让 Hostlens 在真实运维场景下"能用"。按故障域组织 Inspector 矩阵，明确每个域的覆盖度，避免"看起来很多但盲区也很多"。
 
-**对应 OpenSpec proposal**：`expand-builtin-inspectors`（按域分多个 sub-proposal）
+**对应 OpenSpec proposal**：按域分多个 sub-proposal（已落地 wave，见下）
 
 **退出条件**：覆盖矩阵下每个域至少有 3 个 Inspector，总计 ≥40 个，每个 Inspector 有 manifest + snapshot 测试 + 在 `examples/` 里有可 replay 的 fixture。
+
+**状态：🚧 进行中（主体已成型）**。已通过多个 inspector wave 增量交付，当前 `src/hostlens/inspectors/builtin/` 下 **53 个** inspector（总数已过 ≥40 门槛），核心域（计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/log/系统）已覆盖。已归档 change：`add-inspector-authoring-contract`、`add-os-shell-inspectors-wave1`、`add-service-inspector-contract-spike`、`add-single-instance-service-inspectors`、`add-log-and-fault-service-inspectors`、`add-replication-inspector-spike`、`add-replication-lag-inspectors`、`add-postgres-replication-lag-inspector`。**剩余域（达退出条件前待补）**：security 基线（failed_logins / sudo_history / unexpected_listen）、包管理（pending_updates / security_patches）、TLS chain validity、语言运行时（JVM / Go）、部分 DB（mysql/redis replication_lag、redis.slowlog 的 seed 漂移迁移）；K8s 域待 **M8** target 就位。
 
 ### 覆盖矩阵
 
@@ -474,9 +478,11 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 **目标**：把 Hostlens 暴露成 MCP server，让 Claude Code / Cursor 把它当作工具调用。
 
-**对应 OpenSpec proposal**：`add-mcp-server`
+**对应 OpenSpec proposal**：`add-mcp-server-surface`（已归档 `2026-06-08-add-mcp-server-surface`）
 
 **退出条件**：Claude Code 配置 Hostlens 后，能在对话里直接说"帮我巡检 prod-web-01"并看到完整工具调用链。
+
+**状态：✅ 已落地（M7）**。`src/hostlens/mcp_server/{tools_adapter.py, server.py}` + `cli/mcp.py`：`McpToolsAdapter`（`list_for_mcp` 投影 + 九步 `dispatch`）、`build_server`（eager fail-closed 自检）+ `run_stdio` stdio server、`hostlens mcp serve`、`doctor checks.mcp`（非致命）。只读三件套（`list_inspectors` / `list_targets` / `run_inspector`）显式 opt-in `"mcp"` surface；fail-closed `sensitive_output` 三处对称；`mcp` 为 optional-dep（`pip install "hostlens[mcp]"`）。**实际交付与下方原计划的差异**：①**stdio-only**，HTTP transport（原 7.4）+ 远程鉴权列为 Non-Goal；②**未做 Resources 暴露**（原 7.3 `hostlens://reports|inspectors` 留待有需求时另提案）；③只读三件套，未新增 `run_inspection`/`get_report`/`list_recent_runs`（原 7.2 备选）。下方任务清单是**原始规划**，保留作历史；实际落地以归档 spec 为准。
 
 ### 任务
 
