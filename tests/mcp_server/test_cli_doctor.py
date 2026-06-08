@@ -48,6 +48,35 @@ def test_serve_missing_mcp_sdk_exits_1_with_hint(
     assert "Traceback" not in result.stderr
 
 
+def test_serve_build_server_policy_violation_exits_1_cleanly(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A registry whose mcp-surface tool forgot to declare sensitive_output makes
+    # build_server's eager fail-closed check raise; serve must surface that as a
+    # clean exit 1, not a raw traceback.
+    import hostlens.cli.mcp as mcp_cli
+    from hostlens.core.exceptions import ToolPolicyViolation
+
+    def _build_raises(*_args: Any, **_kwargs: Any) -> Any:
+        raise ToolPolicyViolation(
+            tool_name="undeclared_mcp",
+            surface="mcp",
+            violated_field="sensitive_output",
+            reason="sensitive_output_not_declared",
+        )
+
+    async def _never_run(_server: Any) -> None:  # pragma: no cover - unreached
+        raise AssertionError("run_stdio must not run when build_server raised")
+
+    monkeypatch.setattr(mcp_cli, "_import_mcp_server", lambda: (_build_raises, _never_run))
+
+    result = runner.invoke(app, ["mcp", "serve"])
+    assert result.exit_code == 1, result.stdout + result.stderr
+    assert "refused to start" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_doctor_json_includes_mcp_check_ok(runner: CliRunner) -> None:
     if importlib.util.find_spec("mcp") is None:
         pytest.skip("mcp SDK not installed in test environment")

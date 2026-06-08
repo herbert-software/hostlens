@@ -20,7 +20,7 @@ import typer
 from pydantic import ValidationError
 
 from hostlens.core.config import Settings, load_settings
-from hostlens.core.exceptions import ConfigError
+from hostlens.core.exceptions import ConfigError, ToolPolicyViolation
 from hostlens.core.logging import configure_logging
 from hostlens.inspectors.registry import InspectorRegistry, build_registry_from_search_paths
 from hostlens.targets.config import TargetsConfig, load_targets_config
@@ -129,5 +129,13 @@ def serve_cmd() -> None:
     register_default_tools(registry)
     context_factory = _context_factory(settings, target_registry, inspector_registry, logger)
 
-    server = build_server(registry, context_factory)
+    # build_server eager-runs the fail-closed projection self-check; a registry
+    # whose mcp-surface tool forgot to declare sensitive_output raises here.
+    # Surface that as a clean exit, not a raw traceback.
+    try:
+        server = build_server(registry, context_factory)
+    except ToolPolicyViolation as exc:
+        typer.echo(f"hostlens mcp serve: refused to start — {exc}", err=True)
+        raise typer.Exit(code=1) from None
+
     asyncio.run(run_stdio(server))

@@ -138,6 +138,23 @@ async def test_call_tool_list_inspectors_success(
     assert len(payload["inspectors"]) >= 1
 
 
+async def test_call_tool_no_args_payload_succeeds_for_noarg_tool(
+    tool_context_factory: Callable[..., ToolContext],
+) -> None:
+    # The MCP SDK passes arguments=None when a client invokes a tool with no
+    # params; the handler must normalize that to {} so a no-arg tool validates
+    # an empty input instead of erroring on model_validate(None).
+    reg = _default_registry_with_agent_only_probe()
+    server = build_server(reg, tool_context_factory)
+
+    async with create_connected_server_and_client_session(server) as session:
+        result = await session.call_tool("list_inspectors", None)
+
+    assert result.isError is False
+    payload = json.loads(_text_from_result(result))
+    assert "inspectors" in payload
+
+
 async def test_call_tool_unregistered_name_returns_is_error(
     tool_context_factory: Callable[..., ToolContext],
 ) -> None:

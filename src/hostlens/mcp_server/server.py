@@ -57,11 +57,14 @@ def build_server(
     @server.call_tool(validate_input=False)  # type: ignore[untyped-decorator]
     async def handle_call_tool(
         name: str,
-        arguments: dict[str, Any],
+        arguments: dict[str, Any] | None,
     ) -> list[ContentBlock] | CallToolResult:
+        # The MCP SDK passes arguments=None when a client calls a tool with no
+        # params; normalize so no-arg tools (e.g. list_inspectors) validate an
+        # empty dict instead of erroring on model_validate(None).
         ctx = context_factory()
         try:
-            result = await adapter.dispatch(name, arguments, ctx)
+            result = await adapter.dispatch(name, arguments or {}, ctx)
         except asyncio.CancelledError:
             raise
         except (ToolPolicyViolation, KeyError, TypeError, ToolError) as exc:
