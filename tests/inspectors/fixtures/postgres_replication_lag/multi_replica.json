@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v psql",
+      "stdout": "/usr/local/bin/psql\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "raw=$(PGPASSWORD=\"${HOSTLENS_POSTGRES_PASSWORD:-}\" PGCONNECT_TIMEOUT=5 \\\n  psql -tA -F'|' -h 127.0.0.1 -p 5432 -U postgres -d postgres \\\n  -c \"SELECT count(*), bool_and(coalesce(state::text,'') = 'streaming'), FLOOR(EXTRACT(EPOCH FROM max(replay_lag)))::bigint FROM pg_stat_replication\") \\\n  || { echo \"psql replication_lag failed\" >&2; exit 1; }\ncnt=$(printf '%s' \"$raw\" | awk -F'|' 'NR==1{print $1}')\nlink_raw=$(printf '%s' \"$raw\" | awk -F'|' 'NR==1{print $2}')\nlag_raw=$(printf '%s' \"$raw\" | awk -F'|' 'NR==1{print $3}')\ncase \"$cnt\" in ''|*[!0-9]*) echo \"replication count non-numeric: $cnt\" >&2; exit 1;; esac\nif [ \"$cnt\" -eq 0 ]; then\n  printf '{\"replication_configured\":false,\"link_healthy\":false,\"lag_seconds\":null}'\n  exit 0\nfi\ncase \"$link_raw\" in\n  t) link=true ;;\n  *) link=false ;;\nesac\ncase \"$lag_raw\" in\n  ''|*[!0-9-]*)\n    lag=null\n    ;;\n  *)\n    lag=$lag_raw\n    ;;\nesac\nprintf '{\"replication_configured\":true,\"link_healthy\":%s,\"lag_seconds\":%s}' \"$link\" \"$lag\"",
+      "stdout": "{\"replication_configured\":true,\"link_healthy\":false,\"lag_seconds\":30}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

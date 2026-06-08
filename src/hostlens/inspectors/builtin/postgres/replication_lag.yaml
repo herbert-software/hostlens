@@ -1,0 +1,141 @@
+name: postgres.replication_lag
+version: 1.0.0
+# Replication-inspector-contract probe: primary-side apply-lag from
+# pg_stat_replication (one row per online standby/walsender). Mirrors
+# postgres.connection_usage's HOSTLENS_POSTGRES_PASSWORD -> PGPASSWORD env remap
+# (never -W, never argv). lag_seconds semantic class = apply_lag (replay_lag).
+description: >-
+  PostgreSQL 复制 apply 滞后巡检(主库侧 pg_stat_replication)。需 psql client;secret 声明
+  HOSTLENS_POSTGRES_PASSWORD(HOSTLENS_ 前缀对齐 ssh-execution-target 契约 AcceptEnv HOSTLENS_*),
+  collector 内 remap 到 client 原生 PGPASSWORD(从不内联、不用 -W)。硬前提:巡检账户需 pg_monitor
+  或 superuser,否则 replay_lag 列读成 NULL → 与空闲追平不可区分 → 静默假健康(类比 mysql
+  REPLICATION CLIENT)。**必须指向 primary(主库)**:若按 mysql/redis 习惯指向 standby,standby 上
+  pg_stat_replication 为空 → replication_configured=false → 假「未配置 ok」静默误导。主库侧
+  pg_stat_replication 亦含逻辑复制 walsender 行(state/replay_lag 同形),本 inspector 一并纳入、
+  不区分物理 standby 与逻辑订阅者。只报归一三元组(replication_configured / link_healthy /
+  lag_seconds),多行 per-replica 在 collector 内 SQL 聚合归约,DSL 只比标量。lag_seconds 语义类为
+  apply_lag(replay_lag = 主库单时钟测得的 WAL 应用滞后,FLOOR 取整秒,NULL→null 不当 0)。
+  link_healthy=AND_over_rows(state=='streaming');pg_stat_replication.state 全集为
+  {streaming,catchup,startup,backup,stopping},仅 streaming 算健康,其余一律 false→critical。
+  接受的误报集:{catchup,startup,backup,stopping}——非 streaming 副本当下不提供 apply-lag 保护、
+  值得在快照里浮出;startup/stopping/backup 多为瞬态或一次性操作、单次调度命中率低;若给宽限则
+  link_down 语义无处可造(主库侧物理断开=行消失=空集测不到)。意外/未知 state 值偏 fail-safe 判
+  false。link_healthy=false 时 lag_seconds 可能反映健康 streaming 行、仅作信息不作故障判据。
+  主库侧空集(零在线 standby)无法区分单机主库与副本全断,一律 ok 无 finding;副本全断检测留给
+  副本侧 receiver-health 或外部拓扑(本仓当前无该 inspector、无本期计划)。未配置复制(空集)→ ok
+  且无 finding;链路断或滞后由 finding 表达。服务不可达/认证失败 → status=exception;缺 psql →
+  requires_unmet。SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
+tags: [postgres, service]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [psql]
+secrets: [HOSTLENS_POSTGRES_PASSWORD]
+privilege: none
+
+parameters:
+  type: object
+  required: [user]
+  properties:
+    host:
+      type: string
+      pattern: "^[a-zA-Z0-9._-]+$"          # blocks injection in -h value
+      default: "127.0.0.1"
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      default: 5432
+    user:
+      type: string
+      pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+    dbname:
+      type: string
+      pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+      default: "postgres"
+    warn_seconds:
+      type: number
+      default: 15
+    critical_seconds:
+      type: number
+      default: 30
+  additionalProperties: false
+
+collect:
+  # All derivation in the collector (Authoring Contract rule 1): multi-row
+  # pg_stat_replication is reduced via a SINGLE SQL aggregate round-trip;
+  # shell only does empty-set short-circuit and JSON shaping — NO per-row awk.
+  #
+  # FAIL-LOUD is ROLE-CONTEXTUAL (design W3-4): an EMPTY pg_stat_replication
+  # (zero online standbys) is a legitimate unconfigured path on the primary ->
+  # (replication_configured=false / link_healthy=false / lag_seconds=null,
+  # status=ok, NO exit 1). psql non-zero (down / auth) -> exit 1 + empty stdout
+  # -> status=exception. NEVER treat the empty set as fail-loud.
+  #
+  # Secret HOSTLENS_POSTGRES_PASSWORD remapped to client-native PGPASSWORD on the
+  # psql invocation (never -W/inline). PGCONNECT_TIMEOUT=5 < timeout_seconds 15.
+  # -tA = tuples-only, unaligned; one round-trip returns "count|bool|lag" via |
+  # field sep, parsed on a SEPARATE line (command-sub, not a pipe — piping
+  # psql|awk would inspect awk's exit and mask a psql failure).
+  #
+  # Empty-set guard (W3-3): SQL aggregate over empty pg_stat_replication returns
+  # (0, NULL, NULL) — bool_and over empty is NULL, not true. Shell MUST short-
+  # circuit on count==0 BEFORE trusting any aggregate scalar.
+  #
+  # bool_and NULL-state (L1): bare bool_and(state='streaming') ignores NULL rows
+  # -> false healthy; MUST use bool_and(coalesce(state::text,'')='streaming').
+  #
+  # psql -tA renders boolean as t/f (not JSON true/false); map t->true, else->false.
+  # psql NULL renders empty string; lag field empty -> lag_seconds=null.
+  command: |
+    raw=$(PGPASSWORD="${HOSTLENS_POSTGRES_PASSWORD:-}" PGCONNECT_TIMEOUT=5 \
+      psql -tA -F'|' -h {{ host | sh }} -p {{ port }} -U {{ user | sh }} -d {{ dbname | sh }} \
+      -c "SELECT count(*), bool_and(coalesce(state::text,'') = 'streaming'), FLOOR(EXTRACT(EPOCH FROM max(replay_lag)))::bigint FROM pg_stat_replication") \
+      || { echo "psql replication_lag failed" >&2; exit 1; }
+    cnt=$(printf '%s' "$raw" | awk -F'|' 'NR==1{print $1}')
+    link_raw=$(printf '%s' "$raw" | awk -F'|' 'NR==1{print $2}')
+    lag_raw=$(printf '%s' "$raw" | awk -F'|' 'NR==1{print $3}')
+    case "$cnt" in ''|*[!0-9]*) echo "replication count non-numeric: $cnt" >&2; exit 1;; esac
+    if [ "$cnt" -eq 0 ]; then
+      printf '{"replication_configured":false,"link_healthy":false,"lag_seconds":null}'
+      exit 0
+    fi
+    case "$link_raw" in
+      t) link=true ;;
+      *) link=false ;;
+    esac
+    case "$lag_raw" in
+      ''|*[!0-9-]*)
+        lag=null
+        ;;
+      *)
+        lag=$lag_raw
+        ;;
+    esac
+    printf '{"replication_configured":true,"link_healthy":%s,"lag_seconds":%s}' "$link" "$lag"
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    replication_configured: { type: boolean }
+    link_healthy:           { type: boolean }
+    lag_seconds:            { type: [integer, "null"] }
+  required: [replication_configured, link_healthy, lag_seconds]
+  additionalProperties: false
+
+findings:
+  # Three-state replication health by-finding (design W3-2): unconfigured emits no
+  # finding; link down is critical; apply lag is warn/critical by lag thresholds.
+  # DSL compares only the normalized triple -- no DB-specific raw fields.
+  - when: "replication_configured and not link_healthy"
+    severity: critical
+    message: "PostgreSQL replication link down (standby not streaming)"
+  - when: "link_healthy and lag_seconds != None and lag_seconds >= critical_seconds"
+    severity: critical
+    message: "PostgreSQL replication apply lag: {lag_seconds}s behind primary (critical threshold {critical_seconds}s)"
+  - when: "link_healthy and lag_seconds != None and lag_seconds >= warn_seconds and lag_seconds < critical_seconds"
+    severity: warning
+    message: "PostgreSQL replication apply lag: {lag_seconds}s behind primary (warn threshold {warn_seconds}s)"

@@ -78,6 +78,7 @@ def _builtin_root() -> Path:
 _REPLICATION_MANIFESTS: dict[str, Path] = {
     "redis.replication_lag": _builtin_root() / "redis" / "replication_lag.yaml",
     "mysql.replication_lag": _builtin_root() / "mysql" / "replication_lag.yaml",
+    "postgres.replication_lag": _builtin_root() / "postgres" / "replication_lag.yaml",
 }
 _REPLICATION_IDS = sorted(_REPLICATION_MANIFESTS)
 _REPLICATION_ITEMS = sorted(_REPLICATION_MANIFESTS.items())
@@ -85,11 +86,13 @@ _REPLICATION_ITEMS = sorted(_REPLICATION_MANIFESTS.items())
 _REPL_FIXTURE_DIR: dict[str, Path] = {
     "redis.replication_lag": Path(__file__).parent / "fixtures" / "redis_replication_lag",
     "mysql.replication_lag": Path(__file__).parent / "fixtures" / "mysql_replication_lag",
+    "postgres.replication_lag": Path(__file__).parent / "fixtures" / "postgres_replication_lag",
 }
 _SEMANTIC_ABNORMAL_FIXTURES: dict[str, tuple[str, str]] = {
     # (link_down_fixture, lag/stale_fixture) — link_healthy False vs True
     "redis.replication_lag": ("link_down.json", "link_stale.json"),
     "mysql.replication_lag": ("link_down.json", "lagging.json"),
+    "postgres.replication_lag": ("link_down.json", "lagging.json"),
 }
 
 # Per-DB connection / secret / timeout / replay expectations.
@@ -119,6 +122,20 @@ _REPLICATION_DB_CONFIG: dict[str, dict[str, Any]] = {
         "conn_refused_port": 13399,
         "run_params": {"user": "mon"},
         "replay_params": {"user": "mon"},
+    },
+    "postgres.replication_lag": {
+        "secret_env": "HOSTLENS_POSTGRES_PASSWORD",
+        "client_native_env": "PGPASSWORD",
+        # postgres routes the secret via the PGPASSWORD env (never -W / inline).
+        "forbidden_flags": ("-W", "--password"),
+        "timeout_token": "PGCONNECT_TIMEOUT=5",
+        "timeout_value": 5,
+        "semantic_class": "apply_lag",
+        "required_binary": "psql",
+        "benign_host": "pg.internal",
+        "conn_refused_port": 15439,
+        "run_params": {"user": "postgres"},
+        "replay_params": {"user": "postgres"},
     },
 }
 
@@ -223,6 +240,7 @@ _UNCONFIGURED_OK_STDOUT = '{"replication_configured":false,"link_healthy":false,
 def _replication_secret_envs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOSTLENS_REDIS_PASSWORD", "")
     monkeypatch.setenv("HOSTLENS_MYSQL_PWD", "p w*d")
+    monkeypatch.setenv("HOSTLENS_POSTGRES_PASSWORD", "p w*d")
 
 
 # --------------------------------------------------------------------------- #
@@ -235,7 +253,7 @@ def test_replication_manifests_non_empty_before_parametrize() -> None:
 
 
 def test_replication_manifests_count_frozen() -> None:
-    assert len(_REPLICATION_MANIFESTS) == 2, sorted(_REPLICATION_MANIFESTS)
+    assert len(_REPLICATION_MANIFESTS) == 3, sorted(_REPLICATION_MANIFESTS)
 
 
 def test_replication_manifest_paths_exist() -> None:
@@ -245,7 +263,7 @@ def test_replication_manifest_paths_exist() -> None:
 
 
 def test_at_least_two_semantic_abnormal_fixtures_mapped() -> None:
-    assert len(_SEMANTIC_ABNORMAL_ITEMS) >= 4, _SEMANTIC_ABNORMAL_ITEMS
+    assert len(_SEMANTIC_ABNORMAL_ITEMS) >= 6, _SEMANTIC_ABNORMAL_ITEMS
 
 
 # --------------------------------------------------------------------------- #
@@ -599,3 +617,75 @@ class TestInheritedFailureClassification:
         assert replay.misses == []
         assert result.status == "ok"
         assert result.findings == []
+
+
+# --------------------------------------------------------------------------- #
+# postgres-specific assertions (master-side reduction / empty-set / prereqs).
+# These cover the postgres single-carrier fixtures that other DBs do not have
+# (multi_replica / unconfigured / underprivileged_all) plus the documented
+# prerequisites that have no other mechanical gate.
+# --------------------------------------------------------------------------- #
+_PG = "postgres.replication_lag"
+
+
+def test_postgres_description_declares_pg_monitor_and_primary() -> None:
+    """W3-6/W3-7: the postgres description MUST state the pg_monitor prerequisite
+    and the 'point at primary' topology — the under-priv false-healthy and the
+    topology-inversion misuse have no other mechanical gate, so the loud
+    documentation is the safeguard."""
+    desc = load_manifest(_REPLICATION_MANIFESTS[_PG]).description.lower()
+    assert "pg_monitor" in desc, desc
+    assert "primary" in desc, desc
+
+
+async def test_postgres_multi_replica_reduction_nontrivial() -> None:
+    """W3-1/W3-10: the frozen multi_replica fixture exercises the master-side
+    reduction non-trivially — link_healthy=false comes from a non-streaming row
+    (AND over a mixed set) and lag_seconds is the MAX of the distinct non-NULL
+    streaming lags (>= default critical), not an identity over a single row."""
+    manifest = load_manifest(_REPLICATION_MANIFESTS[_PG])
+    crit = manifest.parameters["properties"]["critical_seconds"]["default"]
+    target = ReplayTarget("replrec", fixture=_fixture_dir(_PG) / "multi_replica.json")
+    result = await _runner().run(manifest, target, _db_config(_PG)["replay_params"])
+    assert target.misses == []
+    assert result.status == "ok"
+    assert result.output["replication_configured"] is True
+    assert result.output["link_healthy"] is False  # AND over a non-streaming row
+    assert result.output["lag_seconds"] is not None
+    assert result.output["lag_seconds"] >= crit  # max picked the large streaming lag
+    assert [f.severity for f in result.findings] == ["critical"]
+    assert "link down" in result.findings[0].message.lower()
+
+
+async def test_postgres_unconfigured_empty_set_is_ok_no_finding() -> None:
+    """W3-3/W3-4: empty pg_stat_replication -> (false,false,null), status ok, no
+    finding (vacuous-true guard; master-side cannot distinguish single-primary
+    from total standby disconnect — it does not fabricate health)."""
+    manifest = load_manifest(_REPLICATION_MANIFESTS[_PG])
+    target = ReplayTarget("replrec", fixture=_fixture_dir(_PG) / "unconfigured.json")
+    result = await _runner().run(manifest, target, _db_config(_PG)["replay_params"])
+    assert target.misses == []
+    assert result.status == "ok"
+    assert result.output == {
+        "replication_configured": False,
+        "link_healthy": False,
+        "lag_seconds": None,
+    }
+    assert result.findings == []
+
+
+async def test_postgres_underprivileged_all_is_loud_critical_not_silent() -> None:
+    """W3-6/L1: a CONNECT-only account reads state columns as NULL; the collector's
+    bool_and(coalesce(state,'')='streaming') maps NULL -> false -> link_healthy
+    false -> critical (LOUD, prompts investigation), NOT a silent false-healthy.
+    A bare bool_and(state='streaming') would ignore the NULL rows and report
+    healthy — this fixture is the regression guard for the coalesce neutralisation."""
+    manifest = load_manifest(_REPLICATION_MANIFESTS[_PG])
+    target = ReplayTarget("replrec", fixture=_fixture_dir(_PG) / "underprivileged_all.json")
+    # Recorded as the CONNECT-only role 'lowmon' (the under-privileged account),
+    # so the frozen collector command renders -U lowmon — replay with that user.
+    result = await _runner().run(manifest, target, {"user": "lowmon"})
+    assert target.misses == []
+    assert result.status == "ok"
+    assert result.output["link_healthy"] is False
+    assert [f.severity for f in result.findings] == ["critical"]

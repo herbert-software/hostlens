@@ -339,3 +339,69 @@ services:
       interval: 2s
       timeout: 4s
       retries: 45
+
+  # === wave-3 postgres replication ===
+  # pg-repl-primary + 3 standbys — primary-side topology for `postgres.replication_lag`
+  # fixture recording. The recorder brings up the SHARED project, appends
+  # `host replication all all trust` to the primary's pg_hba.conf + reloads (trust
+  # only adds `host all all all trust`, NOT a replication line — gate-probed), then
+  # the standbys' `until pg_basebackup` retry loop succeeds. 3 standbys give the
+  # multi_replica single-carrier topology (>=2 distinct streaming + 1 backup walsender;
+  # spec requires max & AND both non-trivial in ONE fixture). wal_keep_size=1024MB
+  # retains WAL so a network-disconnected standby can catch up via streaming (the
+  # non-streaming row via throttled pg_basebackup -> holdable state='backup'
+  # (catchup too transient on fast loopback). recovery_min_apply_delay drives the lagging fixture (streaming
+  # + growing replay_lag). pg16 column names: pg_stat_replication.{state,replay_lag}.
+  pg-repl-primary:
+    image: postgres@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    command: ["postgres", "-c", "wal_level=replica", "-c", "max_wal_senders=10", "-c", "wal_keep_size=1024MB"]
+    environment:
+      POSTGRES_PASSWORD: ${HOSTLENS_PG_ROOT_PW:?recorder must export HOSTLENS_PG_ROOT_PW}
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: hostlens
+    ports:
+      - "15440:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "hostlens"]
+      interval: 2s
+      timeout: 4s
+      retries: 45
+
+  pg-repl-standby:
+    image: postgres@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    user: postgres
+    # Build the standby via pg_basebackup -Xs -R (writes standby.signal +
+    # primary_conninfo), retrying until the primary's replication hba line is in
+    # place; then exec the entrypoint (populated PGDATA -> skips initdb -> starts
+    # in recovery). docker stop/start would re-run this and re-basebackup (state
+    # stuck at 'backup') — the recorder induces a non-streaming row via a throttled
+    # pg_basebackup (holdable 'backup' walsender) instead.
+    command: &pg_standby_cmd
+      - bash
+      - -c
+      - "rm -rf /var/lib/postgresql/data/* ; until pg_basebackup -h pg-repl-primary -U postgres -D /var/lib/postgresql/data -Xs -R; do echo 'basebackup retry (waiting for primary replication hba)'; sleep 2; done ; exec docker-entrypoint.sh postgres"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 4s
+      retries: 60
+
+  pg-repl-standby-2:
+    image: postgres@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    user: postgres
+    command: *pg_standby_cmd
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 4s
+      retries: 60
+
+  pg-repl-standby-3:
+    image: postgres@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    user: postgres
+    command: *pg_standby_cmd
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 4s
+      retries: 60
