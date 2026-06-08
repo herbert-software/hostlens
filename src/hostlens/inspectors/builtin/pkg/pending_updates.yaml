@@ -1,0 +1,80 @@
+name: pkg.pending_updates
+version: 1.0.0
+description: >-
+  Count packages with a pending upgrade. Adapts to the host package manager
+  inside the collector via `command -v` (Debian/Ubuntu `apt-get -s upgrade`,
+  RHEL/Fedora `dnf check-update`); hosts with neither fail loud
+  (status=exception), never a fake 0 count. The apt count is an exact
+  `grep -c '^Inst'` on a simulated upgrade (not `wc -l`) so dry-run noise lines
+  are not miscounted as upgrades.
+tags: [linux, pkg, packages, apt, dnf]
+targets: [local, ssh]
+requires_capabilities: [shell]
+# Only the always-present text tools are required at preflight. apt-get / dnf
+# are NOT listed: hardcoding either makes the other distro family fail
+# preflight with requires_unmet, hardcoding both makes BOTH families fail.
+# `sh` is the interpreter, not a `command -v`-probed semantic tool, so it is
+# not listed either (wave-1 convention: requires_binaries holds real tools).
+# Package-manager presence is decided in-collector by `command -v` + fail-loud.
+requires_binaries: [awk, grep]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    threshold:
+      type: integer
+      default: 0
+  additionalProperties: false
+
+collect:
+  # FAIL-LOUD + pipe-safe (Authoring Contract rule 8 / design D-6).
+  #
+  # D-6.1 (pipe-safe): a bare `apt-get -s upgrade | grep -c '^Inst'` pipeline
+  # exits with grep's code only, so an apt-get failure (dpkg lock / corrupt
+  # metadata / network) is swallowed and yields a fake 0 count — the pkg
+  # false-negative root cause. So the main command output is captured into a
+  # `raw=$()` variable and its exit code checked on the command itself BEFORE
+  # any pipe; the `grep -c` then runs on the variable.
+  #
+  # D-6.4 (in-branch fail-loud): apt/dnf existing but its command failing must
+  # `exit 1` → exception, not a silent 0.
+  #
+  # D-6.3 (dnf 100 exemption): `dnf check-update` returns exit 100 when there
+  # ARE updates, 0 when none, other codes for real errors — so its fail-loud
+  # exempts 100 only. This exemption is scoped to `check-update`; it is NOT
+  # applied to dnf updateinfo/versionlock (other inspectors), which return 0.
+  command: |
+    if command -v apt-get >/dev/null 2>&1; then
+      raw=$(apt-get -s upgrade 2>/dev/null) \
+        || { echo "apt-get -s upgrade failed" >&2; exit 1; }
+      count=$(printf '%s\n' "$raw" | grep -c '^Inst' || true)
+    elif command -v dnf >/dev/null 2>&1; then
+      raw=$(dnf check-update -q 2>/dev/null); rc=$?
+      [ $rc -eq 0 ] || [ $rc -eq 100 ] \
+        || { echo "dnf check-update failed (rc=$rc)" >&2; exit 1; }
+      count=$(printf '%s\n' "$raw" | grep -c '^[a-zA-Z0-9]' || true)
+    else
+      echo "no package manager (apt-get/dnf) found" >&2
+      exit 1
+    fi
+    printf '{"pending":%d}' "$count"
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    pending: { type: integer }
+  required: [pending]
+  additionalProperties: false
+
+findings:
+  # `pending` is a ready scalar; the DSL only does a threshold comparison.
+  # The message carries no `{pending}` (str.format cannot call functions in
+  # `{}`); the count stays in `when`.
+  - when: "pending > threshold"
+    severity: warning
+    message: "Pending package upgrades exceed the threshold (see pending for the count)"

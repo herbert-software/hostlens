@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v grep",
+      "stdout": "/usr/bin/grep\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "if command -v apt-mark >/dev/null 2>&1; then\n  raw=$(apt-mark showhold 2>/dev/null) \\\n    || { echo \"apt-mark showhold failed\" >&2; exit 1; }\nelif command -v dnf >/dev/null 2>&1; then\n  raw=$(dnf versionlock list 2>/dev/null) \\\n    || { echo \"dnf versionlock list failed\" >&2; exit 1; }\nelse\n  echo \"no package manager (apt-mark/dnf) found\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$raw\" | awk '\n  function esc(s){ gsub(/\\\\/,\"\\\\\\\\\",s); gsub(/\"/,\"\\\\\\\"\",s); return s }\n  BEGIN{ printf \"{\\\"results\\\":[\"; sep=\"\" }\n  {\n    pkg=$1\n    if (pkg != \"\") {\n      printf \"%s{\\\"package\\\":\\\"%s\\\"}\", sep, esc(pkg)\n      sep=\",\"\n    }\n  }\n  END{ printf \"]}\" }\n'",
+      "stdout": "{\"results\":[]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

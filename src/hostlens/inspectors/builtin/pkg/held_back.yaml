@@ -1,0 +1,84 @@
+name: pkg.held_back
+version: 1.0.0
+description: >-
+  List packages held back from upgrade (Debian/Ubuntu `apt-mark showhold`,
+  RHEL/Fedora `dnf versionlock list`). Adapts to the host package manager
+  inside the collector via `command -v`; hosts with neither fail loud
+  (status=exception). A held/pinned package can silently block a critical
+  upgrade (including a security patch), so the full list goes to the output.
+tags: [linux, pkg, packages, hold, apt, dnf]
+targets: [local, ssh]
+requires_capabilities: [shell]
+# See pkg.pending_updates: apt-get / dnf (and `apt-mark`) are NOT in
+# requires_binaries — hardcoding a package-manager tool breaks the other
+# distro family at preflight. Package-manager presence is decided in-collector
+# via `command -v` + fail-loud. Only the always-present text tools are listed.
+requires_binaries: [awk, grep]
+privilege: none
+
+collect:
+  # FAIL-LOUD (Authoring Contract rule 8 / design D-6.4).
+  #
+  # `apt-mark showhold` EMPTY OUTPUT IS AMBIGUOUS: "no held packages" and
+  # "the command failed" both produce empty stdout. So success/failure MUST be
+  # decided by the captured exit code (`raw=$(apt-mark showhold) || exit 1`),
+  # NEVER inferred from emptiness. Empty + rc==0 is an honest `{"results":[]}`.
+  #
+  # `dnf versionlock list` does NOT use the exit-100 convention (that is
+  # `dnf check-update` only) — it returns 0 normally — so the dnf branch uses
+  # the STANDARD `|| exit 1`. The `versionlock` plugin may be absent; if so dnf
+  # exits non-zero → fail-loud → exception (honest, not a fake empty list).
+  #
+  # `parse.format: json` needs a top-level object, so the per-package records
+  # are wrapped in `{"results": [...]}` (`results`, not a parameter name,
+  # dodges the output/parameter shadowing trap). awk emits the JSON array; the
+  # Finding DSL only iterates the ready `results` array.
+  command: |
+    if command -v apt-mark >/dev/null 2>&1; then
+      raw=$(apt-mark showhold 2>/dev/null) \
+        || { echo "apt-mark showhold failed" >&2; exit 1; }
+    elif command -v dnf >/dev/null 2>&1; then
+      raw=$(dnf versionlock list 2>/dev/null) \
+        || { echo "dnf versionlock list failed" >&2; exit 1; }
+    else
+      echo "no package manager (apt-mark/dnf) found" >&2
+      exit 1
+    fi
+    printf '%s\n' "$raw" | awk '
+      function esc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+      BEGIN{ printf "{\"results\":["; sep="" }
+      {
+        pkg=$1
+        if (pkg != "") {
+          printf "%s{\"package\":\"%s\"}", sep, esc(pkg)
+          sep=","
+        }
+      }
+      END{ printf "]}" }
+    '
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          package: { type: string }
+        required: [package]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # Single for_each binding over the already-built results array; the DSL only
+  # reads the ready record fields.
+  - for_each: "results as p"
+    when: "True"
+    severity: warning
+    message: "Package held back from upgrade: {p[package]}"

@@ -429,7 +429,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 **退出条件**：覆盖矩阵下每个域至少有 3 个 Inspector，总计 ≥40 个，每个 Inspector 有 manifest + snapshot 测试 + 在 `examples/` 里有可 replay 的 fixture。
 
-**状态：🚧 进行中（主体已成型）**。已通过多个 inspector wave 增量交付，当前 `src/hostlens/inspectors/builtin/` 下 **53 个** inspector（总数已过 ≥40 门槛），核心域（计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/log/系统）已覆盖。已归档 change：`add-inspector-authoring-contract`、`add-os-shell-inspectors-wave1`、`add-service-inspector-contract-spike`、`add-single-instance-service-inspectors`、`add-log-and-fault-service-inspectors`、`add-replication-inspector-spike`、`add-replication-lag-inspectors`、`add-postgres-replication-lag-inspector`。**剩余域（达退出条件前待补）**：security 基线（failed_logins / sudo_history / unexpected_listen）、包管理（pending_updates / security_patches）、TLS chain validity、语言运行时（JVM / Go）、部分 DB（mysql/redis replication_lag、redis.slowlog 的 seed 漂移迁移）；K8s 域待 **M8** target 就位。
+**状态：🚧 进行中（主体已成型）**。已通过多个 inspector wave 增量交付，当前 `src/hostlens/inspectors/builtin/` 下 **59 个** inspector（总数已过 ≥40 门槛），核心域（计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/log/系统/**security/包管理**）已覆盖。已归档 change：`add-inspector-authoring-contract`、`add-os-shell-inspectors-wave1`、`add-service-inspector-contract-spike`、`add-single-instance-service-inspectors`、`add-log-and-fault-service-inspectors`、`add-replication-inspector-spike`、`add-replication-lag-inspectors`、`add-postgres-replication-lag-inspector`、`add-security-baseline-and-package-inspectors`。**剩余域（达退出条件前待补）**：TLS chain validity（`add-tls-chain-validity-inspector` 已提案）、语言运行时 JVM / Go（`add-runtime-inspectors` 已提案）、部分 DB（redis.slowlog 的 seed 漂移迁移）；K8s 域待 **M8** target 就位。
 
 ### 覆盖矩阵
 
@@ -444,8 +444,8 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 | 调度器 | cron 历史 / anacron / 失败 cron | — | cron.last_runs ✅, cron.failures ✅ |
 | TLS | cert 过期 / cert chain 有效性 | tls.cert_expiry | tls.chain_validity |
 | 内核 / 系统 | dmesg errors / kernel taint / reboot-required / uptime | — | system.kernel_messages ✅, system.uptime, system.reboot_required ✅, system.kernel_taint ✅ |
-| 安全基线 | failed logins / sudo history / 异常监听端口 | — | security.failed_logins, security.sudo_history, security.unexpected_listen |
-| 包管理 | 待升级包 / 安全补丁 | — | pkg.pending_updates, pkg.security_patches |
+| 安全基线 | failed logins / sudo history / 提权向量 | — | security.failed_logins ✅, security.sudo_history ✅, security.world_writable_dirs ✅（异常监听端口由既有 net.listening_ports 覆盖，不重复） |
+| 包管理 | 待升级包 / 安全补丁 / held-back | — | pkg.pending_updates ✅, pkg.security_patches ✅, pkg.held_back ✅ |
 | Web / Nginx | health / config test / 5xx rate / upstream health | — | nginx.health ✅, nginx.config_test ✅, nginx.error_rate ✅, nginx.upstream（wave-2b 推后,待后续批次/spike） |
 | MySQL | conn usage / slow queries / replication lag / deadlocks | — | mysql.connection_usage, mysql.slow_queries ✅, mysql.replication_lag, mysql.deadlocks（wave-2b 推后,待后续批次/spike） |
 | PostgreSQL | conn usage / replication lag / bloat（真实 SQL）/ long queries | — | postgres.connection_usage ✅, postgres.replication_lag, postgres.bloat_tables, postgres.long_queries ✅ |
@@ -463,7 +463,8 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 - [ ] **6.1 计算 / 内存 / 磁盘扩充**（cpu.throttling, memory.swap, disk.io, disk.smart, fs.mount_health, fs.logrotate, memory.hugepages, cpu.cpufreq）
 - [ ] **6.2 网络 + DNS + NTP**（network.connections, network.listening_ports, dns.resolve, ntp.drift）
 - [ ] **6.3 systemd + cron**（systemd.timer_status, systemd.masked, cron.last_runs, cron.failures）
-- [ ] **6.4 TLS + 安全基线 + 包管理**（tls.chain_validity, security.failed_logins, security.sudo_history, security.unexpected_listen, pkg.pending_updates, pkg.security_patches）
+- [x] **6.4a 安全基线 + 包管理**（security.failed_logins, security.sudo_history, security.world_writable_dirs, pkg.pending_updates, pkg.security_patches, pkg.held_back）—— 已交付，归档 `add-security-baseline-and-package-inspectors`
+- [ ] **6.4b TLS chain validity**（tls.chain_validity）—— 已提案 `add-tls-chain-validity-inspector`，待实现
 - [ ] **6.5 Nginx**（health, config_test, error_rate, upstream）
 - [ ] **6.6 MySQL / PostgreSQL**（含真实 SQL 模板，如 postgres bloat 用 `pg_stat_user_tables` 的具体查询，参考 docs/ARCHITECTURE.md §4 复杂示例 2）
 - [ ] **6.7 Redis**（memory_usage, persistence, replication_lag, slowlog）

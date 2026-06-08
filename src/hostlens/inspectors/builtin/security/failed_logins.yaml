@@ -1,0 +1,76 @@
+name: security.failed_logins
+version: 1.0.0
+description: >-
+  Count failed SSH/PAM login attempts within the sampling window from the
+  systemd journal. Linux + systemd only (needs `journalctl`; non-systemd hosts
+  fail preflight `requires_unmet`). A burst signals brute-force. The per-source
+  IP breakdown belongs in evidence; the finding message stays count-only (no
+  raw IP) so it is safe to forward into LLM context / notifications.
+tags: [security, linux, systemd, ssh, brute-force]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [journalctl, grep]
+privilege: none
+
+parameters:
+  # `parameters` is a full JSON Schema document (top-level type:object +
+  # properties + additionalProperties:false), NOT a flat map — otherwise
+  # type/default land at the wrong level and never apply.
+  type: object
+  properties:
+    threshold:
+      type: integer
+      default: 20
+  additionalProperties: false
+
+collect:
+  # sampling_window injects window_start as a journalctl-friendly UTC
+  # "YYYY-MM-DD HH:MM:SS" string (see runner._build_window_context).
+  sampling_window:
+    duration_seconds: 3600
+  # FAIL-LOUD (Authoring Contract rule 8): journalctl missing/unreadable MUST
+  # exit non-zero (→ status=exception) rather than emit {"failed":0} blessed
+  # as "no failed logins" (the security false-negative trap, Failure Mode 2).
+  #
+  # D-6.1 pipe-safe: capture journalctl into raw= and check ITS exit code (a
+  # bare `journalctl | grep` pipe would let journalctl's failure be swallowed
+  # by grep's exit code → a fake 0 count).
+  #
+  # D-6.5 cross-distro unit: list BOTH ssh.service (Debian/Ubuntu) and
+  # sshd.service (RHEL/Fedora/SUSE/Arch). journalctl ORs repeated _SYSTEMD_UNIT
+  # matches — listing only one makes journalctl on the RHEL family return 0
+  # rows → fake `status=ok failed=0` missing every failed login (a
+  # data-source-reachable false negative; fail-loud does not fire).
+  #
+  # D-3 TZ=UTC: the injected window_start is a tz-naive UTC wall-clock string;
+  # `journalctl --since` reads a bare timestamp in the system local timezone,
+  # so TZ=UTC realigns the window to the injected UTC value.
+  #
+  # The `|| true` on grep -c only excuses the "zero matches" case (grep exits 1
+  # on no match — not an error); journalctl failure was already caught by the
+  # `|| exit 1` above, and grep runs on the variable, so it is safe here.
+  command: |
+    raw=$(TZ=UTC journalctl _SYSTEMD_UNIT=ssh.service _SYSTEMD_UNIT=sshd.service \
+      --since "{{ window_start }}" --no-pager 2>/dev/null) \
+      || { echo "journalctl unavailable" >&2; exit 1; }
+    count=$(printf '%s\n' "$raw" | grep -c "Failed password" || true)
+    printf '{"failed":%d}' "$count"
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    failed: { type: integer }
+  required: [failed]
+  additionalProperties: false
+
+findings:
+  # message carries no {failed} count (str.format cannot call functions inside
+  # {}, and the count stays in `when`); it also does not print raw source IPs —
+  # the per-source breakdown goes to evidence for the scrubbing layer (D-4).
+  - when: "failed > threshold"
+    severity: warning
+    message: "时窗内失败登录数超过阈值（疑似爆破，明细见 evidence）"

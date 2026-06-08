@@ -1,0 +1,73 @@
+name: security.sudo_history
+version: 1.0.0
+description: >-
+  Count sudo invocations within the sampling window from the systemd journal
+  (`_COMM=sudo`). Linux + systemd only (needs `journalctl`; non-systemd hosts
+  fail preflight `requires_unmet`). A spike in sudo activity is the stable,
+  cross-distro signal. The finding threshold is locked to TOTAL sudo
+  invocations — NOT to a "failed sudo" count, whose `authentication failure`
+  wording is best-effort and not cross-distro stable (待解决问题). The user /
+  command breakdown belongs in evidence; the message stays count-only (no raw
+  username) so it is safe to forward into LLM context / notifications.
+tags: [security, linux, systemd, sudo, privilege-escalation]
+targets: [local, ssh]
+requires_capabilities: [shell]
+requires_binaries: [journalctl, grep]
+privilege: none
+
+parameters:
+  # Full JSON Schema document (top-level type:object + properties +
+  # additionalProperties:false), not a flat map.
+  type: object
+  properties:
+    threshold:
+      type: integer
+      default: 50
+  additionalProperties: false
+
+collect:
+  # sampling_window injects window_start as a journalctl-friendly UTC
+  # "YYYY-MM-DD HH:MM:SS" string (see runner._build_window_context).
+  sampling_window:
+    duration_seconds: 3600
+  # FAIL-LOUD (Authoring Contract rule 8): journalctl missing/unreadable MUST
+  # exit non-zero (→ status=exception) rather than emit {"invocations":0}
+  # blessed as "no sudo activity".
+  #
+  # D-6.1 pipe-safe: capture journalctl into raw= and check ITS exit code; a
+  # bare `journalctl | grep` pipe would let journalctl's failure be swallowed
+  # by the downstream grep exit code → a fake 0 count.
+  #
+  # D-3 TZ=UTC: the injected window_start is a tz-naive UTC wall-clock string;
+  # `journalctl --since` reads a bare timestamp in the system local timezone,
+  # so TZ=UTC realigns the window to the injected UTC value.
+  #
+  # The count is the number of journal lines emitted under _COMM=sudo within
+  # the window (sudo logs one "session opened"/"COMMAND=" line per invocation).
+  # `grep -c '' || true` counts non-empty lines; the `|| true` only excuses the
+  # zero-match case — journalctl failure was already caught above.
+  command: |
+    raw=$(TZ=UTC journalctl _COMM=sudo \
+      --since "{{ window_start }}" --no-pager 2>/dev/null) \
+      || { echo "journalctl unavailable" >&2; exit 1; }
+    count=$(printf '%s\n' "$raw" | grep -c "sudo" || true)
+    printf '{"invocations":%d}' "$count"
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    invocations: { type: integer }
+  required: [invocations]
+  additionalProperties: false
+
+findings:
+  # Locked to total invocation count (stable signal), not failed-sudo count.
+  # message carries no count (str.format cannot call functions inside {}) and
+  # no raw username — the per-user breakdown goes to evidence (D-4).
+  - when: "invocations > threshold"
+    severity: warning
+    message: "时窗内 sudo 调用次数超过阈值（疑似异常提权活动，明细见 evidence）"

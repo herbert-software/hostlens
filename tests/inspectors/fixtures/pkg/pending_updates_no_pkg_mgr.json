@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v grep",
+      "stdout": "/usr/bin/grep\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "if command -v apt-get >/dev/null 2>&1; then\n  raw=$(apt-get -s upgrade 2>/dev/null) \\\n    || { echo \"apt-get -s upgrade failed\" >&2; exit 1; }\n  count=$(printf '%s\\n' \"$raw\" | grep -c '^Inst' || true)\nelif command -v dnf >/dev/null 2>&1; then\n  raw=$(dnf check-update -q 2>/dev/null); rc=$?\n  [ $rc -eq 0 ] || [ $rc -eq 100 ] \\\n    || { echo \"dnf check-update failed (rc=$rc)\" >&2; exit 1; }\n  count=$(printf '%s\\n' \"$raw\" | grep -c '^[a-zA-Z0-9]' || true)\nelse\n  echo \"no package manager (apt-get/dnf) found\" >&2\n  exit 1\nfi\nprintf '{\"pending\":%d}' \"$count\"",
+      "stdout": "",
+      "stderr": "no package manager\n",
+      "exit_code": 1,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}
