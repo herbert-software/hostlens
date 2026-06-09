@@ -13,7 +13,7 @@ description: >-
   显式覆盖 status_field。缺 awk 或日志不可读 → requires_unmet;空日志 → ok 零对象。
   无连接 secret。
 tags: [nginx, web, service, error-rate]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [awk]
 requires_files: [/var/log/nginx/access.log]

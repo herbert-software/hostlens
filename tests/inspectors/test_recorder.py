@@ -26,7 +26,7 @@ import pytest
 import structlog
 
 from hostlens.core.config import Settings
-from hostlens.core.exceptions import ReplayMiss
+from hostlens.core.exceptions import ConfigError, ReplayMiss
 from hostlens.inspectors.recorder import record_fixture
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.inspectors.schema import (
@@ -84,6 +84,18 @@ class _ScriptedTarget:
         raise AssertionError("read_file not used in these tests")
 
 
+class _TypedScriptedTarget(_ScriptedTarget):
+    """``_ScriptedTarget`` whose ``type`` is set per-instance (not the class
+    default ``"local"``) so recorder impersonation can be exercised across
+    target types without mutating the shared class attribute."""
+
+    def __init__(
+        self, name: str, script: list[tuple[str, ExecResult]], *, target_type: str
+    ) -> None:
+        super().__init__(name, script)
+        self.type = target_type
+
+
 def _make_manifest(
     *,
     command: str,
@@ -92,12 +104,13 @@ def _make_manifest(
     output_schema: dict[str, Any] | None = None,
     findings: list[FindingRule] | None = None,
     sampling_window: SamplingWindow | None = None,
+    targets: list[str] | None = None,
 ) -> InspectorManifest:
     return InspectorManifest(
         name="test.recorder",
         version="1.0.0",
         description="recorder test inspector",
-        targets=["local"],
+        targets=targets or ["local"],
         requires_binaries=requires_binaries or [],
         requires_capabilities=["shell"],
         secrets=secrets or [],
@@ -364,3 +377,69 @@ async def test_record_allows_failed_run_with_opt_in() -> None:
     assert main
     assert main[0]["exit_code"] == 1
     assert main[0]["stdout"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# 6. impersonation is fail-loud — supported types pass through, others raise
+# --------------------------------------------------------------------------- #
+
+
+async def test_docker_target_impersonates_docker() -> None:
+    """A ``type=="docker"`` target records a fixture with ``impersonate ==
+    "docker"`` (not silently coerced to ``"local"``)."""
+
+    manifest = _make_manifest(command="echo '{\"results\": []}'", targets=["docker"])
+    target = _TypedScriptedTarget(
+        "rec",
+        [
+            (
+                "echo",
+                ExecResult(
+                    exit_code=0,
+                    stdout='{"results": []}\n',
+                    stderr="",
+                    duration_seconds=0.0,
+                    timed_out=False,
+                ),
+            )
+        ],
+        target_type="docker",
+    )
+
+    fixture = await record_fixture(manifest, target, settings=Settings())
+
+    assert fixture.impersonate == "docker"
+
+
+async def test_unsupported_target_type_raises() -> None:
+    """An unsupported target type (e.g. ``k8s``) fails loud rather than being
+    silently coerced into a mislabelled ``"local"`` fixture.
+
+    The manifest declares ``targets=["k8s"]`` via ``model_copy`` (bypassing
+    the ``Literal["local","ssh","docker"]`` validator) so the runner preflight's
+    ``target.type in manifest.targets`` gate passes and execution reaches the
+    recorder's own impersonation guard — the line under test.
+    """
+
+    base = _make_manifest(command="echo '{\"results\": []}'")
+    manifest = base.model_copy(update={"targets": ["k8s"]})
+    target = _TypedScriptedTarget(
+        "rec",
+        [
+            (
+                "echo",
+                ExecResult(
+                    exit_code=0,
+                    stdout='{"results": []}\n',
+                    stderr="",
+                    duration_seconds=0.0,
+                    timed_out=False,
+                ),
+            )
+        ],
+        target_type="k8s",
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        await record_fixture(manifest, target, settings=Settings())
+    assert exc_info.value.kind == "recorder_unsupported_target_type"

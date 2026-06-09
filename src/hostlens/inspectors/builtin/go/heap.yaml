@@ -11,7 +11,7 @@ description: >
   unreachable or does not expose pprof, the collector fails loud
   (status=exception) rather than fabricating a healthy heap.
 tags: [go, runtime]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [curl]
 privilege: none

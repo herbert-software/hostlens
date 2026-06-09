@@ -18,7 +18,7 @@ description: >-
   refused → jcmd exits non-zero → status=exception, never a fabricated
   "threads healthy". The inspector does NOT auto-sudo (privilege: none).
 tags: [jvm, runtime, threads, jcmd]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [jcmd]
 privilege: none

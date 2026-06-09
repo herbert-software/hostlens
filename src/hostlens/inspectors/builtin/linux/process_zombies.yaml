@@ -8,7 +8,7 @@ description: >-
   collector (load-bearing wall 1) so the Finding DSL only compares an
   already-derived count and iterates an already-built list.
 tags: [linux, process, zombie, defunct]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [ps, awk]
 privilege: none

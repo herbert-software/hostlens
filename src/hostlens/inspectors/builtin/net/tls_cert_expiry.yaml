@@ -2,7 +2,7 @@ name: net.tls.cert_expiry
 version: 1.0.0
 description: Check TLS certificate expiry for configured endpoints.
 tags: [network, security, tls]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [openssl]
 

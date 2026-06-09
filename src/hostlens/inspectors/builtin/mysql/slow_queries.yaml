@@ -10,7 +10,7 @@ description: >-
   服务不可达/认证失败 → status=exception;缺 mysql → requires_unmet。
   SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
 tags: [mysql, service, slow-queries, log-window]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [mysql]
 secrets: [HOSTLENS_MYSQL_PWD]

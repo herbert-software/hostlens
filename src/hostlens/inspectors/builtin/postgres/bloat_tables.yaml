@@ -12,7 +12,7 @@ description: >-
   derivation (dead_ratio) happens in SQL computed columns; the Finding DSL only
   compares the ready scalars.
 tags: [database, postgres, postgres12, bloat]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [psql]
 privilege: none

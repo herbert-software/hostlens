@@ -2,7 +2,7 @@ name: net.dependency.tcp_check
 version: 1.0.0
 description: Check TCP reachability of configured dependency endpoints.
 tags: [connectivity, dependency, network]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [nc]
 privilege: none

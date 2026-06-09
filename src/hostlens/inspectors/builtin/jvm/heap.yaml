@@ -22,7 +22,7 @@ description: >-
   surface, never a fabricated "heap healthy"). The inspector does NOT auto-sudo
   (privilege: none) — the elevation decision stays with the operator.
 tags: [jvm, runtime, heap, jstat]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [jstat]
 privilege: none

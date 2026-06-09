@@ -60,6 +60,7 @@ from typing import Any, Literal, cast
 import structlog
 
 from hostlens.core.config import Settings
+from hostlens.core.exceptions import ConfigError
 from hostlens.inspectors.loader import load_manifest
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.inspectors.schema import InspectorManifest
@@ -114,7 +115,7 @@ class RecordedFixture:
     def __init__(
         self,
         *,
-        impersonate: str,
+        impersonate: Literal["local", "ssh", "docker"],
         capabilities: list[str],
         commands: list[dict[str, Any]],
         files: dict[str, str],
@@ -288,7 +289,14 @@ async def record_fixture(
             }
         )
 
-    impersonate = target.type if target.type in ("local", "ssh") else "local"
+    if target.type not in ("local", "ssh", "docker"):
+        raise ConfigError(
+            f"recorder cannot impersonate target type {target.type!r}; "
+            "only local/ssh/docker fixtures are supported",
+            kind="recorder_unsupported_target_type",
+            target=target.name,
+        )
+    impersonate: Literal["local", "ssh", "docker"] = target.type
     capabilities = sorted(cap.value for cap in target.capabilities)
     files = {
         path: _redact(content, secret_values, scrubbers) for path, content in proxy.files.items()

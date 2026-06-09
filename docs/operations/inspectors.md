@@ -36,7 +36,7 @@ user_paths, *, settings)`，返回 `(registry, errors)` 双值：
 | `version` | str | ✓ | SemVer 字符串 `^\d+\.\d+\.\d+$` |
 | `description` | str | ✓ | 一句话说明 |
 | `tags` | list[str] | | 每个 tag 匹配 `^[a-z][a-z0-9_-]*$`；用于 `inspectors list --tag` 筛选 |
-| `targets` | list[`local`\|`ssh`] | ✓ | M1 范围恰好 `local` / `ssh`；至少 1 个 |
+| `targets` | list[`local`\|`ssh`\|`docker`] | ✓ | 至少 1 个；`docker` 仅供容器语义正确的 inspector 声明（见下方「Docker target 上可跑的 inspector」）；`k8s` / `kubernetes` 仍被拒（KubernetesTarget 未实现） |
 | `requires_capabilities` | list[str] | | 值必须在 `{shell, file_read, ssh, systemd, docker_cli}` 内 |
 | `requires_binaries` | list[str] | | 每个 binary 名匹配 `^[a-zA-Z0-9._-]+$` |
 | `requires_files` | list[str] | | 每个路径匹配严格正则 `^/[A-Za-z0-9._/-]+$` + component 级 `.` / `..` 拒绝 |
@@ -148,6 +148,100 @@ M1 随包发布两个 builtin Inspector，用于验证管线 + Demo Path：
 
 `system.uptime` 的 finding 表达式用到 `float(load1)`，因此 DSL 引擎在
 `hostlens.inspectors.dsl.evaluate` 已显式注册 `float` / `int` 类型转换函数。
+
+## Docker target 上可跑的 inspector
+
+`DockerTarget`（`type: docker`）让 inspector 的 collector 在**单个容器**的
+PID / mount / net namespace 内执行（`docker exec` 语义）。但 inspector 默认对
+docker target **inert**：只有 manifest 的 `targets` 显式含 `docker` 才会被
+runner preflight 放行（`target.type in manifest.targets`）。哪些 inspector
+声明了 `docker` 是逐项人工评审的结果 —— **能否跑在 docker 上取决于该 collector
+的信号在「容器自身视角」下是否正确且有意义**，而非简单地全量放开。
+
+### 哪些 inspector 可跑（INCLUDE）
+
+仅当采集信号「读取该容器自身的进程 / 应用 / 文件 / 网络状态」时正确，才声明
+`docker`。当前 cohort（按域概述，逐项见提案
+`openspec/changes/enable-docker-inspector-targets/design.md` Decision 4 全表）：
+
+| 域 | inspector | 容器视角 |
+|---|---|---|
+| 应用服务 | `nginx.{config_test,error_rate,health}` / `mysql.{connection_usage,replication_lag,slow_queries}` / `postgres.{bloat_tables,connection_usage,long_queries,replication_lag}` / `redis.{memory_usage,persistence,replication_lag,slowlog}` | 「一容器一应用」典型场景，诊断容器内的服务实例 |
+| 语言运行时 | `jvm.{gc,heap,threads}` / `go.{goroutines,heap}` | 容器内单进程的运行时状态 |
+| 进程级 | `linux.process.{zombies,critical_alive}` | `ps axo` / `pgrep` 走容器 PID namespace，看到的是容器内进程 |
+| 应用日志 | `log.exception_burst` | `cat {{log_path}}` 走 mount namespace，读容器自身日志文件 |
+| 网络 | `net.{connections,listening_ports}` / `net.dns.resolve` / `net.dependency.tcp_check` / `net.tls.{cert_expiry,chain_validity}` | 容器 netns 视角（见下方注意事项） |
+
+### 容器视角注意事项
+
+- **`net.*` 是容器 netns 视角，不是 host 视角**：`net.connections` /
+  `net.listening_ports` 在 docker target 上看到的是**该容器**的端口与连接，而非
+  host 的。这是特性不是 bug（目的就是诊断该容器的网络），但若你期望 host 网络
+  视角会困惑 —— 那种场景请对 host 用 `local`/`ssh` target。`net.dns.resolve` /
+  `net.dependency.tcp_check` / `net.tls.*` 同理：解析与外联走的是容器的 DNS
+  配置与网络路径（容器与 host 的 CA bundle / 路由可能不同）。
+- **服务类 / 运行时需容器内有对应 client 二进制**：`mysql` / `psql` /
+  `redis-cli` / `jstat` / `jcmd` / `openssl` / `ss` 等必须在容器镜像里存在。
+  alpine / distroless 等极简镜像常常缺这些 —— 此时 runner preflight 的
+  `requires_binaries` 探测（`command -v <bin>`）非 0 → 该 inspector 返回
+  `requires_unmet(["bin:xxx"])`，**不执行主命令、不误报**。distroless 连
+  `/bin/sh` 都没有时，`DockerTarget.exec` 归 `target_unreachable`，单个
+  inspector 失败隔离、不毁整轮。
+- **secret 注入路径不变**：服务类 inspector 的 `HOSTLENS_*` secret 经
+  `ExecutionTarget.exec(cmd, env={...})` 注入到容器内进程 env，与 SSH 路径
+  对称；命令中仍用 shell `$VAR_NAME` 引用，禁止 Jinja2 插值（loader 静态拒绝）。
+
+### 为何一批 inspector 保持 `local`/`ssh`（EXCLUDE）
+
+凡是采集 **host 全局** 硬件 / 内核 / init 状态的 inspector **不**声明 `docker`，
+因为容器内要么**读不到**、要么读到的是 **host 共享值造成静默误归因**（最危险，
+因为不报错）。代表性 EXCLUDE 类与理由：
+
+- **host 全局 sysctl（非 namespace 隔离）**：`linux.process.fd_usage` 读
+  `/proc/sys/fs/file-nr`、`linux.process.total` 的分母 `pid_max` 读
+  `/proc/sys/kernel/pid_max` —— `/proc/sys/*` 是内核全局、**不**随 namespace
+  隔离，容器内静默返回 host 值，比率无意义。
+- **host 物理资源**：`linux.cpu.*` / `linux.memory.*`（容器读 `/proc/meminfo`
+  是 host 物理内存而非 cgroup 限制，cgroup-aware 采集是未来独立提案）/
+  `linux.disk.*` / `linux.fs.*`（host 块设备与挂载）/ `linux.kernel.*`
+  （共享 host 内核 dmesg）。
+- **host init / 系统层**：`linux.systemd.*` / `linux.cron.*` /
+  `linux.system.*`（load_avg / reboot_required）/ `system.uptime`（实抽 host
+  load average）—— 容器多无 systemd，读到的也是 host 状态。
+- **host journal / 打补丁 / 认证**：`log.tail.error_burst`（`journalctl` 读
+  host systemd journal，是 host-journal inspector 而非 app-log inspector，故与
+  `log.exception_burst` 区别对待）/ `net.ntp.drift`（host 时钟）/ `pkg.*`
+  （host 打补丁语义）/ `security.*`（host 认证日志）/ `docker.*`（需
+  docker-in-docker，非目标）。
+
+> **守门兜底**：capability gate（preflight step 2）能挡掉「要求 `ssh` /
+> `systemd` capability 而 DockerTarget 没有」的 inspector，但**挡不住误归因**
+> （读 `/proc/meminfo` 不报错）。所以容器语义正确性靠作者判据 + 代码 review
+> 双签，并有内容式 meta-guard 机械拦截：凡 collector 命令含 `/proc/sys/` /
+> `/proc/meminfo` / `journalctl` / `/proc/loadavg` / `/proc/uptime` 的 manifest
+> 一律断言 `targets` 不含 `docker`（测试 `test_docker_target_cohort_guard.py`）。
+
+### 配置 docker target 与实跑
+
+`hostlens target add` 当前只支持 `--type local|ssh`；docker target 经
+`~/.config/hostlens/targets.yaml` 手写接入（CLI 写入 docker target 留作独立
+follow-up）：
+
+```yaml
+version: "1"
+targets:
+  - name: hl-redis
+    type: docker
+    container: hl-redis
+```
+
+```bash
+docker run -d --name hl-redis redis:7
+hostlens inspect hl-redis --inspector redis.memory_usage   # 容器内 redis 的真实采集
+```
+
+> docker SDK 是 optional extra：`pip install "hostlens[docker]"`。未装时
+> DockerTarget 不可用（`hostlens doctor` 会提示），但不影响 local/ssh/replay。
 
 ## 4 种 parse format 选型指南
 
@@ -339,8 +433,9 @@ fixture JSON 结构：
 
 要点：
 
-- `impersonate`（`local`/`ssh`，默认 `local`）决定运行时 `.type`，使 runner preflight
-  的 `target.type in manifest.targets` 透明通过 —— 不新增 target 枚举。
+- `impersonate`（`local`/`ssh`/`docker`，默认 `local`）决定运行时 `.type`，使 runner preflight
+  的 `target.type in manifest.targets` 透明通过 —— 不新增 target 枚举。`impersonate: docker`
+  用于离线验证 docker 派发路径（见「Docker target 上可跑的 inspector」）。
 - `commands[]` **必须**预录全部 preflight 探测命令（`command -v <binary>`）与渲染后的
   主命令；命令按「逐行 rstrip 后 SHA256」匹配。
 - 未命中即抛 `ReplayMiss`（继承 `HostlensError` 而非 `TargetError`），并记入

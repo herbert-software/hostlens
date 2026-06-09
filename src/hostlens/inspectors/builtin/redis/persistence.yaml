@@ -20,7 +20,7 @@ description: >-
   假阳性)。服务不可达/NOAUTH → status=exception(诚实);缺 redis-cli → requires_unmet。
   SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
 tags: [redis, redis6, service, persistence]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [redis-cli]
 secrets: [HOSTLENS_REDIS_PASSWORD]

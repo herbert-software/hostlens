@@ -6,7 +6,7 @@ description: >-
   Linux-only (needs iproute2 `ss`): the per-state counts and the total are
   tallied in awk so the Finding DSL only compares already-derived scalars.
 tags: [linux, network, connections, tcp, iproute2]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [ss, awk]
 privilege: none

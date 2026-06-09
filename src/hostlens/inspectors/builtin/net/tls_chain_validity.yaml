@@ -6,7 +6,7 @@ description: >
   wrong chain order, self-signed, or untrusted-root failures that
   net.tls.cert_expiry (notAfter-only) cannot see.
 tags: [net, tls, security]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [openssl]
 

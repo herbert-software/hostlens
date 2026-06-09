@@ -619,8 +619,15 @@ class TestNoTargetForking:
 
     @pytest.mark.parametrize("name,manifest_path", _ALL_ITEMS, ids=_ALL_IDS)
     def test_manifest_serves_both_local_and_ssh(self, name: str, manifest_path: Path) -> None:
+        # The "no target forking" contract is "the same command serves BOTH
+        # local and ssh" — a subset check, not exact equality. A service
+        # inspector may additionally declare `docker` (enable-docker-inspector-
+        # targets); the docker cohort membership is frozen separately in
+        # test_docker_target_cohort_guard.py. Here we only assert local+ssh both
+        # present and the set is confined to the allowed Literal values.
         manifest = load_manifest(manifest_path)
-        assert manifest.targets == ["local", "ssh"]
+        assert {"local", "ssh"} <= set(manifest.targets)
+        assert set(manifest.targets) <= {"local", "ssh", "docker"}
 
     @pytest.mark.parametrize("name,manifest_path", _ALL_ITEMS, ids=_ALL_IDS)
     def test_collector_command_has_no_target_type_branch(

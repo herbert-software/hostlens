@@ -17,7 +17,7 @@ description: >-
   只报慢查询计数（count）与最长慢查询时长（max_micros 微秒），不含命令文本——
   因 --json 对二进制 command-args 产非法 UTF-8，见《Inspector 作者契约》。
 tags: [redis, redis6, json-client]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [redis-cli]
 

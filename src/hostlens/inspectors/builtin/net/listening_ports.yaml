@@ -9,7 +9,7 @@ description: >-
   limitation, not an error). All extraction happens in awk; the Finding DSL
   only does membership/threshold comparison on the ready `results` array.
 tags: [linux, network, listening-ports, tcp, iproute2]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [ss, awk]
 privilege: none

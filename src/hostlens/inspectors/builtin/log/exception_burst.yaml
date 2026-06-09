@@ -11,7 +11,7 @@ description: >-
   assumptions are minimal (POSIX awk + a readable log file); the log path is
   parameterised and flows through the injection-safety triad.
 tags: [logs, exceptions, stacktrace, burst]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [awk, sort]
 privilege: none

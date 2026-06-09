@@ -47,7 +47,7 @@ description: >-
   仍产合法 JSON)。此 collector fail-loud 方向与同批次 docker/redis/postgres「非零→
   exception」相反(rc1=采集成功出坏配置,见 design D-5)。缺 nginx → requires_unmet。
 tags: [nginx, web, service, config]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [nginx, jq]
 secrets: []

@@ -75,7 +75,12 @@ def _render(command: str, **values: object) -> str:
 def test_each_manifest_loads_cleanly(name: str) -> None:
     manifest = load_manifest(_builtin_root() / INCIDENT_PACK[name])
     assert manifest.name == name
-    assert manifest.targets == ["local", "ssh"]
+    # local+ssh always present; two of these (net.dependency.tcp_check,
+    # net.tls.cert_expiry) additionally declare `docker` (enable-docker-
+    # inspector-targets). Per-inspector docker membership is frozen in
+    # test_docker_target_cohort_guard.py — here just bound the allowed set.
+    assert {"local", "ssh"} <= set(manifest.targets)
+    assert set(manifest.targets) <= {"local", "ssh", "docker"}
 
 
 def test_registry_surfaces_all_eleven_with_zero_errors() -> None:

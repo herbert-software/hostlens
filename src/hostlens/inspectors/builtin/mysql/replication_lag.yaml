@@ -18,7 +18,7 @@ description: >-
   finding 表达。服务不可达/Access denied → status=exception(诚实);缺 mysql client → requires_unmet。
   SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
 tags: [mysql, mysql8, service]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [mysql]
 secrets: [HOSTLENS_MYSQL_PWD]

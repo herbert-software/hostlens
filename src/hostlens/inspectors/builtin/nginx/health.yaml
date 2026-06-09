@@ -30,7 +30,7 @@ description: >-
   采集路径用 curl 而非 systemctl is-active(录制 lane 容器无 systemd,systemctl 恒
   非零会让 up 态也落 exception,见 design D-5)。无连接 secret。缺 curl → requires_unmet。
 tags: [nginx, web, service, health]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [curl]
 secrets: []

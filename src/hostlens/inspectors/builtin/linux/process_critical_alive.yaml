@@ -8,7 +8,7 @@ description: >-
   the collector (load-bearing wall 1) so the Finding DSL only iterates the
   ready-made list and compares a boolean.
 tags: [linux, process, critical, liveness]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [pgrep]
 privilege: none

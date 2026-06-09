@@ -583,7 +583,7 @@ class InspectorManifest(BaseModel):
 
     # ---- compatibility / preflight ----
     tags: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]*$")]] = Field(default_factory=list)
-    targets: Annotated[list[Literal["local", "ssh"]], Field(min_length=1)]
+    targets: Annotated[list[Literal["local", "ssh", "docker"]], Field(min_length=1)]
     requires_capabilities: list[str] = Field(default_factory=list)
     requires_binaries: list[Annotated[str, Field(pattern=r"^[a-zA-Z0-9._-]+$")]] = Field(
         default_factory=list

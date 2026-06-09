@@ -25,7 +25,7 @@ description: >-
   refused → jstat exits non-zero → status=exception, never a fabricated
   "GC healthy". The inspector does NOT auto-sudo (privilege: none).
 tags: [jvm, runtime, gc, jstat]
-targets: [local, ssh]
+targets: [local, ssh, docker]
 requires_capabilities: [shell]
 requires_binaries: [jstat]
 privilege: none

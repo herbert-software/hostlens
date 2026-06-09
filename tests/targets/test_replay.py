@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from hostlens.core.config import Settings
-from hostlens.core.exceptions import ReplayMiss
+from hostlens.core.exceptions import ConfigError, ReplayMiss
 from hostlens.targets.base import Capability, ExecResult
 from hostlens.targets.config import load_targets_config
 from hostlens.targets.registry import build_registry_from_config
@@ -170,6 +170,26 @@ def test_runtime_type_equals_impersonate_declaration(tmp_path: Path) -> None:
     fixture = _write_fixture(tmp_path, data)
     target = ReplayTarget(name="replay-host", fixture=fixture)
     assert target.type == "ssh"
+
+
+def test_impersonate_docker_loads_and_type_is_docker(tmp_path: Path) -> None:
+    # enable-docker-inspector-targets: `docker` 进入 impersonate 取值域, 使 docker
+    # 派发路径可被离线回放 (runner preflight `target.type in manifest.targets` 透明通过).
+    data = {**_BASE_FIXTURE, "impersonate": "docker"}
+    fixture = _write_fixture(tmp_path, data)
+    target = ReplayTarget(name="replay-host", fixture=fixture)
+    assert target.type == "docker"
+
+
+@pytest.mark.parametrize("impersonate", ["k8s", "kubernetes", "replay"])
+def test_impersonate_unimplemented_type_rejected(tmp_path: Path, impersonate: str) -> None:
+    # impersonate 只能冒充已实现的 target 类型; 冒充未实现类型造成 preflight 假性通过,
+    # 故 fixture 加载期必须 raise (fail-loud).
+    data = {**_BASE_FIXTURE, "impersonate": impersonate}
+    fixture = _write_fixture(tmp_path, data)
+    with pytest.raises(ConfigError) as exc_info:
+        ReplayTarget(name="replay-host", fixture=fixture)
+    assert exc_info.value.kind == "replay_fixture_invalid"
 
 
 def test_capabilities_equal_fixture_declaration(tmp_path: Path) -> None:
