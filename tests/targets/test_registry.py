@@ -27,10 +27,12 @@ from hostlens.core.config import Settings
 from hostlens.core.exceptions import TargetError
 from hostlens.targets.base import ExecutionTarget
 from hostlens.targets.config import (
+    DockerEntry,
     LocalEntry,
     SSHEntry,
     load_targets_config,
 )
+from hostlens.targets.docker import DockerTarget
 from hostlens.targets.local import LocalTarget
 from hostlens.targets.registry import (
     TargetRegistry,
@@ -53,6 +55,15 @@ def _make_ssh_entry(name: str = "my-ssh", *, enabled: bool = True) -> SSHEntry:
         type="ssh",
         host="10.0.0.5",
         user="alice",
+        enabled=enabled,
+    )
+
+
+def _make_docker_entry(name: str = "my-docker", *, enabled: bool = True) -> DockerEntry:
+    return DockerEntry(
+        name=name,
+        type="docker",
+        container="web",
         enabled=enabled,
     )
 
@@ -293,6 +304,27 @@ async def test_ssh_target_disabled_via_registry_blocks_read_file() -> None:
     assert mock_connect.call_count == 0
 
 
+@pytest.mark.asyncio
+async def test_docker_target_disabled_via_registry_blocks_exec() -> None:
+    """Mirror of the Local / SSH assertions for the docker branch.
+
+    A disabled ``DockerTarget`` is still registered (doctor / list_targets
+    must see it) but ``exec`` raises ``target_disabled`` from the ordered
+    entry guard — *before* any docker client is built or daemon dialled,
+    so the assertion needs no docker daemon.
+    """
+
+    registry = TargetRegistry()
+    target = DockerTarget("paused-docker")
+    registry.register(target, _make_docker_entry("paused-docker", enabled=False))
+
+    with pytest.raises(TargetError) as exc:
+        await target.exec("echo nope", timeout=5)
+    assert exc.value.kind == "target_disabled"
+    # Lazy client never built — the disabled gate short-circuits first.
+    assert target._client is None
+
+
 # ---------------------------------------------------------------------------
 # build_registry_from_config
 # ---------------------------------------------------------------------------
@@ -357,6 +389,36 @@ def test_build_registry_settings_idle_timeout_visible_to_ssh(
     # env override surfaces — keep this in lockstep with SSHTarget's
     # docstring contract about lazy Settings construction.
     assert target._idle_timeout() == 120
+
+
+def test_build_registry_from_config_docker_branch(tmp_path: Path) -> None:
+    """``type: docker`` routes through the factory to a ``DockerTarget``.
+
+    Asserts the factory builds + registers the docker branch with its
+    entry injected (``_entry`` carries ``container`` / ``docker_host``),
+    and that the registered target reports ``type == "docker"``.
+    """
+
+    cfg_path = tmp_path / "targets.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": "1",
+                "targets": [
+                    {"name": "my-docker", "type": "docker", "container": "web"},
+                ],
+            }
+        )
+    )
+    config = load_targets_config(cfg_path)
+    registry = build_registry_from_config(config, Settings())
+
+    assert registry.names() == {"my-docker"}
+    docker_target = registry.get("my-docker")
+    assert isinstance(docker_target, DockerTarget)
+    assert docker_target.type == "docker"
+    assert docker_target._entry is not None
+    assert docker_target._entry.container == "web"
 
 
 def test_build_registry_preserves_disabled_entries(tmp_path: Path) -> None:

@@ -41,6 +41,18 @@ targets:
     host: db.example.com
     user: hostlens
     key_path: ~/.ssh/hostlens_id_ed25519
+
+  - name: app-container
+    type: docker
+    enabled: true
+    display_name: "App Container"
+    description: "Read-only inspection of an existing running container"
+    tags: [docker, app]
+    container: hostlens-app             # container name or id (required)
+    # docker_host is optional; omit to use the default local socket
+    # (unix:///var/run/docker.sock). Only local unix:// sockets are
+    # accepted — see "Docker targets" below.
+    docker_host: unix:///var/run/docker.sock
 ```
 
 ### Field reference
@@ -50,7 +62,7 @@ targets:
 | field | type | default | notes |
 |---|---|---|---|
 | `name` | str | — | must match `^[a-z][a-z0-9_\-]{0,63}$`; enforced at load + constructor + register |
-| `type` | `"local"` / `"ssh"` | — | discriminator |
+| `type` | `"local"` / `"ssh"` / `"docker"` | — | discriminator |
 | `enabled` | bool | `true` | when `false`, `exec` / `read_file` raise `TargetError(kind="target_disabled")` without connecting; doctor marks `connectivity: "skipped"`; `list_targets` ToolSpec filters them out unless `include_disabled=true` |
 | `display_name` | str \| null | null | human-friendly label; only surfaced through `list_targets` projection |
 | `description` | str \| null | null | free text; surfaced through `list_targets` |
@@ -67,6 +79,13 @@ targets:
 | `password` | str \| null | null | `${VAR}` placeholder strongly recommended |
 | `passphrase` | str \| null | null | `${VAR}` placeholder strongly recommended |
 | `connect_timeout` | int \| null | null | seconds; defaults to 10 if null |
+
+**Docker-only:**
+
+| field | type | default | notes |
+|---|---|---|---|
+| `container` | str | — | required, non-empty; container name or id of an **existing** container to inspect |
+| `docker_host` | str \| null | null | optional docker endpoint; only local `unix://` sockets are accepted (see "Docker targets"). Omit to use docker-py's `from_env()` default (typically `unix:///var/run/docker.sock`) |
 
 ## Credential best practices
 
@@ -118,6 +137,75 @@ inspectors (`redis.slowlog`, `postgres.bloat_tables`) still declare
 non-`HOSTLENS_` secret names pending migration; the `HOSTLENS_*`
 guarantee above covers the service-inspector-contract probes and every
 inspector authored after them.
+
+## Docker targets
+
+A `type: docker` target runs Inspector commands inside an **already
+existing** container via docker-py (`container.exec_run` for `exec`,
+`container.get_archive` for `read_file`). It performs **only read-only**
+operations — no container lifecycle management (create / start / stop /
+restart / rm).
+
+### Installation
+
+docker-py is an optional dependency. Install the extra before using a
+docker target:
+
+```
+pip install "hostlens[docker]"
+```
+
+Without it, constructing or probing a docker target raises
+`TargetError(kind="docker_sdk_unavailable")` carrying the same install
+hint (it never lets a bare `ImportError` escape).
+
+### `docker_host` is local-socket only
+
+`docker_host` accepts **only** a non-empty local unix socket of the form
+`unix:///path/to/docker.sock` (lowercase `unix://`). Everything else is
+rejected at config load time with
+`ConfigError(kind="docker_host_remote_not_supported")`:
+
+- remote schemes (`tcp://`, `ssh://`, `http(s)://`, `npipe://`),
+- bare paths without a scheme (`/var/run/docker.sock`),
+- an empty `unix://`,
+- case mismatches (`UNIX://...`),
+- relative socket paths (`unix://foo`).
+
+Remote docker over TCP + TLS (and its credential loading) is a deliberate
+non-goal of this milestone; the field is reserved for a follow-up. Omitting
+`docker_host` uses docker-py's `from_env()` default.
+
+### Security: docker socket access is host-root-equivalent
+
+Access to the docker socket is **equivalent to root on the host** —
+anyone who can talk to the daemon can start a privileged container that
+mounts the host filesystem. Treat a `targets.yaml` containing a docker
+target with the same gravity as root credentials:
+
+- Do **not** expose `targets.yaml` to untrusted users.
+- Restrict file permissions on `targets.yaml` and the docker socket to
+  the operator running Hostlens.
+
+Hostlens does **not** add a doctor check for this (the docker `targets`
+probe stays type-agnostic); the risk is inherent to the docker model, not
+a Hostlens defect, so it is documented here rather than enforced at
+runtime. The default socket path `unix:///var/run/docker.sock` is a public,
+non-secret path and is not redacted from error messages — `docker_host` is
+already constrained to local sockets, so docker errors never carry a remote
+endpoint credential.
+
+### Environment injection (no `AcceptEnv` filtering)
+
+Unlike SSH targets, a docker target injects `env` via
+`exec_run(environment=...)`, which reaches the container process
+environment directly — it is **not** subject to the remote sshd
+`AcceptEnv` allowlist that filters SSH `env=`. So the `HOSTLENS_*`-prefix
+workaround required for SSH (see "SSH remote `AcceptEnv` configuration"
+above) is unnecessary for docker targets: any env var name passes through.
+As with SSH, secrets are passed only through the `environment=` parameter
+and are never spliced into the command string (no `export VAR=value; cmd`),
+so they never appear in the container `ps` output or shell history.
 
 ## Connection pool behavior (SSH)
 
@@ -178,7 +266,8 @@ For each configured target, `doctor` reports:
   always skipped)
 - `credential_source`: `env_var` (placeholder expanded), `inline_plaintext`
   (literal in yaml — triggers a warning), `key_only` (SSH key path
-  only, no password), `none` (local target)
+  only, no password), `none` (local / docker targets — they carry no SSH
+  credentials)
 - `capabilities`: the set probed at last `exec`
 
 If **any** target reports `connectivity: failed`, `doctor` exits 1.

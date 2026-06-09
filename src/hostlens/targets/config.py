@@ -36,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from hostlens.core.exceptions import ConfigError
 
 __all__ = [
+    "DockerEntry",
     "LocalEntry",
     "ReplayEntry",
     "SSHEntry",
@@ -170,11 +171,35 @@ class ReplayEntry(_CommonEntryFields):
     fixture: str
 
 
+class DockerEntry(_CommonEntryFields):
+    """``type: docker`` target entry — drives a ``DockerTarget``.
+
+    Docker-specific field set is **exactly** ``{container, docker_host}``
+    (spec §场景:TargetEntry docker 字段集严格 enforces this via
+    ``extra="forbid"`` — adding e.g. ``image`` raises a ``ValidationError``
+    at load time).
+
+    ``container`` is required and **non-empty** (``min_length=1``): an empty
+    container reference must fail at yaml load rather than surface later as a
+    runtime ``container_not_found``.
+
+    ``docker_host`` is validated by the loader (see ``_validate_docker_host``),
+    **not** ``Field(pattern=...)``: a bad endpoint must raise ``ConfigError``
+    (structured ``kind``) rather than ``pydantic.ValidationError``.
+    """
+
+    type: Literal["docker"]
+    container: Annotated[str, Field(min_length=1)]
+    docker_host: str | None = None
+
+
 # Discriminator on ``type`` so Pydantic routes ``type: local`` → LocalEntry,
-# ``type: ssh`` → SSHEntry, ``type: replay`` → ReplayEntry without manual
-# ``model_validate`` branches. Unknown ``type`` values raise ``ValidationError``
-# automatically.
-TargetEntry = Annotated[LocalEntry | SSHEntry | ReplayEntry, Field(discriminator="type")]
+# ``type: ssh`` → SSHEntry, ``type: replay`` → ReplayEntry, ``type: docker`` →
+# DockerEntry without manual ``model_validate`` branches. Unknown ``type``
+# values raise ``ValidationError`` automatically.
+TargetEntry = Annotated[
+    LocalEntry | SSHEntry | ReplayEntry | DockerEntry, Field(discriminator="type")
+]
 
 
 class TargetsConfig(BaseModel):
@@ -359,13 +384,60 @@ def load_targets_config(path: Path, *, expand_env: bool = True) -> TargetsConfig
     validated_input = _expand_placeholders(parsed) if expand_env else _strip_placeholders(parsed)
 
     try:
-        return TargetsConfig.model_validate(validated_input)
+        config = TargetsConfig.model_validate(validated_input)
     except ValidationError:
         # Re-raise unchanged so callers see the Pydantic field locations.
         # The spec explicitly wants ``pydantic.ValidationError`` for
         # schema violations (§场景:unknown type raise / §场景:TargetEntry
         # name 不匹配正则 raise / §场景:TargetEntry SSH 字段集严格).
         raise
+
+    # ``docker_host`` scheme validation runs **after** ``model_validate``
+    # because it needs the typed ``DockerEntry`` and must raise
+    # ``ConfigError`` (structured ``kind``) rather than ``ValidationError``
+    # — so it cannot live on ``Field(pattern=...)``. Placeholder rejection
+    # already happened in ``_expand_placeholders`` (before validation), so
+    # ``docker_host: ${X}`` never reaches here.
+    for entry in config.targets:
+        if isinstance(entry, DockerEntry):
+            _validate_docker_host(entry)
+    return config
+
+
+_DOCKER_HOST_UNIX_PREFIX: str = "unix:///"
+
+
+def _validate_docker_host(entry: DockerEntry) -> None:
+    """Reject any ``docker_host`` that is not a non-empty local unix socket.
+
+    Acceptance is a narrow exception; rejection is the default catch-all
+    (spec §场景:docker_host*). ``docker_host`` is accepted **iff** it
+    ``startswith("unix:///")`` (case-sensitive — an absolute socket path,
+    three slashes) **and** the socket path after ``unix:///`` is non-empty.
+
+    Everything else raises
+    ``ConfigError(kind="docker_host_remote_not_supported", ...)``:
+
+    - remote schemes (``tcp://`` / ``ssh://`` / ``http(s)://`` / ``npipe://``),
+    - bare paths without a scheme (``/var/run/docker.sock``),
+    - empty socket path (``unix://`` / ``unix:///``),
+    - case-mismatched schemes (``UNIX://x``),
+    - relative socket paths (``unix://foo``).
+
+    A literal local-socket endpoint (``unix:///var/run/docker.sock``) is the
+    only accepted form — proving the validator is not "reject everything".
+    """
+
+    host = entry.docker_host
+    if host is None:
+        return
+    if host.startswith(_DOCKER_HOST_UNIX_PREFIX) and host[len(_DOCKER_HOST_UNIX_PREFIX) :]:
+        return
+    raise ConfigError(
+        kind="docker_host_remote_not_supported",
+        field="docker_host",
+        target=entry.name,
+    )
 
 
 def _strip_placeholders(

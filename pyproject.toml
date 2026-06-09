@@ -61,8 +61,10 @@ dev = [
     # CI (`pip install -e ".[dev]"`) needs the optional mcp SDK to run the
     # tests/mcp_server suite; self-reference keeps the pin in one place.
     "hostlens[mcp]",
+    "hostlens[docker]",
 ]
 mcp = ["mcp>=1.27"]
+docker = ["docker>=7"]
 docs = []
 
 [project.scripts]
@@ -129,4 +131,5 @@ addopts = "-ra --strict-markers --strict-config -m 'not live'"
 markers = [
     "slow: long-running tests",
     "live: tests that hit real Anthropic API (opt-in via -m live)",
+    "docker_integration: tests that exercise a real docker daemon (skip when unavailable)",
 ]
