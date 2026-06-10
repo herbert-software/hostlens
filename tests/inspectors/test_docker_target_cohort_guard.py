@@ -7,7 +7,7 @@ independent layers protect the cohort:
 
 * **Frozen INCLUDE/EXCLUDE name lists** (``test_include_exclude_*``) — the
   manually-reviewed roster from design Decision 4, with hard count assertions
-  (28 / 42 / 70) so a hand-tally drift (a dropped or smuggled manifest) fails
+  (30 / 42 / 72) so a hand-tally drift (a dropped or smuggled manifest) fails
   loudly instead of silently shifting the cohort.
 * **Content-based guard** (``test_host_global_marker_*``) — independent of the
   name list: any manifest whose ``collect.command`` reads a host-global,
@@ -51,8 +51,10 @@ _INCLUDE: frozenset[str] = frozenset(
         "nginx.config_test",
         "nginx.error_rate",
         "nginx.health",
+        "nginx.upstream",
         # mysql
         "mysql.connection_usage",
+        "mysql.deadlocks",
         "mysql.replication_lag",
         "mysql.slow_queries",
         # postgres
@@ -187,16 +189,16 @@ def _load_all_builtin() -> dict[str, InspectorManifest]:
 
 
 def test_rosters_partition_all_builtins_with_frozen_counts() -> None:
-    """INCLUDE(28) + EXCLUDE(42) = every builtin(70), disjoint — a count drift
+    """INCLUDE(30) + EXCLUDE(42) = every builtin(72), disjoint — a count drift
     (dropped or smuggled manifest) fails here, not silently."""
 
-    assert len(_INCLUDE) == 28
+    assert len(_INCLUDE) == 30
     assert len(_EXCLUDE) == 42
     assert _INCLUDE.isdisjoint(_EXCLUDE)
 
     by_name = _load_all_builtin()
     all_names = frozenset(by_name)
-    assert len(all_names) == 70
+    assert len(all_names) == 72
 
     rostered = _INCLUDE | _EXCLUDE
     assert all_names == rostered, {

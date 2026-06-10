@@ -429,7 +429,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 **退出条件**：覆盖矩阵下每个域至少有 3 个 Inspector，总计 ≥40 个，每个 Inspector 有 manifest + snapshot 测试 + 在 `examples/` 里有可 replay 的 fixture。
 
-**状态：✅ 达退出门槛**。已通过多个 inspector wave 增量交付，当前 `src/hostlens/inspectors/builtin/` 下 **70 个** inspector（总数已过 ≥40 门槛，每域 ≥3），核心域（计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/**K8s 控制面**/log/系统/**security/包管理**/**语言运行时 JVM·Go**/**TLS chain**）已覆盖。已归档 change：`add-inspector-authoring-contract`、`add-os-shell-inspectors-wave1`、`add-service-inspector-contract-spike`、`add-single-instance-service-inspectors`、`add-log-and-fault-service-inspectors`、`add-replication-inspector-spike`、`add-replication-lag-inspectors`、`add-postgres-replication-lag-inspector`、`add-security-baseline-and-package-inspectors`、`add-runtime-inspectors`、`add-tls-chain-validity-inspector`、`add-k8s-control-plane-inspectors`、`migrate-redis-slowlog-service-contract`、`migrate-postgres-bloat-tables-service-contract`。seed 漂移迁移已收口（slowlog/bloat_tables 全量合规 service-inspector-contract）。K8s 控制面域（pod OOMKilled / evicted / stuck-pending / node conditions / warning events）经 `add-k8s-control-plane-inspectors` 以 kubectl 管理机视角交付（5 个 `k8s.*` inspector，`targets: [local, ssh]`）。**可选增强（非退出阻塞）**：wave-2b 推后项 nginx.upstream、mysql.deadlocks。
+**状态：✅ 域全满**。已通过多个 inspector wave 增量交付，当前 `src/hostlens/inspectors/builtin/` 下 **72 个** inspector（总数已过 ≥40 门槛，每域 ≥3），核心域（计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/**K8s 控制面**/log/系统/**security/包管理**/**语言运行时 JVM·Go**/**TLS chain**）已覆盖。已归档 change：`add-inspector-authoring-contract`、`add-os-shell-inspectors-wave1`、`add-service-inspector-contract-spike`、`add-single-instance-service-inspectors`、`add-log-and-fault-service-inspectors`、`add-replication-inspector-spike`、`add-replication-lag-inspectors`、`add-postgres-replication-lag-inspector`、`add-security-baseline-and-package-inspectors`、`add-runtime-inspectors`、`add-tls-chain-validity-inspector`、`add-k8s-control-plane-inspectors`、`migrate-redis-slowlog-service-contract`、`migrate-postgres-bloat-tables-service-contract`、`add-nginx-upstream-mysql-deadlocks-inspectors`。seed 漂移迁移已收口（slowlog/bloat_tables 全量合规 service-inspector-contract）。K8s 控制面域（pod OOMKilled / evicted / stuck-pending / node conditions / warning events）经 `add-k8s-control-plane-inspectors` 以 kubectl 管理机视角交付（5 个 `k8s.*` inspector，`targets: [local, ssh]`）。wave-2b 尾批 nginx.upstream（upstream 故障）、mysql.deadlocks（InnoDB 死锁）经 `add-nginx-upstream-mysql-deadlocks-inspectors` 交付，Web/DB 域全满。
 
 ### 覆盖矩阵
 
@@ -446,8 +446,8 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 | 内核 / 系统 | dmesg errors / kernel taint / reboot-required / uptime | — | system.kernel_messages ✅, system.uptime, system.reboot_required ✅, system.kernel_taint ✅ |
 | 安全基线 | failed logins / sudo history / 提权向量 | — | security.failed_logins ✅, security.sudo_history ✅, security.world_writable_dirs ✅（异常监听端口由既有 net.listening_ports 覆盖，不重复） |
 | 包管理 | 待升级包 / 安全补丁 / held-back | — | pkg.pending_updates ✅, pkg.security_patches ✅, pkg.held_back ✅ |
-| Web / Nginx | health / config test / 5xx rate / upstream health | — | nginx.health ✅, nginx.config_test ✅, nginx.error_rate ✅, nginx.upstream（wave-2b 推后,待后续批次/spike） |
-| MySQL | conn usage / slow queries / replication lag / deadlocks | — | mysql.connection_usage, mysql.slow_queries ✅, mysql.replication_lag, mysql.deadlocks（wave-2b 推后,待后续批次/spike） |
+| Web / Nginx | health / config test / 5xx rate / upstream health | — | nginx.health ✅, nginx.config_test ✅, nginx.error_rate ✅, nginx.upstream ✅ |
+| MySQL | conn usage / slow queries / replication lag / deadlocks | — | mysql.connection_usage ✅, mysql.slow_queries ✅, mysql.replication_lag ✅, mysql.deadlocks ✅ |
 | PostgreSQL | conn usage / replication lag / bloat（真实 SQL）/ long queries | — | postgres.connection_usage ✅, postgres.replication_lag, postgres.bloat_tables, postgres.long_queries ✅ |
 | Redis | memory / persistence / replication / slowlog | — | redis.memory_usage ✅, redis.persistence ✅, redis.replication_lag ✅, redis.slowlog ✅ |
 | Docker（SSH 跨） | unhealthy / restart loop / image disk / network | — | docker.containers.unhealthy（由 docker.containers.restart_loop 覆盖、不单列）, docker.containers.restart_loop ✅, docker.images.disk_usage ✅, docker.networks ✅ |
@@ -465,8 +465,8 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 - [ ] **6.3 systemd + cron**（systemd.timer_status, systemd.masked, cron.last_runs, cron.failures）
 - [x] **6.4a 安全基线 + 包管理**（security.failed_logins, security.sudo_history, security.world_writable_dirs, pkg.pending_updates, pkg.security_patches, pkg.held_back）—— 已交付，归档 `add-security-baseline-and-package-inspectors`
 - [x] **6.4b TLS chain validity**（tls.chain_validity）—— 已交付，归档 `add-tls-chain-validity-inspector`
-- [~] **6.5 Nginx**（health ✅, config_test ✅, error_rate ✅；upstream 为 wave-2b 可选增强，非退出阻塞）
-- [~] **6.6 MySQL / PostgreSQL**（mysql.connection_usage/slow_queries/replication_lag ✅、postgres.connection_usage/replication_lag/bloat_tables/long_queries ✅，含真实 SQL 模板；mysql.deadlocks 为 wave-2b 可选增强，非退出阻塞）
+- [x] **6.5 Nginx**（health ✅, config_test ✅, error_rate ✅, upstream ✅）
+- [x] **6.6 MySQL / PostgreSQL**（mysql.connection_usage/slow_queries/replication_lag/deadlocks ✅、postgres.connection_usage/replication_lag/bloat_tables/long_queries ✅，含真实 SQL 模板）
 - [x] **6.7 Redis**（memory_usage, persistence, replication_lag, slowlog）—— 全交付，slowlog 已迁移至 service-inspector-contract 全量合规
 - [x] **6.8 Docker（SSH 跨）**（containers.restart_loop, images.disk_usage, networks；unhealthy 由 restart_loop 覆盖不单列）
 - [x] **6.9 JVM / Go 运行时**（jvm.heap, jvm.gc, jvm.threads, go.goroutines, go.heap）—— 已交付，归档 `add-runtime-inspectors`

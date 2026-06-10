@@ -13,14 +13,16 @@ etc.) — this file only validates the *common* cross-inspector contract.
 Manifest subsets enumerated below (every parametrize carries a count guard so a
 glob that matches nothing cannot make the suite pass vacuously):
 
-  * ``_SECRET_SERVICE_MANIFESTS`` (8): the service inspectors that declare a
+  * ``_SECRET_SERVICE_MANIFESTS`` (9): the service inspectors that declare a
     non-empty ``secrets`` list — redis.memory_usage / mysql.connection_usage /
     redis.persistence / postgres.connection_usage / mysql.slow_queries /
-    postgres.long_queries / redis.slowlog / postgres.bloat_tables. Secret-not-in-
+    postgres.long_queries / redis.slowlog / postgres.bloat_tables /
+    mysql.deadlocks. Secret-not-in-
     argv, the secret-probe injection-safety positive control, and the secret-leak
     regression enumerate THIS subset (the docker / nginx probes have no secret
     surface, so scanning them for a password would be a vacuous assertion).
-  * ``_ALL_SERVICE_MANIFESTS`` (13 = 2 spike + 6 wave-2a + 3 wave-2b + 2 migrated):
+  * ``_ALL_SERVICE_MANIFESTS`` (15 = 2 spike + 6 wave-2a + 3 wave-2b + 2 migrated
+    + 2 wave-2b-tail):
     output aggregate-vs-
     list distinction, string-param pattern, timeout discipline, no-target-
     forking, and the bare-key/parameter-name disjointness enumerate THIS subset.
@@ -91,7 +93,8 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 #
 # Two spike probes + six wave-2a + three wave-2b + two migrated (redis.slowlog,
 # migrated from REDIS_PASSWORD to HOSTLENS_REDIS_PASSWORD; postgres.bloat_tables,
-# migrated from PGPASSWORD to HOSTLENS_POSTGRES_PASSWORD) inspectors. Keep this
+# migrated from PGPASSWORD to HOSTLENS_POSTGRES_PASSWORD) + two wave-2b-tail
+# (nginx.upstream, mysql.deadlocks) inspectors. Keep this
 # list in lockstep with the manifests shipped under builtin/{redis,mysql,postgres,
 # docker,nginx}/ — the count guards below freeze the cohort size so neither a
 # dropped nor a smuggled manifest slips through silently.
@@ -115,6 +118,9 @@ _ALL_SERVICE_MANIFESTS: dict[str, Path] = {
     "redis.slowlog": _builtin_root() / "redis" / "slowlog.yaml",
     # migrated into the contract (env name PGPASSWORD → HOSTLENS_POSTGRES_PASSWORD)
     "postgres.bloat_tables": _builtin_root() / "postgres" / "bloat_tables.yaml",
+    # wave-2b-tail cohort (add-nginx-upstream-mysql-deadlocks-inspectors)
+    "nginx.upstream": _builtin_root() / "nginx" / "upstream.yaml",
+    "mysql.deadlocks": _builtin_root() / "mysql" / "deadlocks.yaml",
 }
 _ALL_IDS = sorted(_ALL_SERVICE_MANIFESTS)
 _ALL_ITEMS = sorted(_ALL_SERVICE_MANIFESTS.items())
@@ -131,6 +137,9 @@ _SECRET_SERVICE_MANIFESTS: dict[str, Path] = {
     "postgres.long_queries": _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
     "redis.slowlog": _ALL_SERVICE_MANIFESTS["redis.slowlog"],
     "postgres.bloat_tables": _ALL_SERVICE_MANIFESTS["postgres.bloat_tables"],
+    # wave-2b-tail: nginx.upstream has NO secret (reads a static log file), so it
+    # is deliberately absent — only mysql.deadlocks declares HOSTLENS_MYSQL_PWD.
+    "mysql.deadlocks": _ALL_SERVICE_MANIFESTS["mysql.deadlocks"],
 }
 _SECRET_IDS = sorted(_SECRET_SERVICE_MANIFESTS)
 _SECRET_ITEMS = sorted(_SECRET_SERVICE_MANIFESTS.items())
@@ -161,6 +170,7 @@ _SECRET_CLIENT_RULES: dict[str, dict[str, Any]] = {
     "redis.slowlog": {"native_env": "REDISCLI_AUTH", "forbidden_flags": ("-a ",)},
     "mysql.connection_usage": {"native_env": "MYSQL_PWD", "forbidden_flags": (" -p",)},
     "mysql.slow_queries": {"native_env": "MYSQL_PWD", "forbidden_flags": (" -p",)},
+    "mysql.deadlocks": {"native_env": "MYSQL_PWD", "forbidden_flags": (" -p",)},
     # psql: PGPASSWORD env channel; NO argv plaintext-password flag (`-p` is PORT).
     "postgres.connection_usage": {"native_env": "PGPASSWORD", "forbidden_flags": ()},
     "postgres.long_queries": {"native_env": "PGPASSWORD", "forbidden_flags": ()},
@@ -182,11 +192,11 @@ def _runner() -> InspectorRunner:
 
 
 def test_all_service_manifests_count_frozen() -> None:
-    assert len(_ALL_SERVICE_MANIFESTS) == 13, sorted(_ALL_SERVICE_MANIFESTS)
+    assert len(_ALL_SERVICE_MANIFESTS) == 15, sorted(_ALL_SERVICE_MANIFESTS)
 
 
 def test_secret_service_manifests_count_frozen() -> None:
-    assert len(_SECRET_SERVICE_MANIFESTS) == 8, sorted(_SECRET_SERVICE_MANIFESTS)
+    assert len(_SECRET_SERVICE_MANIFESTS) == 9, sorted(_SECRET_SERVICE_MANIFESTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -283,6 +293,21 @@ _INJECTABLE_PARAMS: list[tuple[str, Path, str, str]] = [
         "dbname",
         "appdb",
     ),
+    # wave-2b-tail: mysql.deadlocks injects host/user into the mysql client. nginx.
+    # upstream carries no string param (only the integer warn_count) so it is
+    # legitimately absent from this injection surface (see docker probe exemption).
+    (
+        "mysql.deadlocks",
+        _ALL_SERVICE_MANIFESTS["mysql.deadlocks"],
+        "host",
+        "db.internal",
+    ),
+    (
+        "mysql.deadlocks",
+        _ALL_SERVICE_MANIFESTS["mysql.deadlocks"],
+        "user",
+        "monitor_user",
+    ),
 ]
 _INJECTABLE_IDS = [f"{name}:{param}" for name, _, param, _ in _INJECTABLE_PARAMS]
 
@@ -293,6 +318,7 @@ _REQUIRES_USER = {
     "postgres.connection_usage",
     "mysql.slow_queries",
     "postgres.long_queries",
+    "mysql.deadlocks",
 }
 
 
@@ -372,6 +398,7 @@ def _ok_stdout(probe: str) -> str:
         "mysql.slow_queries": '{"slow_query_count":0,"slow_log_monitoring_enabled":true}',
         "postgres.long_queries": '{"long_query_count":0,"max_duration_seconds":0}',
         "postgres.bloat_tables": '{"total_tables":0,"results":[]}',
+        "mysql.deadlocks": '{"deadlock_detected":false,"deadlock_age_seconds":-1}',
     }[probe]
 
 
@@ -515,6 +542,14 @@ _ALL_FIXTURES: list[Path] = (
     # `-u postgres`) with no injected secret VALUE, so the leak scan over it is
     # vacuous; the real value here is replay-key / no-env invariant coverage.
     + sorted((_FIXTURES / "postgres_bloat_tables").glob("*.json"))
+    # wave-2b-tail mysql.deadlocks fixtures (3): the recorder injects
+    # HOSTLENS_MYSQL_PWD (_record_mysql_deadlocks.RECORDED_PW), so the redaction
+    # guard MUST scan this per-inspector dir too (else the deadlocks leak check is
+    # vacuous — §6.4). The dir is `mysql_deadlocks/` (per-inspector), NOT the
+    # shared `mysql/` already scanned above — landing deadlocks in `mysql/` would
+    # double-include it and duplicate parametrize IDs. nginx.upstream has no secret
+    # and (like nginx_error_rate) is deliberately not scanned.
+    + sorted((_FIXTURES / "mysql_deadlocks").glob("*.json"))
 )
 
 #: EVERY literal secret VALUE any recorder actually injected via a HOSTLENS_*
@@ -554,6 +589,10 @@ _RECORDED_SECRET_VALUES: tuple[str, ...] = (
     "wrong-" + "password",
     # mysql lowpriv fixture recorded with this user's password.
     "lowpriv-" + "pw",
+    # mysql.deadlocks recorder throwaway password (_record_mysql_deadlocks.
+    # RECORDED_PW). Built by concatenation (kept in lock-step with the recorder
+    # constant) so a credential scanner does not flag a fake test credential.
+    "hostlens-" + "deadlocks-" + "throwaway-pw",
 )
 
 
@@ -565,9 +604,12 @@ class TestSecretNeverInArgvOrFixture:
         # >=6; the two wave-2a secret probes add persistence_* (3+) + postgres
         # (5); wave-2b adds mysql_slow_queries (5) + postgres_long_queries (4);
         # the migrated redis.slowlog adds slowlog_* (5) and the migrated
-        # postgres.bloat_tables adds postgres_bloat_tables (4). The lower bound
-        # stays conservative (>=20) — the additions only widen the scanned set.
-        assert len(_ALL_FIXTURES) >= 20, _ALL_FIXTURES
+        # postgres.bloat_tables adds postgres_bloat_tables (4); the wave-2b-tail
+        # mysql.deadlocks adds mysql_deadlocks (3). The lower bound stays
+        # conservative — it ONLY guards against a glob that silently matches
+        # NOTHING (vacuous parametrize), NOT against a single fixture being dropped
+        # (a松底 cannot detect one missing file). The additions only widen the set.
+        assert len(_ALL_FIXTURES) >= 22, _ALL_FIXTURES
 
     @pytest.mark.parametrize("fixture", _ALL_FIXTURES, ids=lambda p: f"{p.parent.name}/{p.stem}")
     def test_fixture_carries_no_plaintext_secret(self, fixture: Path) -> None:
@@ -707,11 +749,20 @@ class TestOutputKeyDisjointFromParameters:
         assert not overlap, f"{name}: output key(s) use reserved window name(s): {sorted(overlap)}"
 
 
-#: wave-2b cohort — deterministic replay (D-1): pure aggregate scalars only.
+#: wave-2b cohort (incl. wave-2b-tail) — deterministic replay (D-1): pure
+#: aggregate scalars only. nginx.upstream + mysql.deadlocks both emit bool/int
+#: scalar output_schema (no detail array), so the no-array enforcer holds.
 _WAVE2B_MANIFESTS: dict[str, Path] = {
     name: path
     for name, path in _ALL_SERVICE_MANIFESTS.items()
-    if name in {"mysql.slow_queries", "postgres.long_queries", "nginx.error_rate"}
+    if name
+    in {
+        "mysql.slow_queries",
+        "postgres.long_queries",
+        "nginx.error_rate",
+        "nginx.upstream",
+        "mysql.deadlocks",
+    }
 }
 _WAVE2B_ITEMS = sorted(_WAVE2B_MANIFESTS.items())
 _WAVE2B_IDS = sorted(_WAVE2B_MANIFESTS)
@@ -770,6 +821,7 @@ _CLIENT_TIMEOUT_TOKEN: dict[str, tuple[str, int]] = {
     "redis.slowlog": ("-t 5", 5),
     "mysql.connection_usage": ("--connect-timeout=5", 5),
     "mysql.slow_queries": ("--connect-timeout=5", 5),
+    "mysql.deadlocks": ("--connect-timeout=5", 5),
     "postgres.connection_usage": ("PGCONNECT_TIMEOUT=5", 5),
     "postgres.long_queries": ("PGCONNECT_TIMEOUT=5", 5),
     "postgres.bloat_tables": ("PGCONNECT_TIMEOUT=5", 5),
@@ -778,7 +830,10 @@ _CLIENT_TIMEOUT_TOKEN: dict[str, tuple[str, int]] = {
     "docker.networks": ("timeout 20", 20),
 }
 #: Inspectors with no network round-trip (local exec / file read) → no connect-timeout token.
-_NO_CONNECT_TIMEOUT = {"nginx.config_test", "nginx.error_rate"}
+#: nginx.upstream reads a static log file (no network round-trip) like
+#: nginx.error_rate, so it belongs here and is deliberately NOT in
+#: _CLIENT_TIMEOUT_TOKEN (the :804 assertion enforces that disjointness).
+_NO_CONNECT_TIMEOUT = {"nginx.config_test", "nginx.error_rate", "nginx.upstream"}
 
 
 class TestTimeoutAndOutputDiscipline:
@@ -916,7 +971,7 @@ class TestOutputShapeDiscipline:
             )
 
     def test_only_docker_networks_is_list_shaped(self) -> None:
-        """The other 12 service inspectors are pure aggregate scalar (no array
+        """The other 14 service inspectors are pure aggregate scalar (no array
         top-level field) except docker.networks AND the migrated
         postgres.bloat_tables — a meta-guard that the parametrized branch above is
         non-vacuous (exactly the two list-shaped inspectors take that branch)."""
@@ -956,12 +1011,17 @@ class TestFailureClassificationCovered:
         "nginx.error_rate": Path(__file__).parent / "test_nginx_error_rate.py",
         "redis.slowlog": Path(__file__).parent / "test_redis_slowlog.py",
         "postgres.bloat_tables": Path(__file__).parent / "test_postgres_bloat_tables.py",
+        "nginx.upstream": Path(__file__).parent / "test_nginx_upstream.py",
+        "mysql.deadlocks": Path(__file__).parent / "test_mysql_deadlocks.py",
     }
 
     #: Probes with no deterministic exception path (file-read / premise-only
     #: failures). nginx.config_test's exception is the non-{0,1} rc fallback;
     #: nginx.error_rate only has requires_unmet (missing log/awk) and ok.
-    _NO_EXCEPTION_SNAPSHOT: ClassVar[set[str]] = {"nginx.error_rate"}
+    #: nginx.upstream is the same shape as nginx.error_rate (reads a static log
+    #: file → only requires_unmet + ok, no deterministic exception). mysql.deadlocks
+    #: DOES have an exception path (auth-failed / unreachable) so it is NOT here.
+    _NO_EXCEPTION_SNAPSHOT: ClassVar[set[str]] = {"nginx.error_rate", "nginx.upstream"}
 
     @pytest.mark.parametrize("probe", sorted(_PROBE_TEST_SOURCES), ids=sorted(_PROBE_TEST_SOURCES))
     def test_each_failure_class_asserted_in_probe_suite(self, probe: str) -> None:

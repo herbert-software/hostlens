@@ -72,7 +72,7 @@ collect:
     LC_ALL=C awk '
       /no live upstreams/                                    { noLive++ }
       /upstream timed out/                                   { timeout++ }
-      /while connecting to upstream/                         { connect++ }
+      /connect\(\) failed/                                   { connect++ }
       /upstream prematurely closed connection/               { premature++ }
       /upstream (timed out|prematurely|sent)|no live upstreams|while connecting to upstream/ { total++ }
       END {
@@ -212,6 +212,7 @@ findings:
 | mysql 服务不可达 / 认证失败 | `--connect-timeout=5` 快速失败,collector exit 1 + 空 stdout | status=exception,fail-loud 不静默报健康 |
 | InnoDB 从未发生死锁(STATUS 无 LATEST DETECTED DEADLOCK 段) | collector parse 命中空段,END 恒发哨兵 | deadlock_detected=false + deadlock_age_seconds=-1 → ok 零 finding(两键恒出,不省略键,避免 output_schema required 校验失败→exception) |
 | SHOW ENGINE INNODB STATUS 时间戳 locale/格式异常 | parse 失败 | collector exit 1 + stderr → status=exception(不吐半成品标量) |
+| 远程 mysql 与 collector 主机 TZ 不同(INNODB STATUS 时间戳是 server 本地时区,`date -d` 按 collector 主机时区解析) | age 偏移 offset(可能把近期死锁推出 lookback 或得负 age) | **文档化限制**:默认 `host=127.0.0.1`(collector 与 mysql 同机共享时钟)无偏移、为常见态;跨 TZ 远程检查留 follow-up(需 `@@global.time_zone` 归一)。manifest collector 注释已显式声明 |
 
 ## Operational Limits
 

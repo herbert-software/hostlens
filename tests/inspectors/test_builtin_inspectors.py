@@ -301,6 +301,53 @@ class TestWave2bSuiteRegistration:
 
 
 # --------------------------------------------------------------------------- #
+# add-nginx-upstream-mysql-deadlocks-inspectors — wave-2b-tail clean registration
+# --------------------------------------------------------------------------- #
+#
+# The 2 wave-2b-tail service inspectors (nginx.upstream + mysql.deadlocks), keyed
+# by registry `name` → on-disk yaml path (relative to `builtin/`). This is the
+# 归档时冻结的 wave-2b-tail 清单 the suite spec's first scenario (wave-2b 尾批冻结
+# 清单全部干净注册) references.
+#
+# IMPORTANT — this `wave-2b-tail` cohort is a DISTINCT, NON-COLLIDING symbol from
+# the prior `_WAVE2B_INSPECTORS` (==3: slow_queries / long_queries / error_rate)
+# above. Reusing `_WAVE2B_INSPECTORS` would shadow it within this module, collide
+# with its frozen `== 3` count guard, and pollute the prior batch's semantics. A
+# dedicated symbol keeps each cohort's count independent (same先例 as the
+# os-shell wave-2 / runtime cohorts using their own symbols).
+
+_WAVE2B_TAIL_INSPECTORS: dict[str, str] = {
+    "nginx.upstream": "nginx/upstream.yaml",
+    "mysql.deadlocks": "mysql/deadlocks.yaml",
+}
+
+
+class TestWave2bTailSuiteRegistration:
+    """add-nginx-upstream-mysql-deadlocks-inspectors — every wave-2b-tail
+    inspector loads clean + registers with errors == []. Distinct dedicated
+    symbol — NOT the prior `_WAVE2B_INSPECTORS` (==3) guard."""
+
+    def test_wave2b_tail_count_is_frozen_at_2(self) -> None:
+        assert len(_WAVE2B_TAIL_INSPECTORS) == 2
+
+    @pytest.mark.parametrize(
+        "name,rel_path",
+        sorted(_WAVE2B_TAIL_INSPECTORS.items()),
+        ids=sorted(_WAVE2B_TAIL_INSPECTORS),
+    )
+    def test_wave2b_tail_manifest_loads_clean(self, name: str, rel_path: str) -> None:
+        manifest = load_manifest(_builtin_root() / rel_path)
+        assert manifest.name == name
+
+    def test_wave2b_tail_inspectors_all_register_with_no_errors(self) -> None:
+        result = build_registry_from_search_paths([], settings=Settings())
+        assert result.errors == []
+        registered = set(result.registry.names())
+        missing = set(_WAVE2B_TAIL_INSPECTORS) - registered
+        assert not missing, f"wave-2b-tail inspectors absent from registry: {sorted(missing)}"
+
+
+# --------------------------------------------------------------------------- #
 # add-security-baseline-and-package-inspectors — os-shell wave-2 (security/pkg)
 # clean registration (tasks.md §4.1)
 # --------------------------------------------------------------------------- #

@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v awk",
+      "stdout": "/usr/bin/awk\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "[ -r /var/log/nginx/error.log ]",
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "LC_ALL=C awk '\n  /no live upstreams/                                    { noLive++ }\n  /upstream timed out/                                   { timeout++ }\n  /connect\\(\\) failed/                                   { connect++ }\n  /upstream prematurely closed connection/               { premature++ }\n  /upstream (timed out|prematurely|sent)|no live upstreams|while connecting to upstream/ { total++ }\n  END {\n    printf \"{\\\"upstream_error_count\\\":%d,\\\"timed_out\\\":%d,\\\"no_live_upstreams\\\":%d,\\\"connect_failed\\\":%d,\\\"prematurely_closed\\\":%d}\", \\\n      total+0, timeout+0, noLive+0, connect+0, premature+0\n  }\n' /var/log/nginx/error.log",
+      "stdout": "{\"upstream_error_count\":10,\"timed_out\":4,\"no_live_upstreams\":3,\"connect_failed\":2,\"prematurely_closed\":1}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

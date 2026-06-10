@@ -1,0 +1,95 @@
+name: mysql.deadlocks
+version: 1.0.0
+# Service-inspector-suite wave-2b-tail probe: latest InnoDB deadlock from
+# SHOW ENGINE INNODB STATUS. MySQL exposes NO clean cumulative deadlock counter
+# by default, so this is a point-in-time "did a deadlock occur within lookback"
+# check. The deadlock age is collapsed to a scalar AT SAMPLE TIME on the target
+# (wave-2b determinism: ReplayTarget returns the frozen scalar, never re-aggregates
+# by now()). secret HOSTLENS_MYSQL_PWD remapped to MYSQL_PWD, never inlined in argv.
+description: >-
+  MySQL InnoDB 死锁巡检(单实例,point-in-time 最近死锁)。SHOW ENGINE INNODB STATUS
+  取「LATEST DETECTED DEADLOCK」段,collector 内 parse ISO 形时间戳并在采样时刻算
+  deadlock_age_seconds 标量、冻结进输出(无死锁恒发哨兵 -1)。MySQL 默认无累积死锁
+  计数器,故只判「最近 lookback 窗口内是否发生死锁」。secret 声明 HOSTLENS_MYSQL_PWD
+  (remap 到 MYSQL_PWD,从不内联 argv)。服务不可达/认证失败/时间戳 parse 失败 →
+  status=exception;无死锁 → ok。SSH 上需远端 sshd 配 AcceptEnv HOSTLENS_*。
+tags: [mysql, service, deadlocks, innodb]
+targets: [local, ssh, docker, k8s]
+requires_capabilities: [shell]
+requires_binaries: [mysql]
+secrets: [HOSTLENS_MYSQL_PWD]
+privilege: none
+
+parameters:
+  type: object
+  required: [user]
+  properties:
+    host:
+      type: string
+      pattern: "^[a-zA-Z0-9._-]+$"
+      default: "127.0.0.1"
+    port:
+      type: integer
+      minimum: 1
+      maximum: 65535
+      default: 3306
+    user:
+      type: string
+      pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+    lookback_seconds:
+      type: integer
+      minimum: 1
+      default: 3600
+  additionalProperties: false
+
+collect:
+  # secret remapped to client-native MYSQL_PWD (never argv). --connect-timeout=5
+  # < timeout 15 → unreachable fails fast. Parse the LATEST DETECTED DEADLOCK
+  # section's ISO timestamp; compute age AT SAMPLE TIME, freeze. NOTE the section
+  # layout: the "LATEST DETECTED DEADLOCK" marker is sandwiched between "------"
+  # separator lines and the timestamp is the FIRST ISO-dated line AFTER the marker
+  # (NOT the immediate next line — that is the closing separator). So flag on the
+  # marker, then print the first line matching ^YYYY- (skips the separator). Both
+  # keys ALWAYS emitted (no-deadlock → deadlock_age_seconds:-1 sentinel) so
+  # output_schema.required never fails. fail-loud: mysql error / non-ISO / non-numeric → exit 1.
+  # TIMEZONE ASSUMPTION: INNODB STATUS prints the deadlock timestamp in the MySQL
+  # SERVER's local time (no TZ suffix); `date -d` reads it in the COLLECTOR host's
+  # local time. For the default host=127.0.0.1 (collector co-located with mysql)
+  # these share the system clock → age correct. If host points to a REMOTE mysql in
+  # a different TZ, age is off by the offset (could push a recent deadlock outside
+  # lookback, or yield a negative age). Documented limitation — co-located is the
+  # default and common case; cross-TZ remote checking is a follow-up (would need
+  # @@global.time_zone normalization).
+  command: |
+    set -e
+    export MYSQL_PWD="${HOSTLENS_MYSQL_PWD:-}"
+    status=$(mysql --batch -N --connect-timeout=5 \
+      -h {{ host | sh }} -P {{ port }} -u {{ user | sh }} \
+      -e "SHOW ENGINE INNODB STATUS\G") \
+      || { echo 'mysql innodb status failed' >&2; exit 1; }
+    ts=$(printf '%s' "$status" | awk '/LATEST DETECTED DEADLOCK/{f=1; next} f && /^[0-9][0-9][0-9][0-9]-/{print $1" "$2; exit}')
+    if [ -z "$ts" ]; then
+      printf '{"deadlock_detected":false,"deadlock_age_seconds":-1}'
+    else
+      epoch=$(date -d "$ts" +%s) || { echo 'deadlock timestamp parse failed' >&2; exit 1; }
+      now=$(date +%s)
+      age=$((now - epoch))
+      printf '{"deadlock_detected":true,"deadlock_age_seconds":%d}' "$age"
+    fi
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    deadlock_detected:     { type: boolean }
+    deadlock_age_seconds:  { type: integer }
+  required: [deadlock_detected, deadlock_age_seconds]
+  additionalProperties: false
+
+findings:
+  - when: "deadlock_detected == True and deadlock_age_seconds <= lookback_seconds"
+    severity: warning
+    message: "MySQL InnoDB 最近 {deadlock_age_seconds}s 前检测到死锁(在 {lookback_seconds}s 窗口内)"

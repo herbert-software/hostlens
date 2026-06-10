@@ -1,0 +1,23 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v mysql",
+      "stdout": "/usr/bin/mysql\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "set -e\nexport MYSQL_PWD=\"${HOSTLENS_MYSQL_PWD:-}\"\nstatus=$(mysql --batch -N --connect-timeout=5 \\\n  -h 127.0.0.1 -P 3306 -u root \\\n  -e \"SHOW ENGINE INNODB STATUS\\G\") \\\n  || { echo 'mysql innodb status failed' >&2; exit 1; }\nts=$(printf '%s' \"$status\" | awk '/LATEST DETECTED DEADLOCK/{f=1; next} f && /^[0-9][0-9][0-9][0-9]-/{print $1\" \"$2; exit}')\nif [ -z \"$ts\" ]; then\n  printf '{\"deadlock_detected\":false,\"deadlock_age_seconds\":-1}'\nelse\n  epoch=$(date -d \"$ts\" +%s) || { echo 'deadlock timestamp parse failed' >&2; exit 1; }\n  now=$(date +%s)\n  age=$((now - epoch))\n  printf '{\"deadlock_detected\":true,\"deadlock_age_seconds\":%d}' \"$age\"\nfi",
+      "stdout": "{\"deadlock_detected\":true,\"deadlock_age_seconds\":300}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

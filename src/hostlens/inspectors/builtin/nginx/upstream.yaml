@@ -1,0 +1,69 @@
+name: nginx.upstream
+version: 1.0.0
+# Service-inspector-suite wave-2b probe: upstream failure events from the current
+# /var/log/nginx/error.log. Nginx OSS exposes NO per-upstream stats without
+# nginx-plus/stub_status, so upstream health is inferred from error-log events
+# (log rotation = window boundary, design D-4). Static path so requires_files
+# preflight matches the path the collector reads.
+description: >-
+  Nginx upstream 故障巡检(单实例)。单遍 LC_ALL=C awk 扫静态路径
+  /var/log/nginx/error.log,按整文件窗口(日志轮转即窗口边界)统计 upstream 故障事件
+  (upstream timed out / no live upstreams / connect() failed ... upstream /
+  upstream prematurely closed)。Nginx OSS 无 per-upstream 统计,故经 error.log 推断。
+  缺 awk 或日志不可读 → requires_unmet;空日志 → ok 零对象。无连接 secret。
+tags: [nginx, web, service, upstream]
+targets: [local, ssh, docker, k8s]
+requires_capabilities: [shell]
+requires_binaries: [awk]
+requires_files: [/var/log/nginx/error.log]
+secrets: []
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    warn_count:
+      type: integer
+      minimum: 1
+      default: 1
+  additionalProperties: false
+
+collect:
+  # 单遍 awk 在 collector 内坍缩成标量(Authoring Contract rule 1):upstream_error_count
+  # 与分类计数全在此算;Finding DSL 仅阈值比较 ready 标量。LC_ALL=C 防 locale 破 JSON。
+  # END{} 对空输入吐合法零对象。每个分桶按其 TYPE-specific 标记分类(connect_failed
+  # 用 `connect() failed` 而非 `while connecting to upstream` 短语——后者是连接阶段标记,
+  # 也出现在 timeout / no-live 行上,会把非 connect 错误误计为 connect_failed)。
+  # total 合并正则按行去重(每行只计一次),含 connect 行的 `while connecting to upstream`。
+  command: |
+    LC_ALL=C awk '
+      /no live upstreams/                                    { noLive++ }
+      /upstream timed out/                                   { timeout++ }
+      /connect\(\) failed/                                   { connect++ }
+      /upstream prematurely closed connection/               { premature++ }
+      /upstream (timed out|prematurely|sent)|no live upstreams|while connecting to upstream/ { total++ }
+      END {
+        printf "{\"upstream_error_count\":%d,\"timed_out\":%d,\"no_live_upstreams\":%d,\"connect_failed\":%d,\"prematurely_closed\":%d}", \
+          total+0, timeout+0, noLive+0, connect+0, premature+0
+      }
+    ' /var/log/nginx/error.log
+  timeout_seconds: 15
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    upstream_error_count: { type: integer }
+    timed_out:            { type: integer }
+    no_live_upstreams:    { type: integer }
+    connect_failed:       { type: integer }
+    prematurely_closed:   { type: integer }
+  required: [upstream_error_count, timed_out, no_live_upstreams, connect_failed, prematurely_closed]
+  additionalProperties: false
+
+findings:
+  - when: "upstream_error_count >= warn_count"
+    severity: warning
+    message: "Nginx upstream 故障 {upstream_error_count} 次(timeout={timed_out} no-live={no_live_upstreams} connect={connect_failed})"
