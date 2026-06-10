@@ -13,14 +13,14 @@ etc.) — this file only validates the *common* cross-inspector contract.
 Manifest subsets enumerated below (every parametrize carries a count guard so a
 glob that matches nothing cannot make the suite pass vacuously):
 
-  * ``_SECRET_SERVICE_MANIFESTS`` (6): the service inspectors that declare a
+  * ``_SECRET_SERVICE_MANIFESTS`` (8): the service inspectors that declare a
     non-empty ``secrets`` list — redis.memory_usage / mysql.connection_usage /
     redis.persistence / postgres.connection_usage / mysql.slow_queries /
-    postgres.long_queries. Secret-not-in-argv, the secret-probe injection-safety
-    positive control, and the secret-leak regression enumerate THIS subset (the
-    docker / nginx probes have no secret surface, so scanning them for a
-    password would be a vacuous assertion).
-  * ``_ALL_SERVICE_MANIFESTS`` (12 = 2 spike + 6 wave-2a + 3 wave-2b + 1 migrated):
+    postgres.long_queries / redis.slowlog / postgres.bloat_tables. Secret-not-in-
+    argv, the secret-probe injection-safety positive control, and the secret-leak
+    regression enumerate THIS subset (the docker / nginx probes have no secret
+    surface, so scanning them for a password would be a vacuous assertion).
+  * ``_ALL_SERVICE_MANIFESTS`` (13 = 2 spike + 6 wave-2a + 3 wave-2b + 2 migrated):
     output aggregate-vs-
     list distinction, string-param pattern, timeout discipline, no-target-
     forking, and the bare-key/parameter-name disjointness enumerate THIS subset.
@@ -89,11 +89,12 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 # Manifest subsets (enumeration-driven — no per-client hard-coding).
 # --------------------------------------------------------------------------- #
 #
-# Two spike probes + six wave-2a + three wave-2b + one migrated (redis.slowlog,
-# migrated from REDIS_PASSWORD to HOSTLENS_REDIS_PASSWORD) inspectors. Keep this list in
-# lockstep with the manifests shipped under builtin/{redis,mysql,postgres,docker,
-# nginx}/ — the count guards below freeze the cohort size so neither a dropped
-# nor a smuggled manifest slips through silently.
+# Two spike probes + six wave-2a + three wave-2b + two migrated (redis.slowlog,
+# migrated from REDIS_PASSWORD to HOSTLENS_REDIS_PASSWORD; postgres.bloat_tables,
+# migrated from PGPASSWORD to HOSTLENS_POSTGRES_PASSWORD) inspectors. Keep this
+# list in lockstep with the manifests shipped under builtin/{redis,mysql,postgres,
+# docker,nginx}/ — the count guards below freeze the cohort size so neither a
+# dropped nor a smuggled manifest slips through silently.
 
 _ALL_SERVICE_MANIFESTS: dict[str, Path] = {
     # spike probes
@@ -112,6 +113,8 @@ _ALL_SERVICE_MANIFESTS: dict[str, Path] = {
     "nginx.error_rate": _builtin_root() / "nginx" / "error_rate.yaml",
     # migrated into the contract (env name REDIS_PASSWORD → HOSTLENS_REDIS_PASSWORD)
     "redis.slowlog": _builtin_root() / "redis" / "slowlog.yaml",
+    # migrated into the contract (env name PGPASSWORD → HOSTLENS_POSTGRES_PASSWORD)
+    "postgres.bloat_tables": _builtin_root() / "postgres" / "bloat_tables.yaml",
 }
 _ALL_IDS = sorted(_ALL_SERVICE_MANIFESTS)
 _ALL_ITEMS = sorted(_ALL_SERVICE_MANIFESTS.items())
@@ -127,6 +130,7 @@ _SECRET_SERVICE_MANIFESTS: dict[str, Path] = {
     "mysql.slow_queries": _ALL_SERVICE_MANIFESTS["mysql.slow_queries"],
     "postgres.long_queries": _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
     "redis.slowlog": _ALL_SERVICE_MANIFESTS["redis.slowlog"],
+    "postgres.bloat_tables": _ALL_SERVICE_MANIFESTS["postgres.bloat_tables"],
 }
 _SECRET_IDS = sorted(_SECRET_SERVICE_MANIFESTS)
 _SECRET_ITEMS = sorted(_SECRET_SERVICE_MANIFESTS.items())
@@ -160,6 +164,7 @@ _SECRET_CLIENT_RULES: dict[str, dict[str, Any]] = {
     # psql: PGPASSWORD env channel; NO argv plaintext-password flag (`-p` is PORT).
     "postgres.connection_usage": {"native_env": "PGPASSWORD", "forbidden_flags": ()},
     "postgres.long_queries": {"native_env": "PGPASSWORD", "forbidden_flags": ()},
+    "postgres.bloat_tables": {"native_env": "PGPASSWORD", "forbidden_flags": ()},
 }
 
 
@@ -177,11 +182,11 @@ def _runner() -> InspectorRunner:
 
 
 def test_all_service_manifests_count_frozen() -> None:
-    assert len(_ALL_SERVICE_MANIFESTS) == 12, sorted(_ALL_SERVICE_MANIFESTS)
+    assert len(_ALL_SERVICE_MANIFESTS) == 13, sorted(_ALL_SERVICE_MANIFESTS)
 
 
 def test_secret_service_manifests_count_frozen() -> None:
-    assert len(_SECRET_SERVICE_MANIFESTS) == 7, sorted(_SECRET_SERVICE_MANIFESTS)
+    assert len(_SECRET_SERVICE_MANIFESTS) == 8, sorted(_SECRET_SERVICE_MANIFESTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +274,12 @@ _INJECTABLE_PARAMS: list[tuple[str, Path, str, str]] = [
     (
         "postgres.long_queries",
         _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
+        "dbname",
+        "appdb",
+    ),
+    (
+        "postgres.bloat_tables",
+        _ALL_SERVICE_MANIFESTS["postgres.bloat_tables"],
         "dbname",
         "appdb",
     ),
@@ -360,6 +371,7 @@ def _ok_stdout(probe: str) -> str:
         "nginx.health": '{"healthy":true,"active_connections":1}',
         "mysql.slow_queries": '{"slow_query_count":0,"slow_log_monitoring_enabled":true}',
         "postgres.long_queries": '{"long_query_count":0,"max_duration_seconds":0}',
+        "postgres.bloat_tables": '{"total_tables":0,"results":[]}',
     }[probe]
 
 
@@ -499,6 +511,10 @@ _ALL_FIXTURES: list[Path] = (
     # special-char password into slowlog_special_char_pw.json, so the redaction
     # guard MUST scan these too (else the slowlog leak check is vacuous — §6.4).
     + sorted((_FIXTURES / "redis").glob("slowlog_*.json"))
+    # migrated postgres.bloat_tables fixtures (4): bloat uses peer auth (recorder
+    # `-u postgres`) with no injected secret VALUE, so the leak scan over it is
+    # vacuous; the real value here is replay-key / no-env invariant coverage.
+    + sorted((_FIXTURES / "postgres_bloat_tables").glob("*.json"))
 )
 
 #: EVERY literal secret VALUE any recorder actually injected via a HOSTLENS_*
@@ -548,8 +564,9 @@ class TestSecretNeverInArgvOrFixture:
         # Guard against a glob that silently matches nothing. The spike batch had
         # >=6; the two wave-2a secret probes add persistence_* (3+) + postgres
         # (5); wave-2b adds mysql_slow_queries (5) + postgres_long_queries (4);
-        # the migrated redis.slowlog adds slowlog_* (5). The lower bound stays
-        # conservative (>=20) — the additions only widen the scanned set.
+        # the migrated redis.slowlog adds slowlog_* (5) and the migrated
+        # postgres.bloat_tables adds postgres_bloat_tables (4). The lower bound
+        # stays conservative (>=20) — the additions only widen the scanned set.
         assert len(_ALL_FIXTURES) >= 20, _ALL_FIXTURES
 
     @pytest.mark.parametrize("fixture", _ALL_FIXTURES, ids=lambda p: f"{p.parent.name}/{p.stem}")
@@ -755,6 +772,7 @@ _CLIENT_TIMEOUT_TOKEN: dict[str, tuple[str, int]] = {
     "mysql.slow_queries": ("--connect-timeout=5", 5),
     "postgres.connection_usage": ("PGCONNECT_TIMEOUT=5", 5),
     "postgres.long_queries": ("PGCONNECT_TIMEOUT=5", 5),
+    "postgres.bloat_tables": ("PGCONNECT_TIMEOUT=5", 5),
     "nginx.health": ("--max-time 5", 5),
     "docker.images.disk_usage": ("timeout 20", 20),
     "docker.networks": ("timeout 20", 20),
@@ -882,9 +900,11 @@ class TestOutputShapeDiscipline:
 
     def test_docker_networks_is_the_list_shaped_case(self) -> None:
         """Lock the expectation that docker.networks is the ONE list-shaped
-        inspector AND that it has NO `for_each` finding — proving the array-field
-        judge (not a for_each judge) is what classifies it. If a future edit gives
-        it a for_each, this guard fails loud so the distinction is reconsidered."""
+        inspector WITH A SCALAR finding (no `for_each`) — distinct from the other
+        list-shaped inspector postgres.bloat_tables, which IS for_each-based. This
+        proves the array-field judge (not a for_each judge) is what classifies it.
+        If a future edit gives docker.networks a for_each, this guard fails loud so
+        the distinction is reconsidered."""
 
         manifest = load_manifest(_ALL_SERVICE_MANIFESTS["docker.networks"])
         assert _array_top_keys(manifest.output_schema) == ["results"]
@@ -896,16 +916,17 @@ class TestOutputShapeDiscipline:
             )
 
     def test_only_docker_networks_is_list_shaped(self) -> None:
-        """The other 11 service inspectors are pure aggregate scalar (no array
-        top-level field) — a meta-guard that the parametrized branch above is
-        non-vacuous (exactly one inspector takes the list-shaped branch)."""
+        """The other 12 service inspectors are pure aggregate scalar (no array
+        top-level field) except docker.networks AND the migrated
+        postgres.bloat_tables — a meta-guard that the parametrized branch above is
+        non-vacuous (exactly the two list-shaped inspectors take that branch)."""
 
         list_shaped = [
             name
             for name, path in _ALL_SERVICE_MANIFESTS.items()
             if _array_top_keys(load_manifest(path).output_schema)
         ]
-        assert list_shaped == ["docker.networks"], list_shaped
+        assert sorted(list_shaped) == ["docker.networks", "postgres.bloat_tables"], list_shaped
 
 
 # --------------------------------------------------------------------------- #
@@ -934,6 +955,7 @@ class TestFailureClassificationCovered:
         "postgres.long_queries": Path(__file__).parent / "test_postgres_long_queries.py",
         "nginx.error_rate": Path(__file__).parent / "test_nginx_error_rate.py",
         "redis.slowlog": Path(__file__).parent / "test_redis_slowlog.py",
+        "postgres.bloat_tables": Path(__file__).parent / "test_postgres_bloat_tables.py",
     }
 
     #: Probes with no deterministic exception path (file-read / premise-only

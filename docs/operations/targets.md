@@ -156,15 +156,18 @@ SSH therefore **requires** the remote sshd to be configured with
 the allowlist and the inspector honestly fails as `status=exception`
 (auth failure) rather than silently reporting a healthy backend. Against
 a **no-auth** backend the inspector still succeeds — the empty secret
-carries nothing the allowlist could drop. One pre-spike seed inspector
-(`postgres.bloat_tables`) still declares a non-`HOSTLENS_` secret name
-pending migration; the `HOSTLENS_*` guarantee above covers the
-service-inspector-contract probes and every inspector authored after
-them.
+carries nothing the allowlist could drop. Both former pre-spike seed
+inspectors (`redis.slowlog` and `postgres.bloat_tables`) have now
+migrated to `HOSTLENS_*` secret names; the grandfather clause is closed
+with **no registered grandfathered inspector**, so the `HOSTLENS_*`
+guarantee above covers every service-inspector-contract probe and every
+inspector authored after them.
 
-> **BREAKING — `redis.slowlog` secret rename.** `redis.slowlog` was the
-> last grandfathered pre-spike seed besides `postgres.bloat_tables`; it
-> has now migrated to full service-inspector-contract compliance. Its
+> **BREAKING — `redis.slowlog` secret rename.** `redis.slowlog` was one
+> of the two grandfathered pre-spike seeds; both it and
+> `postgres.bloat_tables` have now migrated to full
+> service-inspector-contract compliance, closing the grandfather clause.
+> Its
 > connection secret env var changed from **`REDIS_PASSWORD`** to
 > **`HOSTLENS_REDIS_PASSWORD`** (aligned with the sibling
 > `redis.{memory_usage,persistence,replication_lag}` inspectors). The

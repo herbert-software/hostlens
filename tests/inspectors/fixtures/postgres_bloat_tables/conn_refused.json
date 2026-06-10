@@ -14,9 +14,9 @@
     },
     {
       "cmd": "PGPASSWORD=\"${HOSTLENS_POSTGRES_PASSWORD:-}\" PGCONNECT_TIMEOUT=5 psql -tAqX --dbname=emptydb -c \"SELECT json_build_object('total_tables', (SELECT count(*) FROM pg_stat_user_tables), 'results', coalesce(json_agg(t), '[]'::json)) FROM (SELECT schemaname AS schema, relname AS table, n_live_tup AS n_live_tup, n_dead_tup AS n_dead_tup, round(n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 20) t\"",
-      "stdout": "{\"total_tables\" : 0, \"results\" : []}\n",
-      "stderr": "",
-      "exit_code": 0,
+      "stdout": "",
+      "stderr": "psql: error: connection to server at \"127.0.0.1\", port 15999 failed: Connection refused\n\tIs the server running on that host and accepting TCP/IP connections?\n",
+      "exit_code": 2,
       "duration_seconds": 0.0
     }
   ],

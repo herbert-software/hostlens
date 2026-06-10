@@ -475,7 +475,7 @@ findings:
 ### 复杂示例 2：密钥引用 + 真实 SQL（PostgreSQL 表 bloat）
 
 ```yaml
-name: postgres.bloat.tables
+name: postgres.bloat_tables
 version: 1.0.0
 description: Identify bloated PostgreSQL tables using pg_stat_user_tables
 tags: [postgres, db, performance]
@@ -494,8 +494,8 @@ parameters:
     bloat_pct_warn:     { type: number, default: 20 }
     bloat_pct_critical: { type: number, default: 50 }
 
-secrets:                              # secrets 只可在 env 中引用 ($PGPASSWORD), 严禁 Jinja 插值
-  - PGPASSWORD
+secrets:                              # secrets 走 HOSTLENS_ 前缀声明, collector remap 到原生 $PGPASSWORD, 严禁 Jinja 插值
+  - HOSTLENS_POSTGRES_PASSWORD
 
 collect:
   # 安全规则: secrets 走 $VAR (runner 注入 env), parameters 走 `| sh` filter 强制 shellquote

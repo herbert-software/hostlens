@@ -1,0 +1,24 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "file_read",
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v psql",
+      "stdout": "/usr/bin/psql\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "PGPASSWORD=\"${HOSTLENS_POSTGRES_PASSWORD:-}\" PGCONNECT_TIMEOUT=5 psql -tAqX --dbname=bloatdb -c \"SELECT json_build_object('total_tables', (SELECT count(*) FROM pg_stat_user_tables), 'results', coalesce(json_agg(t), '[]'::json)) FROM (SELECT schemaname AS schema, relname AS table, n_live_tup AS n_live_tup, n_dead_tup AS n_dead_tup, round(n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 1) t\"",
+      "stdout": "{\"total_tables\" : 2, \"results\" : [{\"schema\":\"public\",\"table\":\"orders\",\"n_live_tup\":2000,\"n_dead_tup\":4000,\"dead_ratio\":0.6667}]}\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

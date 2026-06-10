@@ -166,8 +166,10 @@ if not isinstance(data, dict):
 
 ```sql
 -- ✅ json_build_object 吐顶层对象，results 键满足规则 3
-SELECT json_build_object('results', coalesce(json_agg(t), '[]'::json))
-FROM ( /* 派生 bloat 列 */ ) t
+SELECT json_build_object(
+  'total_tables', (SELECT count(*) FROM pg_stat_user_tables),
+  'results', coalesce(json_agg(t), '[]'::json)
+) FROM ( /* 派生 bloat 列 */ ORDER BY n_dead_tup DESC LIMIT {{ max_results }} ) t
 ```
 
 ```bash
@@ -176,7 +178,9 @@ docker ps --format json | jq -s '{results: .}'
 ```
 
 活例 `postgres.bloat_tables`：用 `json_build_object('results', json_agg(...))` 而非裸
-`json_agg`（后者吐顶层数组、被 `parse_json_not_object` 拒）。
+`json_agg`（后者吐顶层数组、被 `parse_json_not_object` 拒）。它同时是列表形态截断的活例
+——subquery 经 `ORDER BY n_dead_tup DESC LIMIT {{ max_results }}` 截 top-N、外层 `total_tables`
+标量给截断前总数（完整截断后形态见 `bloat_tables.yaml`）。
 
 ---
 

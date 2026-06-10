@@ -13,8 +13,8 @@
       "duration_seconds": 0.0
     },
     {
-      "cmd": "PGPASSWORD=\"$PGPASSWORD\" psql -tAqX --dbname=healthydb -c \"SELECT json_build_object('results', coalesce(json_agg(t), '[]'::json)) FROM (SELECT schemaname AS schema, relname AS table, n_live_tup AS n_live_tup, n_dead_tup AS n_dead_tup, round(n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio FROM pg_stat_user_tables ORDER BY n_dead_tup DESC) t\"",
-      "stdout": "{\"results\" : [{\"schema\":\"public\",\"table\":\"accounts\",\"n_live_tup\":500,\"n_dead_tup\":0,\"dead_ratio\":0.0000}]}\n",
+      "cmd": "PGPASSWORD=\"${HOSTLENS_POSTGRES_PASSWORD:-}\" PGCONNECT_TIMEOUT=5 psql -tAqX --dbname=healthydb -c \"SELECT json_build_object('total_tables', (SELECT count(*) FROM pg_stat_user_tables), 'results', coalesce(json_agg(t), '[]'::json)) FROM (SELECT schemaname AS schema, relname AS table, n_live_tup AS n_live_tup, n_dead_tup AS n_dead_tup, round(n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 20) t\"",
+      "stdout": "{\"total_tables\" : 1, \"results\" : [{\"schema\":\"public\",\"table\":\"accounts\",\"n_live_tup\":500,\"n_dead_tup\":0,\"dead_ratio\":0.0000}]}\n",
       "stderr": "",
       "exit_code": 0,
       "duration_seconds": 0.0

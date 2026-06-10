@@ -402,7 +402,7 @@ hostlens inspectors list --json
 ```bash
 hostlens inspectors show hello.echo
 hostlens inspectors show hello.echo --json
-hostlens inspectors show postgres.bloat.tables   # 即使 PGPASSWORD 已 export，输出只显示 secret 名字
+hostlens inspectors show postgres.bloat_tables   # 即使 HOSTLENS_POSTGRES_PASSWORD 已 export，输出只显示 secret 名字
 ```
 
 **加载错误处理**：`list` 与 `show` 都会把单个 manifest 加载失败的文件
@@ -442,15 +442,15 @@ shell `$VAR_NAME` 引用。**禁止** Jinja2 插值（loader 静态拒绝）。
 最简单的本地用法：
 
 ```bash
-export PGPASSWORD='your-real-password'
-hostlens inspect prod-db-01 --inspector postgres.bloat.tables
+export HOSTLENS_POSTGRES_PASSWORD='your-real-password'
+hostlens inspect prod-db-01 --inspector postgres.bloat_tables
 ```
 
 `.envrc`（direnv）风格更适合多 secret 场景：
 
 ```bash
 # .envrc (not checked in)
-export PGPASSWORD="$(security find-generic-password -w -s 'hostlens-pg')"
+export HOSTLENS_POSTGRES_PASSWORD="$(security find-generic-password -w -s 'hostlens-pg')"
 export TG_BOT_TOKEN="$(security find-generic-password -w -s 'hostlens-tg')"
 ```
 
@@ -459,13 +459,13 @@ export TG_BOT_TOKEN="$(security find-generic-password -w -s 'hostlens-tg')"
 ```bash
 hostlens doctor --json | jq '.inspectors.missing_secrets'
 # [
-#   {"inspector": "postgres.bloat.tables", "secret": "PGPASSWORD"}
+#   {"inspector": "postgres.bloat_tables", "secret": "HOSTLENS_POSTGRES_PASSWORD"}
 # ]
 ```
 
 缺失只是 `warn`（不影响 doctor exit code），但运行该 Inspector 时
 runner 会返回 `InspectorResult(status="requires_unmet",
-missing=["env:PGPASSWORD"])`。
+missing=["env:HOSTLENS_POSTGRES_PASSWORD"])`。
 
 ### SSH 远端 `AcceptEnv` 配置
 
@@ -479,7 +479,7 @@ AcceptEnv HOSTLENS_*
 
 详见 [docs/operations/targets.md](targets.md#ssh-remote-acceptenv-配置)。
 
-**永远不要**把 secret 拼进命令字符串（`export PGPASSWORD=value; psql ...`），
+**永远不要**把 secret 拼进命令字符串（`export HOSTLENS_POSTGRES_PASSWORD=value; psql ...`），
 那样 secret 会进入远端 `ps` 输出与 shell history。
 
 ## `collect.sampling_window` 时窗采集

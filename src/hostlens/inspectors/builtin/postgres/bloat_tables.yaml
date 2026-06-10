@@ -7,21 +7,25 @@ version: 1.0.0
 # assumed; the `psql` preflight + main command failure is the runtime backstop).
 description: >-
   Report table bloat (dead-tuple ratio) from pg_stat_user_tables. Requires a
-  reachable PostgreSQL server (12+) and the `psql` client; the connection
-  password is injected via the PGPASSWORD env secret, never inlined. All bloat
-  derivation (dead_ratio) happens in SQL computed columns; the Finding DSL only
-  compares the ready scalars.
+  reachable PostgreSQL server (12+) and the `psql` client; secret declared as
+  HOSTLENS_POSTGRES_PASSWORD (HOSTLENS_ prefix aligns with ssh-execution-target),
+  remapped inside the collector to client-native PGPASSWORD (never inlined).
+  Results are truncated to the top `max_results` (default 20) most-bloated tables
+  with a `total_tables` count. All bloat derivation (dead_ratio) happens in SQL
+  computed columns; the Finding DSL only compares the ready scalars.
 tags: [database, postgres, postgres12, bloat]
 targets: [local, ssh, docker, k8s]
 requires_capabilities: [shell]
 requires_binaries: [psql]
 privilege: none
 
-# The connection password is injected via env (runner sets `env=PGPASSWORD=...`
-# from `os.environ`), referenced as the `$PGPASSWORD` shell variable in the
-# command — never interpolated into the command string (承重墙 6c). Declaring it
-# here also makes preflight require the env var to be present.
-secrets: [PGPASSWORD]
+# The connection password is injected via env (runner sets
+# `env=HOSTLENS_POSTGRES_PASSWORD=...` from `os.environ`), then remapped inside
+# the collector to the client-native PGPASSWORD env — never interpolated into
+# the command string (承重墙 6c). The HOSTLENS_ prefix aligns with the
+# ssh-execution-target contract (`AcceptEnv HOSTLENS_*`). Declaring it here also
+# makes preflight require the env var to be present.
+secrets: [HOSTLENS_POSTGRES_PASSWORD]
 
 parameters:
   type: object
@@ -38,19 +42,45 @@ parameters:
     # `| sh`; they are compared as scalars in the Finding DSL.
     dead_ratio_threshold:  { type: number,  default: 0.2 }
     dead_tuple_threshold:  { type: integer, default: 1000 }
+    # `max_results` caps the result list to the top-N most-bloated tables
+    # (list-shape truncation MUST). An integer parameter is not shell-evaluable
+    # (loader enforces type=integer), so it renders directly into `LIMIT {{ ... }}`
+    # without `| sh` — same as the numeric thresholds above. The bounds keep the
+    # top-N truncation guarantee intact: `minimum: 1` because `LIMIT 0` returns an
+    # empty list and `LIMIT -1` errors in SQL — a 0 or negative bound would break
+    # the top-N contract; `maximum: 10000` caps the bound so `max_results=huge`
+    # can never degenerate into "no truncation" and re-emit high-cardinality
+    # detail (violating the list-shape bounded-output MUST).
+    max_results:
+      type: integer
+      default: 20
+      minimum: 1
+      maximum: 10000
+  additionalProperties: false
 
 collect:
   # `psql -tAc` runs a single SQL statement in tuples-only (-t), unaligned (-A)
   # mode so stdout is exactly the one JSON value `json_build_object(...)`
-  # produces. The connection password is supplied via the PGPASSWORD env secret
-  # (runner injects it through `env=`, never the command string); `$PGPASSWORD`
-  # is referenced as a shell variable, NOT a `{{ }}` interpolation.
+  # produces. The HOSTLENS_POSTGRES_PASSWORD env secret (runner injects it
+  # through `env=`, never the command string) is remapped to the client-native
+  # PGPASSWORD env right on the psql invocation as `${HOSTLENS_POSTGRES_PASSWORD:-}`
+  # (the `:-` empty default keeps a no-password instance safe) — NOT a `{{ }}`
+  # interpolation, so the credential never enters the command string / argv.
+  # PGCONNECT_TIMEOUT=5 (< timeout_seconds 30) makes an unreachable backend
+  # fail fast and loud instead of hanging the full 30s.
   #
-  # `json_build_object('results', coalesce(json_agg(t), '[]'::json))` emits a
-  # top-level OBJECT `{"results":[...]}` — a bare `json_agg` would yield a
-  # top-level array, which `parse.format: json` rejects (parse_json_not_object,
-  # 承重墙 4). The output key `results` follows the naming convention so it can
-  # never be shadowed by a same-named parameter (承重墙 3).
+  # `json_build_object('total_tables', ..., 'results', coalesce(json_agg(t),
+  # '[]'::json))` emits a top-level OBJECT `{"total_tables":N,"results":[...]}`
+  # — a bare `json_agg` would yield a top-level array, which `parse.format: json`
+  # rejects (parse_json_not_object, 承重墙 4). The output key `results` follows
+  # the naming convention so it can never be shadowed by a same-named parameter
+  # (承重墙 3).
+  #
+  # List-shape truncation MUST: the subquery `ORDER BY n_dead_tup DESC LIMIT
+  # {{ max_results }}` caps `results` to the top-N MOST-bloated tables (so the
+  # ones dropped when there are more than N are the least bloated), while
+  # `total_tables = count(*) FROM pg_stat_user_tables` reports the pre-truncation
+  # total so the operator sees "top-N of M".
   #
   # ALL bloat derivation lives in SQL computed columns inside the subquery —
   # `dead_ratio` is `round(n_dead_tup / (n_live_tup + n_dead_tup), 4)`, computed
@@ -58,10 +88,12 @@ collect:
   # compares the ready `dead_ratio` / `n_dead_tup` scalars per table.
   #
   # `--dbname` is `| sh`-quoted (a pattern-constrained identifier can never
-  # break out of the quoted word). The empty case (no user tables) still emits
-  # `{"results":[]}` because `coalesce(..., '[]'::json)` covers the NULL agg.
+  # break out of the quoted word). `max_results` is an integer parameter (not
+  # shell-evaluable) so it renders directly into `LIMIT {{ max_results }}`. The
+  # empty case (no user tables) still emits `{"total_tables":0,"results":[]}`
+  # because `coalesce(..., '[]'::json)` covers the NULL agg.
   command: |
-    PGPASSWORD="$PGPASSWORD" psql -tAqX --dbname={{ dbname | sh }} -c "SELECT json_build_object('results', coalesce(json_agg(t), '[]'::json)) FROM (SELECT schemaname AS schema, relname AS table, n_live_tup AS n_live_tup, n_dead_tup AS n_dead_tup, round(n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio FROM pg_stat_user_tables ORDER BY n_dead_tup DESC) t"
+    PGPASSWORD="${HOSTLENS_POSTGRES_PASSWORD:-}" PGCONNECT_TIMEOUT=5 psql -tAqX --dbname={{ dbname | sh }} -c "SELECT json_build_object('total_tables', (SELECT count(*) FROM pg_stat_user_tables), 'results', coalesce(json_agg(t), '[]'::json)) FROM (SELECT schemaname AS schema, relname AS table, n_live_tup AS n_live_tup, n_dead_tup AS n_dead_tup, round(n_dead_tup::numeric / nullif(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT {{ max_results }}) t"
   timeout_seconds: 30
 
 parse:
@@ -70,6 +102,9 @@ parse:
 output_schema:
   type: object
   properties:
+    # `total_tables` is the pre-truncation user-table count (the list-shape total
+    # counter); `results` is capped to the top `max_results` most-bloated tables.
+    total_tables: { type: integer }
     results:
       type: array
       items:
@@ -81,7 +116,7 @@ output_schema:
           n_dead_tup: { type: integer }
           # dead_ratio is NULL when a table has zero tuples (nullif guard).
           dead_ratio: { type: [number, "null"] }
-  required: [results]
+  required: [total_tables, results]
   additionalProperties: false
 
 findings:
