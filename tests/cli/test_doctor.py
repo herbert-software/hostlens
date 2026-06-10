@@ -54,11 +54,14 @@ def _write_manifest(path: Path, payload: dict[str, Any]) -> None:
 def _builtin_declared_secrets() -> set[str]:
     """Every secret env var declared by any builtin inspector manifest.
 
-    Some builtins (``postgres.bloat_tables`` / ``redis.slowlog``) inject a
-    connection password via ``secrets``. The doctor secret tests below set
-    these so the warn/ok verdict isolates to the *user* manifest under test
-    rather than tripping on a builtin's unrelated missing secret. Derived from
-    disk so the set never drifts as new secret-bearing builtins land.
+    Some builtins inject a connection password via ``secrets`` —
+    ``postgres.bloat_tables`` (legacy ``PGPASSWORD``-derived name) and
+    every service-inspector-contract probe (``redis.{memory_usage,
+    persistence,replication_lag,slowlog}`` etc. on ``HOSTLENS_*`` names).
+    The doctor secret tests below set these so the warn/ok verdict isolates
+    to the *user* manifest under test rather than tripping on a builtin's
+    unrelated missing secret. Derived from disk so the set never drifts as
+    new secret-bearing builtins land.
     """
 
     import hostlens.inspectors as _inspectors_pkg
@@ -516,8 +519,9 @@ def test_doctor_json_inspectors_status_ok_with_builtins_only(
     ``ok``, ``loaded`` is at least the two M1 builtins (``hello.echo`` +
     ``system.uptime``; the M2.8 incident-pack and the authoring-contract
     inspectors add more), and both error lists are empty. Secret-bearing
-    builtins (``postgres.bloat_tables`` / ``redis.slowlog``) must have their
-    env present for the OK path.
+    builtins (``postgres.bloat_tables`` plus the service-inspector-contract
+    probes such as ``redis.slowlog`` on ``HOSTLENS_REDIS_PASSWORD``) must
+    have their env present for the OK path.
     """
 
     for secret in _builtin_declared_secrets():

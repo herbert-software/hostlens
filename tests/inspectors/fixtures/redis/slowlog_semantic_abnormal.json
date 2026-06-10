@@ -13,7 +13,7 @@
     },
     {
       "cmd": "if [ -n \"${HOSTLENS_REDIS_PASSWORD:-}\" ]; then\n  count=$(REDISCLI_AUTH=\"$HOSTLENS_REDIS_PASSWORD\" redis-cli --no-auth-warning -t 5 -h 127.0.0.1 -p 6379 --json SLOWLOG LEN) || { echo \"redis SLOWLOG LEN failed\" >&2; exit 1; }\nelse\n  count=$(redis-cli -t 5 -h 127.0.0.1 -p 6379 --json SLOWLOG LEN) || { echo \"redis SLOWLOG LEN failed\" >&2; exit 1; }\nfi\ncase \"$count\" in ''|*[!0-9]*) echo \"redis SLOWLOG LEN non-numeric: $count\" >&2; exit 1;; esac\nif [ -n \"${HOSTLENS_REDIS_PASSWORD:-}\" ]; then\n  max_micros=$(REDISCLI_AUTH=\"$HOSTLENS_REDIS_PASSWORD\" redis-cli --no-auth-warning -t 5 -h 127.0.0.1 -p 6379 EVAL 'local r=redis.call(\"SLOWLOG\",\"GET\",tonumber(ARGV[1])); local m=0; for i,e in ipairs(r) do if e[3]>m then m=e[3] end end; return m' 0 1024) || { echo \"redis EVAL failed\" >&2; exit 1; }\nelse\n  max_micros=$(redis-cli -t 5 -h 127.0.0.1 -p 6379 EVAL 'local r=redis.call(\"SLOWLOG\",\"GET\",tonumber(ARGV[1])); local m=0; for i,e in ipairs(r) do if e[3]>m then m=e[3] end end; return m' 0 1024) || { echo \"redis EVAL failed\" >&2; exit 1; }\nfi\ncase \"$max_micros\" in ''|*[!0-9]*) echo \"redis EVAL non-numeric: $max_micros\" >&2; exit 1;; esac\nprintf '{\"count\":%d,\"max_micros\":%d}' \"$count\" \"$max_micros\"",
-      "stdout": "{\"count\":8,\"max_micros\":12}",
+      "stdout": "{\"count\":3,\"max_micros\":151260}",
       "stderr": "",
       "exit_code": 0,
       "duration_seconds": 0.0

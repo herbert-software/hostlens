@@ -20,7 +20,8 @@ glob that matches nothing cannot make the suite pass vacuously):
     positive control, and the secret-leak regression enumerate THIS subset (the
     docker / nginx probes have no secret surface, so scanning them for a
     password would be a vacuous assertion).
-  * ``_ALL_SERVICE_MANIFESTS`` (11 = 2 spike + 6 wave-2a + 3 wave-2b): output aggregate-vs-
+  * ``_ALL_SERVICE_MANIFESTS`` (12 = 2 spike + 6 wave-2a + 3 wave-2b + 1 migrated):
+    output aggregate-vs-
     list distinction, string-param pattern, timeout discipline, no-target-
     forking, and the bare-key/parameter-name disjointness enumerate THIS subset.
 
@@ -88,7 +89,8 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 # Manifest subsets (enumeration-driven — no per-client hard-coding).
 # --------------------------------------------------------------------------- #
 #
-# Two spike probes + six wave-2a + three wave-2b inspectors. Keep this list in
+# Two spike probes + six wave-2a + three wave-2b + one migrated (redis.slowlog,
+# migrated from REDIS_PASSWORD to HOSTLENS_REDIS_PASSWORD) inspectors. Keep this list in
 # lockstep with the manifests shipped under builtin/{redis,mysql,postgres,docker,
 # nginx}/ — the count guards below freeze the cohort size so neither a dropped
 # nor a smuggled manifest slips through silently.
@@ -108,6 +110,8 @@ _ALL_SERVICE_MANIFESTS: dict[str, Path] = {
     "mysql.slow_queries": _builtin_root() / "mysql" / "slow_queries.yaml",
     "postgres.long_queries": _builtin_root() / "postgres" / "long_queries.yaml",
     "nginx.error_rate": _builtin_root() / "nginx" / "error_rate.yaml",
+    # migrated into the contract (env name REDIS_PASSWORD → HOSTLENS_REDIS_PASSWORD)
+    "redis.slowlog": _builtin_root() / "redis" / "slowlog.yaml",
 }
 _ALL_IDS = sorted(_ALL_SERVICE_MANIFESTS)
 _ALL_ITEMS = sorted(_ALL_SERVICE_MANIFESTS.items())
@@ -122,6 +126,7 @@ _SECRET_SERVICE_MANIFESTS: dict[str, Path] = {
     "postgres.connection_usage": _ALL_SERVICE_MANIFESTS["postgres.connection_usage"],
     "mysql.slow_queries": _ALL_SERVICE_MANIFESTS["mysql.slow_queries"],
     "postgres.long_queries": _ALL_SERVICE_MANIFESTS["postgres.long_queries"],
+    "redis.slowlog": _ALL_SERVICE_MANIFESTS["redis.slowlog"],
 }
 _SECRET_IDS = sorted(_SECRET_SERVICE_MANIFESTS)
 _SECRET_ITEMS = sorted(_SECRET_SERVICE_MANIFESTS.items())
@@ -149,6 +154,7 @@ _ALLOWED_NATIVE_ENV: frozenset[str] = frozenset({"REDISCLI_AUTH", "PGPASSWORD", 
 _SECRET_CLIENT_RULES: dict[str, dict[str, Any]] = {
     "redis.memory_usage": {"native_env": "REDISCLI_AUTH", "forbidden_flags": ("-a ",)},
     "redis.persistence": {"native_env": "REDISCLI_AUTH", "forbidden_flags": ("-a ",)},
+    "redis.slowlog": {"native_env": "REDISCLI_AUTH", "forbidden_flags": ("-a ",)},
     "mysql.connection_usage": {"native_env": "MYSQL_PWD", "forbidden_flags": (" -p",)},
     "mysql.slow_queries": {"native_env": "MYSQL_PWD", "forbidden_flags": (" -p",)},
     # psql: PGPASSWORD env channel; NO argv plaintext-password flag (`-p` is PORT).
@@ -171,11 +177,11 @@ def _runner() -> InspectorRunner:
 
 
 def test_all_service_manifests_count_frozen() -> None:
-    assert len(_ALL_SERVICE_MANIFESTS) == 11, sorted(_ALL_SERVICE_MANIFESTS)
+    assert len(_ALL_SERVICE_MANIFESTS) == 12, sorted(_ALL_SERVICE_MANIFESTS)
 
 
 def test_secret_service_manifests_count_frozen() -> None:
-    assert len(_SECRET_SERVICE_MANIFESTS) == 6, sorted(_SECRET_SERVICE_MANIFESTS)
+    assert len(_SECRET_SERVICE_MANIFESTS) == 7, sorted(_SECRET_SERVICE_MANIFESTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -215,6 +221,7 @@ _INJECTABLE_PARAMS: list[tuple[str, Path, str, str]] = [
         "monitor_user",
     ),
     ("redis.persistence", _ALL_SERVICE_MANIFESTS["redis.persistence"], "host", "redis.internal"),
+    ("redis.slowlog", _ALL_SERVICE_MANIFESTS["redis.slowlog"], "host", "redis.internal"),
     (
         "postgres.connection_usage",
         _ALL_SERVICE_MANIFESTS["postgres.connection_usage"],
@@ -348,6 +355,7 @@ def _ok_stdout(probe: str) -> str:
         "redis.memory_usage": '{"used_memory":1,"maxmemory":0,"used_pct":null}',
         "mysql.connection_usage": '{"used_connections":1,"max_connections":151,"used_pct":0.66}',
         "redis.persistence": '{"aof_enabled":1,"rdb_changes_since_last_save":0,"rdb_last_save_time":1}',
+        "redis.slowlog": '{"count":1,"max_micros":1}',
         "postgres.connection_usage": '{"used_connections":1,"max_connections":100,"used_pct":1.0}',
         "nginx.health": '{"healthy":true,"active_connections":1}',
         "mysql.slow_queries": '{"slow_query_count":0,"slow_log_monitoring_enabled":true}',
@@ -487,6 +495,10 @@ _ALL_FIXTURES: list[Path] = (
     # them — §6.4). nginx_error_rate has no secret and is deliberately not scanned.
     + sorted((_FIXTURES / "mysql_slow_queries").glob("*.json"))
     + sorted((_FIXTURES / "postgres_long_queries").glob("*.json"))
+    # migrated redis.slowlog fixtures (5): the recorder injects the SAME "p w*d"
+    # special-char password into slowlog_special_char_pw.json, so the redaction
+    # guard MUST scan these too (else the slowlog leak check is vacuous — §6.4).
+    + sorted((_FIXTURES / "redis").glob("slowlog_*.json"))
 )
 
 #: EVERY literal secret VALUE any recorder actually injected via a HOSTLENS_*
@@ -504,6 +516,10 @@ _ALL_FIXTURES: list[Path] = (
 #:     char_pw.json` is recorded against an AUTH instance with the SAME "p w*d"
 #:     value already in this tuple (reused, not added) — so the persistence leak
 #:     scan is NON-VACUOUS (§6.4): it scans a value that really is injected.
+#:   * redis.slowlog — like persistence, most fixtures use HOSTLENS_REDIS_PASSWORD
+#:     ="" (no-auth instance) but `slowlog_special_char_pw.json` reuses the SAME
+#:     "p w*d" value already in this tuple (reused, not added) — so the slowlog
+#:     leak scan is NON-VACUOUS too.
 _RECORDED_SECRET_VALUES: tuple[str, ...] = (
     # redis special-char password (space + glob metachar).
     "p w*d",
@@ -531,8 +547,9 @@ class TestSecretNeverInArgvOrFixture:
     def test_at_least_the_expected_fixtures_scanned(self) -> None:
         # Guard against a glob that silently matches nothing. The spike batch had
         # >=6; the two wave-2a secret probes add persistence_* (3+) + postgres
-        # (5); wave-2b adds mysql_slow_queries (5) + postgres_long_queries (4).
-        # Lower bound bumped to reflect the wider set.
+        # (5); wave-2b adds mysql_slow_queries (5) + postgres_long_queries (4);
+        # the migrated redis.slowlog adds slowlog_* (5). The lower bound stays
+        # conservative (>=20) — the additions only widen the scanned set.
         assert len(_ALL_FIXTURES) >= 20, _ALL_FIXTURES
 
     @pytest.mark.parametrize("fixture", _ALL_FIXTURES, ids=lambda p: f"{p.parent.name}/{p.stem}")
@@ -733,6 +750,7 @@ class TestDeterministicReplayDiscipline:
 _CLIENT_TIMEOUT_TOKEN: dict[str, tuple[str, int]] = {
     "redis.memory_usage": ("-t 5", 5),
     "redis.persistence": ("-t 5", 5),
+    "redis.slowlog": ("-t 5", 5),
     "mysql.connection_usage": ("--connect-timeout=5", 5),
     "mysql.slow_queries": ("--connect-timeout=5", 5),
     "postgres.connection_usage": ("PGCONNECT_TIMEOUT=5", 5),
@@ -878,7 +896,7 @@ class TestOutputShapeDiscipline:
             )
 
     def test_only_docker_networks_is_list_shaped(self) -> None:
-        """The other 10 service inspectors are pure aggregate scalar (no array
+        """The other 11 service inspectors are pure aggregate scalar (no array
         top-level field) — a meta-guard that the parametrized branch above is
         non-vacuous (exactly one inspector takes the list-shaped branch)."""
 
@@ -915,6 +933,7 @@ class TestFailureClassificationCovered:
         "mysql.slow_queries": Path(__file__).parent / "test_mysql_slow_queries.py",
         "postgres.long_queries": Path(__file__).parent / "test_postgres_long_queries.py",
         "nginx.error_rate": Path(__file__).parent / "test_nginx_error_rate.py",
+        "redis.slowlog": Path(__file__).parent / "test_redis_slowlog.py",
     }
 
     #: Probes with no deterministic exception path (file-read / premise-only

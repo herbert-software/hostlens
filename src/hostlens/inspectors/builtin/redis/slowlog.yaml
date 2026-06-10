@@ -20,8 +20,9 @@ tags: [redis, redis6, json-client]
 targets: [local, ssh, docker, k8s]
 requires_capabilities: [shell]
 requires_binaries: [redis-cli]
+privilege: none
 
-secrets: [REDIS_PASSWORD]
+secrets: [HOSTLENS_REDIS_PASSWORD]
 
 parameters:
   type: object
@@ -38,6 +39,7 @@ parameters:
     warn_count:      { type: integer, default: 1 }
     critical_count:  { type: integer, default: 10 }
     slow_micros:     { type: integer, default: 100000 }   # 100ms
+  additionalProperties: false   # reject param typos (parity with sibling redis inspectors)
 
 collect:
   # All extraction / derivation is done here so the Finding DSL only compares
@@ -48,11 +50,16 @@ collect:
   #   * max_micros — server-side EVAL folds SLOWLOG GET into the single max
   #     duration field (index 3 of each entry), returning ONLY an integer.
   #     The slow commands' raw argument bytes are never echoed, so no
-  #     non-UTF-8 byte ever reaches stdout.
-  # The password is injected via env (`secrets_env`) and referenced as the
-  # shell variable $REDIS_PASSWORD — never spliced through `{{ }}` (rule 6c).
-  # `host` flows through `| sh` (shlex.quote); `port` is an integer and needs
-  # no quoting.
+  #     non-UTF-8 byte ever reaches stdout. The `1024` arg caps the scan at the
+  #     most recent 1024 slowlog entries — max_micros is best-effort over that
+  #     window (the slowlog itself is bounded by `slowlog-max-len`, default 128).
+  # Secret declared as HOSTLENS_REDIS_PASSWORD (HOSTLENS_ prefix per the
+  # ssh-execution-target contract: only AcceptEnv HOSTLENS_* survives SSH). The
+  # collector REMAPS it to redis-cli's native REDISCLI_AUTH env channel — the
+  # password NEVER reaches argv (can't leak via `ps`, and spaces/glob chars can't
+  # word-split into bogus args the way an unquoted `-a $pwd` would). It is never
+  # spliced through `{{ }}` (rule 6c). `host` flows through `| sh` (shlex.quote);
+  # `port` is an integer and needs no quoting.
   #
   # FAIL-LOUD CONTRACT (Authoring Contract rule 8): every redis-cli call must
   # succeed AND return a bare integer, else the collector exits non-zero with an
@@ -65,23 +72,26 @@ collect:
   # echo a non-numeric error string → exit 1 + empty stdout → parse exception →
   # `status=exception` (honest). The two cases are therefore distinguishable.
   #
-  # `-a "$REDIS_PASSWORD"` is quoted to block word-splitting of the secret; the
-  # auth/no-auth split avoids passing an empty `-a` argument.
+  # The no-auth branch (empty HOSTLENS_REDIS_PASSWORD — exported as "" so
+  # preflight's secret-presence gate passes) omits REDISCLI_AUTH entirely. `-t 5`
+  # is the client connect timeout (< the 15s collect timeout per the service
+  # contract MUST): a hung redis network connection fails honestly in 5s instead
+  # of dragging to the collect timeout.
   command: |
-    if [ -n "${REDIS_PASSWORD:-}" ]; then
-      count=$(redis-cli -a "$REDIS_PASSWORD" --no-auth-warning -h {{ host | sh }} -p {{ port }} --json SLOWLOG LEN) || { echo "redis SLOWLOG LEN failed" >&2; exit 1; }
+    if [ -n "${HOSTLENS_REDIS_PASSWORD:-}" ]; then
+      count=$(REDISCLI_AUTH="$HOSTLENS_REDIS_PASSWORD" redis-cli --no-auth-warning -t 5 -h {{ host | sh }} -p {{ port }} --json SLOWLOG LEN) || { echo "redis SLOWLOG LEN failed" >&2; exit 1; }
     else
-      count=$(redis-cli -h {{ host | sh }} -p {{ port }} --json SLOWLOG LEN) || { echo "redis SLOWLOG LEN failed" >&2; exit 1; }
+      count=$(redis-cli -t 5 -h {{ host | sh }} -p {{ port }} --json SLOWLOG LEN) || { echo "redis SLOWLOG LEN failed" >&2; exit 1; }
     fi
     case "$count" in ''|*[!0-9]*) echo "redis SLOWLOG LEN non-numeric: $count" >&2; exit 1;; esac
-    if [ -n "${REDIS_PASSWORD:-}" ]; then
-      max_micros=$(redis-cli -a "$REDIS_PASSWORD" --no-auth-warning -h {{ host | sh }} -p {{ port }} EVAL 'local r=redis.call("SLOWLOG","GET",tonumber(ARGV[1])); local m=0; for i,e in ipairs(r) do if e[3]>m then m=e[3] end end; return m' 0 1024) || { echo "redis EVAL failed" >&2; exit 1; }
+    if [ -n "${HOSTLENS_REDIS_PASSWORD:-}" ]; then
+      max_micros=$(REDISCLI_AUTH="$HOSTLENS_REDIS_PASSWORD" redis-cli --no-auth-warning -t 5 -h {{ host | sh }} -p {{ port }} EVAL 'local r=redis.call("SLOWLOG","GET",tonumber(ARGV[1])); local m=0; for i,e in ipairs(r) do if e[3]>m then m=e[3] end end; return m' 0 1024) || { echo "redis EVAL failed" >&2; exit 1; }
     else
-      max_micros=$(redis-cli -h {{ host | sh }} -p {{ port }} EVAL 'local r=redis.call("SLOWLOG","GET",tonumber(ARGV[1])); local m=0; for i,e in ipairs(r) do if e[3]>m then m=e[3] end end; return m' 0 1024) || { echo "redis EVAL failed" >&2; exit 1; }
+      max_micros=$(redis-cli -t 5 -h {{ host | sh }} -p {{ port }} EVAL 'local r=redis.call("SLOWLOG","GET",tonumber(ARGV[1])); local m=0; for i,e in ipairs(r) do if e[3]>m then m=e[3] end end; return m' 0 1024) || { echo "redis EVAL failed" >&2; exit 1; }
     fi
     case "$max_micros" in ''|*[!0-9]*) echo "redis EVAL non-numeric: $max_micros" >&2; exit 1;; esac
     printf '{"count":%d,"max_micros":%d}' "$count" "$max_micros"
-  timeout_seconds: 15
+  timeout_seconds: 15   # client -t 5 < collect timeout (service contract MUST)
 
 parse:
   format: json

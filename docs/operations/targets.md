@@ -156,11 +156,29 @@ SSH therefore **requires** the remote sshd to be configured with
 the allowlist and the inspector honestly fails as `status=exception`
 (auth failure) rather than silently reporting a healthy backend. Against
 a **no-auth** backend the inspector still succeeds — the empty secret
-carries nothing the allowlist could drop. Note that pre-spike seed
-inspectors (`redis.slowlog`, `postgres.bloat_tables`) still declare
-non-`HOSTLENS_` secret names pending migration; the `HOSTLENS_*`
-guarantee above covers the service-inspector-contract probes and every
-inspector authored after them.
+carries nothing the allowlist could drop. One pre-spike seed inspector
+(`postgres.bloat_tables`) still declares a non-`HOSTLENS_` secret name
+pending migration; the `HOSTLENS_*` guarantee above covers the
+service-inspector-contract probes and every inspector authored after
+them.
+
+> **BREAKING — `redis.slowlog` secret rename.** `redis.slowlog` was the
+> last grandfathered pre-spike seed besides `postgres.bloat_tables`; it
+> has now migrated to full service-inspector-contract compliance. Its
+> connection secret env var changed from **`REDIS_PASSWORD`** to
+> **`HOSTLENS_REDIS_PASSWORD`** (aligned with the sibling
+> `redis.{memory_usage,persistence,replication_lag}` inspectors). The
+> collector now remaps it to `REDISCLI_AUTH` so the password never
+> reaches `argv`. **Action required:** operators inspecting a
+> password-protected Redis must re-export the credential under the new
+> name — `export HOSTLENS_REDIS_PASSWORD=...` (the old `REDIS_PASSWORD`
+> is no longer read; a stale `REDIS_PASSWORD`-only environment yields
+> `status=requires_unmet`, an honest skip rather than a silent pass). On
+> SSH targets the new name passes the recommended `AcceptEnv HOSTLENS_*`
+> allowlist, so a password-protected Redis is now inspectable over SSH.
+> The collector also gained a `-t 5` redis-cli connect timeout (< the 15s
+> collect timeout), so a hung connection fails fast and honestly instead
+> of stalling to the collect deadline.
 
 ## Docker targets
 
