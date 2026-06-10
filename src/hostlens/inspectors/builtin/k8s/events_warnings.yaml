@@ -1,0 +1,113 @@
+name: k8s.events.warnings
+version: 1.0.0
+description: >-
+  Aggregate `type=Warning` events by (reason, involvedObject.kind, namespace)
+  and flag aggregations whose count meets a threshold. Within the API's 1h
+  event TTL this is the only data source that surfaces FailedMount /
+  ImagePullBackOff / BackOff (degraded coverage for the absence of a dedicated
+  crashloop inspector). Runs `kubectl get events -o json` against the cluster
+  control plane from a management host (local/ssh) — NOT inside a pod. Output
+  carries NO time field and the aggregation does NO time computation
+  (`eventTime` is MicroTime with fractional seconds).
+tags: [k8s, events, warnings, aggregation]
+targets: [local, ssh]
+requires_binaries: [kubectl, jq]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # kubeconfig context; empty = current-context. Charset admits EKS ARN
+    # (":/" chars) and GKE ("_" chars) context names while excluding every
+    # shell metacharacter. Second wall behind `| sh`.
+    context:
+      type: string
+      pattern: "^[A-Za-z0-9_.:/@-]*$"
+      default: ""
+    # Namespace scope; empty = -A (whole cluster). RFC 1123 label shape
+    # (alphanumeric at both ends) — forbidding a leading dash closes the
+    # positional flag-injection bypass of the namespace pre-check.
+    namespace:
+      type: string
+      pattern: "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
+      default: ""
+    # Only aggregations whose total count meets this threshold are flagged.
+    # Numeric parameters cannot be shell-evaluated as text, so no pattern /
+    # `| sh` is required.
+    min_count:
+      type: integer
+      default: 3
+  additionalProperties: false
+
+collect:
+  # Args assembled via POSIX `set --`. FAIL-LOUD: kubectl and jq gated
+  # separately — an unreachable API server exits non-zero with empty stdout →
+  # status=exception (honest), never fabricated `{"results":[]}`. Non-empty
+  # namespace is PRE-CHECKED via `kubectl get namespace` (a LIST against a
+  # nonexistent namespace exits 0 with empty items — the pre-check turns a
+  # namespace typo into status=exception rather than a silent false negative;
+  # GET covered by the `view` ClusterRole).
+  # Aggregation: group Warning events by (reason, involvedObject.kind,
+  # event's own metadata.namespace — NOT involvedObject.namespace, which is
+  # empty for cluster-scoped objects like Node and would fail the schema
+  # string check) and sum the per-event count `(.count // .series.count // 1)`
+  # to handle both legacy (count) and events.k8s.io (series.count) forms. The
+  # DSL only compares the already-summed count.
+  command: |
+    set --
+    [ -n {{ context | sh }} ] && set -- "$@" --context {{ context | sh }}
+    if [ -n {{ namespace | sh }} ]; then
+      kubectl get namespace {{ namespace | sh }} "$@" >/dev/null || { echo "namespace not found or not readable" >&2; exit 1; }
+      set -- "$@" -n {{ namespace | sh }}
+    else
+      set -- "$@" -A
+    fi
+    events=$(kubectl get events "$@" --field-selector=type=Warning -o json) || { echo "kubectl get events failed" >&2; exit 1; }
+    printf '%s' "$events" | jq -c '{
+      results: [
+        .items
+        | map({
+            reason: (.reason // "Unknown"),
+            kind: (.involvedObject.kind // "Unknown"),
+            namespace: (.metadata.namespace // ""),
+            n: (.count // .series.count // 1)
+          })
+        | group_by([.reason, .kind, .namespace])[]
+        | {
+            reason: .[0].reason,
+            kind: .[0].kind,
+            namespace: .[0].namespace,
+            count: (map(.n) | add)
+          }
+      ]
+    }' || { echo "jq failed" >&2; exit 1; }
+  timeout_seconds: 60
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          reason:    { type: string }
+          kind:      { type: string }
+          namespace: { type: string }
+          count:     { type: integer }
+        required: [reason, kind, namespace, count]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # The DSL only compares the already-aggregated count against the threshold
+  # (load-bearing wall 1). Events are indirect evidence — warning only, never
+  # critical.
+  - for_each: "results as e"
+    when: "e.count >= min_count"
+    severity: warning
+    message: "{e[count]} Warning events reason={e[reason]} kind={e[kind]} ns={e[namespace]}"

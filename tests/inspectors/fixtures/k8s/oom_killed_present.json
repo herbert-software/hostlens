@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v kubectl",
+      "stdout": "/usr/bin/kubectl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v jq",
+      "stdout": "/usr/bin/jq\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "set --\n[ -n '' ] && set -- \"$@\" --context ''\nif [ -n '' ]; then\n  kubectl get namespace '' \"$@\" >/dev/null || { echo \"namespace not found or not readable\" >&2; exit 1; }\n  set -- \"$@\" -n ''\nelse\n  set -- \"$@\" -A\nfi\npods=$(kubectl get pods \"$@\" -o json) || { echo \"kubectl get pods failed\" >&2; exit 1; }\nprintf '%s' \"$pods\" | jq -c '{\n  results: [\n    .items[] as $pod\n    | (($pod.status.containerStatuses // [])[]\n       | select((.lastState.terminated.reason // \"\") == \"OOMKilled\")\n       | {\n           name: $pod.metadata.name,\n           namespace: $pod.metadata.namespace,\n           container: .name,\n           restart_count: (.restartCount // 0)\n         })\n  ]\n}' || { echo \"jq failed\" >&2; exit 1; }",
+      "stdout": "{\"results\": [{\"name\": \"web-0\", \"namespace\": \"prod\", \"container\": \"app\", \"restart_count\": 5}, {\"name\": \"worker-2\", \"namespace\": \"batch\", \"container\": \"job\", \"restart_count\": 1}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

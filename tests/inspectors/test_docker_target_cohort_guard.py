@@ -7,7 +7,7 @@ independent layers protect the cohort:
 
 * **Frozen INCLUDE/EXCLUDE name lists** (``test_include_exclude_*``) — the
   manually-reviewed roster from design Decision 4, with hard count assertions
-  (28 / 37 / 65) so a hand-tally drift (a dropped or smuggled manifest) fails
+  (28 / 42 / 70) so a hand-tally drift (a dropped or smuggled manifest) fails
   loudly instead of silently shifting the cohort.
 * **Content-based guard** (``test_host_global_marker_*``) — independent of the
   name list: any manifest whose ``collect.command`` reads a host-global,
@@ -140,6 +140,14 @@ _EXCLUDE: frozenset[str] = frozenset(
         "docker.containers.restart_loop",
         "docker.images.disk_usage",
         "docker.networks",
+        # k8s (kubectl control-plane view — runs on a management host, NEVER
+        # inside a pod; a pod has no kubectl and must not gain cluster read
+        # access, so these declare [local, ssh] only, never a container target)
+        "k8s.pods.oom_killed",
+        "k8s.pods.evicted",
+        "k8s.pods.stuck_pending",
+        "k8s.nodes.conditions",
+        "k8s.events.warnings",
         # demo
         "hello.echo",
     }
@@ -179,16 +187,16 @@ def _load_all_builtin() -> dict[str, InspectorManifest]:
 
 
 def test_rosters_partition_all_builtins_with_frozen_counts() -> None:
-    """INCLUDE(28) + EXCLUDE(37) = every builtin(65), disjoint — a count drift
+    """INCLUDE(28) + EXCLUDE(42) = every builtin(70), disjoint — a count drift
     (dropped or smuggled manifest) fails here, not silently."""
 
     assert len(_INCLUDE) == 28
-    assert len(_EXCLUDE) == 37
+    assert len(_EXCLUDE) == 42
     assert _INCLUDE.isdisjoint(_EXCLUDE)
 
     by_name = _load_all_builtin()
     all_names = frozenset(by_name)
-    assert len(all_names) == 65
+    assert len(all_names) == 70
 
     rostered = _INCLUDE | _EXCLUDE
     assert all_names == rostered, {

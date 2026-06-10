@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v kubectl",
+      "stdout": "/usr/bin/kubectl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v jq",
+      "stdout": "/usr/bin/jq\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "set --\n[ -n '' ] && set -- \"$@\" --context ''\nif [ -n nosuchns ]; then\n  kubectl get namespace nosuchns \"$@\" >/dev/null || { echo \"namespace not found or not readable\" >&2; exit 1; }\n  set -- \"$@\" -n nosuchns\nelse\n  set -- \"$@\" -A\nfi\npods=$(kubectl get pods \"$@\" -o json) || { echo \"kubectl get pods failed\" >&2; exit 1; }\nprintf '%s' \"$pods\" | jq -c '{\n  results: [\n    .items[]\n    | select(.status.phase == \"Failed\" and .status.reason == \"Evicted\")\n    | {\n        name: .metadata.name,\n        namespace: .metadata.namespace,\n        message: (.status.message // \"\")\n      }\n  ]\n}' || { echo \"jq failed\" >&2; exit 1; }",
+      "stdout": "",
+      "stderr": "",
+      "exit_code": 1,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

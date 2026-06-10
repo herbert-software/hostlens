@@ -1,0 +1,92 @@
+name: k8s.pods.evicted
+version: 1.0.0
+description: >-
+  Report pods left lingering in the API as `status.phase == "Failed"` with
+  `status.reason == "Evicted"`. An evicted pod is a residual artifact (the
+  eviction already happened); it indicates a node-pressure history, not an
+  in-progress fault. Reads `kubectl get pods -o json` against the cluster
+  control plane from a management host (local/ssh) — NOT inside a pod.
+tags: [k8s, pods, evicted, node-pressure]
+targets: [local, ssh]
+requires_binaries: [kubectl, jq]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # kubeconfig context; empty = current-context. Charset admits EKS ARN
+    # (":/" chars) and GKE ("_" chars) context names while excluding every
+    # shell metacharacter. Second wall behind `| sh`.
+    context:
+      type: string
+      pattern: "^[A-Za-z0-9_.:/@-]*$"
+      default: ""
+    # Namespace scope; empty = -A (whole cluster). RFC 1123 label shape
+    # (alphanumeric at both ends) — forbidding a leading dash closes the
+    # positional flag-injection bypass of the namespace pre-check.
+    namespace:
+      type: string
+      pattern: "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
+      default: ""
+  additionalProperties: false
+
+collect:
+  # Args assembled via POSIX `set --`. FAIL-LOUD: kubectl and jq gated
+  # separately — an unreachable API server exits non-zero with empty stdout →
+  # status=exception (honest), never fabricated `{"results":[]}`. Non-empty
+  # namespace is PRE-CHECKED via `kubectl get namespace` (a LIST against a
+  # nonexistent namespace exits 0 with empty items — the pre-check turns a
+  # namespace typo into status=exception rather than a silent false negative;
+  # GET covered by the `view` ClusterRole).
+  # Not every Evicted pod carries `status.message`; jq `// ""` falls back to an
+  # empty summary so a message-less Evicted pod does not fail the output_schema
+  # string check.
+  command: |
+    set --
+    [ -n {{ context | sh }} ] && set -- "$@" --context {{ context | sh }}
+    if [ -n {{ namespace | sh }} ]; then
+      kubectl get namespace {{ namespace | sh }} "$@" >/dev/null || { echo "namespace not found or not readable" >&2; exit 1; }
+      set -- "$@" -n {{ namespace | sh }}
+    else
+      set -- "$@" -A
+    fi
+    pods=$(kubectl get pods "$@" -o json) || { echo "kubectl get pods failed" >&2; exit 1; }
+    printf '%s' "$pods" | jq -c '{
+      results: [
+        .items[]
+        | select(.status.phase == "Failed" and .status.reason == "Evicted")
+        | {
+            name: .metadata.name,
+            namespace: .metadata.namespace,
+            message: (.status.message // "")
+          }
+      ]
+    }' || { echo "jq failed" >&2; exit 1; }
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          name:      { type: string }
+          namespace: { type: string }
+          message:   { type: string }
+        required: [name, namespace, message]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # The DSL only iterates the already-derived rows — no string ops, no
+  # derivation (load-bearing wall 1). Every lingering Evicted pod is warning.
+  - for_each: "results as p"
+    when: "True"
+    severity: warning
+    message: "pod {p[namespace]}/{p[name]} evicted (reason: {p[message]})"

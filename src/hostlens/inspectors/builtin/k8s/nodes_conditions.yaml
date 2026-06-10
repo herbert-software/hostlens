@@ -1,0 +1,92 @@
+name: k8s.nodes.conditions
+version: 1.0.0
+description: >-
+  Report each node's Ready / MemoryPressure / DiskPressure / PIDPressure
+  condition status from `kubectl get nodes -o json`. Reporting only the
+  pressure trio while ignoring NotReady would be a misnomer, so Ready is
+  covered too. Runs against the cluster control plane from a management host
+  (local/ssh) — NOT inside a pod. Nodes have no namespace concept, so this
+  inspector takes no `namespace` parameter.
+tags: [k8s, nodes, conditions, pressure]
+targets: [local, ssh]
+requires_binaries: [kubectl, jq]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # kubeconfig context; empty = current-context. Charset admits EKS ARN
+    # (":/" chars) and GKE ("_" chars) context names while excluding every
+    # shell metacharacter. Second wall behind `| sh`.
+    context:
+      type: string
+      pattern: "^[A-Za-z0-9_.:/@-]*$"
+      default: ""
+  additionalProperties: false
+
+collect:
+  # Args assembled via POSIX `set --` (no reliance on undocumented
+  # `--context=''` behavior). FAIL-LOUD: kubectl and jq gated separately —
+  # an unreachable API server exits non-zero with empty stdout →
+  # status=exception (honest), never fabricated `{"results":[]}`. Nodes are
+  # cluster-scoped, so there is no namespace pre-check here.
+  # A node may not report every condition type (old clusters lack PIDPressure;
+  # an unhealthy node may drop Ready) — each column falls back to "Unknown" so
+  # a missing type never causes a parse or schema error.
+  command: |
+    set --
+    [ -n {{ context | sh }} ] && set -- "$@" --context {{ context | sh }}
+    nodes=$(kubectl get nodes "$@" -o json) || { echo "kubectl get nodes failed" >&2; exit 1; }
+    printf '%s' "$nodes" | jq -c '{
+      results: [.items[] | {
+        name: .metadata.name,
+        ready: (((.status.conditions // []) | map(select(.type == "Ready")) | first | .status) // "Unknown"),
+        memory_pressure: (((.status.conditions // []) | map(select(.type == "MemoryPressure")) | first | .status) // "Unknown"),
+        disk_pressure: (((.status.conditions // []) | map(select(.type == "DiskPressure")) | first | .status) // "Unknown"),
+        pid_pressure: (((.status.conditions // []) | map(select(.type == "PIDPressure")) | first | .status) // "Unknown")
+      }]
+    }' || { echo "jq failed" >&2; exit 1; }
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          name:            { type: string }
+          ready:           { type: string }
+          memory_pressure: { type: string }
+          disk_pressure:   { type: string }
+          pid_pressure:    { type: string }
+        required: [name, ready, memory_pressure, disk_pressure, pid_pressure]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # The DSL only compares the already-derived scalar condition statuses
+  # (load-bearing wall 1). Ready != "True" (including the "Unknown" fallback —
+  # a node not reporting Ready is itself an alert signal) is critical; any
+  # pressure condition True is warning.
+  - for_each: "results as n"
+    when: "n.ready != 'True'"
+    severity: critical
+    message: "node {n[name]} not Ready (Ready={n[ready]})"
+  - for_each: "results as n"
+    when: "n.memory_pressure == 'True'"
+    severity: warning
+    message: "node {n[name]} under MemoryPressure"
+  - for_each: "results as n"
+    when: "n.disk_pressure == 'True'"
+    severity: warning
+    message: "node {n[name]} under DiskPressure"
+  - for_each: "results as n"
+    when: "n.pid_pressure == 'True'"
+    severity: warning
+    message: "node {n[name]} under PIDPressure"

@@ -429,7 +429,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 **退出条件**：覆盖矩阵下每个域至少有 3 个 Inspector，总计 ≥40 个，每个 Inspector 有 manifest + snapshot 测试 + 在 `examples/` 里有可 replay 的 fixture。
 
-**状态：🚧 进行中（主体已成型）**。已通过多个 inspector wave 增量交付，当前 `src/hostlens/inspectors/builtin/` 下 **65 个** inspector（总数已过 ≥40 门槛），核心域（计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/log/系统/**security/包管理**/**语言运行时 JVM·Go**/**TLS chain**）已覆盖。已归档 change：`add-inspector-authoring-contract`、`add-os-shell-inspectors-wave1`、`add-service-inspector-contract-spike`、`add-single-instance-service-inspectors`、`add-log-and-fault-service-inspectors`、`add-replication-inspector-spike`、`add-replication-lag-inspectors`、`add-postgres-replication-lag-inspector`、`add-security-baseline-and-package-inspectors`、`add-runtime-inspectors`、`add-tls-chain-validity-inspector`。**剩余域（达退出条件前待补）**：部分 DB（redis.slowlog 的 seed 漂移迁移）；K8s 域 inspector（**M8** target 已就位，但 pod OOM/evicted/pending 等需 kubectl/API 视角而非 pod-exec 视角，是独立提案 —— 见 `enable-k8s-inspector-targets` 非目标）。
+**状态：🚧 进行中（主体已成型）**。已通过多个 inspector wave 增量交付，当前 `src/hostlens/inspectors/builtin/` 下 **70 个** inspector（总数已过 ≥40 门槛），核心域（计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/**K8s 控制面**/log/系统/**security/包管理**/**语言运行时 JVM·Go**/**TLS chain**）已覆盖。已归档 change：`add-inspector-authoring-contract`、`add-os-shell-inspectors-wave1`、`add-service-inspector-contract-spike`、`add-single-instance-service-inspectors`、`add-log-and-fault-service-inspectors`、`add-replication-inspector-spike`、`add-replication-lag-inspectors`、`add-postgres-replication-lag-inspector`、`add-security-baseline-and-package-inspectors`、`add-runtime-inspectors`、`add-tls-chain-validity-inspector`、`add-k8s-control-plane-inspectors`。**剩余域（达退出条件前待补）**：部分 DB（redis.slowlog 的 seed 漂移迁移）。K8s 控制面域（pod OOMKilled / evicted / stuck-pending / node conditions / warning events）经 `add-k8s-control-plane-inspectors` 以 kubectl 管理机视角交付（5 个 `k8s.*` inspector，`targets: [local, ssh]`）。
 
 ### 覆盖矩阵
 
@@ -451,7 +451,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 | PostgreSQL | conn usage / replication lag / bloat（真实 SQL）/ long queries | — | postgres.connection_usage ✅, postgres.replication_lag, postgres.bloat_tables, postgres.long_queries ✅ |
 | Redis | memory / persistence / replication / slowlog | — | redis.memory_usage, redis.persistence ✅, redis.replication_lag, redis.slowlog |
 | Docker（SSH 跨） | unhealthy / restart loop / image disk / network | — | docker.containers.unhealthy（由 docker.containers.restart_loop 覆盖、不单列）, docker.containers.restart_loop ✅, docker.images.disk_usage ✅, docker.networks ✅ |
-| K8s（M8 target 已就位；域 inspector 需 kubectl/API 视角，独立提案） | pod OOM history / evicted / pending / node pressure | — | k8s.pods.oom_history, k8s.pods.evicted, k8s.pods.pending, k8s.nodes.pressure |
+| K8s（kubectl 控制面视角，跑在配 kubeconfig 的管理机上） | pod OOMKilled / evicted / stuck-pending / node conditions / warning events | — | k8s.pods.oom_killed ✅, k8s.pods.evicted ✅, k8s.pods.stuck_pending ✅, k8s.nodes.conditions ✅, k8s.events.warnings ✅ |
 | 运行时（JVM） | heap usage / GC pressure / thread count | — | jvm.heap ✅, jvm.gc ✅, jvm.threads ✅ |
 | 运行时（Go） | goroutine count / heap from pprof | — | go.goroutines ✅, go.heap ✅ |
 | 日志 | error burst / exception 突增 | log.tail.error_burst | log.exception_burst ✅ |
@@ -518,7 +518,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 - [`add-kubernetes-target`](openspec/changes/archive/2026-06-10-add-kubernetes-target/)（8.2 — KubernetesTarget，PR #83）
 - [`enable-k8s-inspector-targets`](openspec/changes/archive/2026-06-10-enable-k8s-inspector-targets/)（8.3 k8s 半边 — inspector 侧放开，PR #84）
 
-**退出条件**：Inspector 不修改代码，仅 manifest 的 `targets:` 字段加上 `docker` / `k8s` 就能在容器内/Pod 内跑。✅ 已达成 —— 容器安全 cohort（INCLUDE 28 / EXCLUDE 37，按 collector 实际读取源逐项判定）的 28 个 manifest 仅追加 `targets:` 值、collector 命令零改动；docker⇔k8s 奇偶不变量 + 内容式 meta-guard 钉死 cohort。
+**退出条件**：Inspector 不修改代码，仅 manifest 的 `targets:` 字段加上 `docker` / `k8s` 就能在容器内/Pod 内跑。✅ 已达成 —— 容器安全 cohort（INCLUDE 28 / EXCLUDE 42，按 collector 实际读取源逐项判定）的 28 个 manifest 仅追加 `targets:` 值、collector 命令零改动；docker⇔k8s 奇偶不变量 + 内容式 meta-guard 钉死 cohort。
 
 **状态：✅ 已落地**。
 

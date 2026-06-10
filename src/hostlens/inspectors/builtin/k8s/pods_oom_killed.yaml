@@ -1,0 +1,97 @@
+name: k8s.pods.oom_killed
+version: 1.0.0
+description: >-
+  Report containers whose `lastState.terminated.reason == "OOMKilled"` — a
+  current snapshot (lastState keeps only the most recent termination), NOT a
+  history series. Reads `kubectl get pods -o json` against the cluster control
+  plane from a management host (local/ssh) — NOT inside a pod. Each row carries
+  the pod namespace/name, container name and restartCount.
+tags: [k8s, pods, oom, memory]
+targets: [local, ssh]
+requires_binaries: [kubectl, jq]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # kubeconfig context; empty = current-context. Charset admits EKS ARN
+    # (":/" chars) and GKE ("_" chars) context names while excluding every
+    # shell metacharacter. Second wall behind `| sh`.
+    context:
+      type: string
+      pattern: "^[A-Za-z0-9_.:/@-]*$"
+      default: ""
+    # Namespace scope; empty = -A (whole cluster). RFC 1123 label shape
+    # (alphanumeric at both ends) — forbidding a leading dash closes the
+    # positional flag-injection bypass of the namespace pre-check
+    # (`kubectl get namespace --help` would exit 0 without checking anything).
+    namespace:
+      type: string
+      pattern: "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
+      default: ""
+  additionalProperties: false
+
+collect:
+  # Args assembled via POSIX `set --` (no reliance on undocumented
+  # `--context=''` behavior). FAIL-LOUD: kubectl and jq gated separately —
+  # an unreachable API server exits non-zero with empty stdout →
+  # status=exception (honest), never fabricated `{"results":[]}`.
+  # Non-empty namespace is PRE-CHECKED via `kubectl get namespace`: a LIST
+  # against a nonexistent namespace exits 0 with empty items — without the
+  # pre-check a namespace typo would be blessed as status=ok "no findings"
+  # (silent false negative). The pre-check GET is covered by the `view`
+  # ClusterRole.
+  # `containerStatuses` is null for Pending pods and `lastState` may be `{}` —
+  # jq guards both with `//` so such rows are skipped without a parse error.
+  command: |
+    set --
+    [ -n {{ context | sh }} ] && set -- "$@" --context {{ context | sh }}
+    if [ -n {{ namespace | sh }} ]; then
+      kubectl get namespace {{ namespace | sh }} "$@" >/dev/null || { echo "namespace not found or not readable" >&2; exit 1; }
+      set -- "$@" -n {{ namespace | sh }}
+    else
+      set -- "$@" -A
+    fi
+    pods=$(kubectl get pods "$@" -o json) || { echo "kubectl get pods failed" >&2; exit 1; }
+    printf '%s' "$pods" | jq -c '{
+      results: [
+        .items[] as $pod
+        | (($pod.status.containerStatuses // [])[]
+           | select((.lastState.terminated.reason // "") == "OOMKilled")
+           | {
+               name: $pod.metadata.name,
+               namespace: $pod.metadata.namespace,
+               container: .name,
+               restart_count: (.restartCount // 0)
+             })
+      ]
+    }' || { echo "jq failed" >&2; exit 1; }
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          name:          { type: string }
+          namespace:     { type: string }
+          container:     { type: string }
+          restart_count: { type: integer }
+        required: [name, namespace, container, restart_count]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  # The DSL only iterates the already-derived rows — no string ops, no
+  # derivation (load-bearing wall 1). Every OOMKilled container is critical.
+  - for_each: "results as c"
+    when: "True"
+    severity: critical
+    message: "container {c[namespace]}/{c[name]}:{c[container]} was OOMKilled (restartCount={c[restart_count]})"

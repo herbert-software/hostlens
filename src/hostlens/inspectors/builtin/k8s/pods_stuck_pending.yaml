@@ -1,0 +1,105 @@
+name: k8s.pods.stuck_pending
+version: 1.0.0
+description: >-
+  Detect pods stuck in Pending beyond an age threshold, distinguishing
+  "normally scheduling" from "stuck" via the PodScheduled=Unschedulable
+  condition. Runs kubectl against the cluster control plane from a
+  management host (local/ssh) — NOT inside a pod.
+tags: [k8s, pods, pending, scheduling]
+targets: [local, ssh]
+requires_binaries: [kubectl, jq]
+privilege: none
+
+parameters:
+  type: object
+  properties:
+    # kubeconfig context; empty = current-context. Charset admits EKS ARN
+    # (":/" chars) and GKE ("_" chars) context names while excluding every
+    # shell metacharacter. Second wall behind `| sh`.
+    context:
+      type: string
+      pattern: "^[A-Za-z0-9_.:/@-]*$"
+      default: ""
+    # Namespace scope; empty = -A (whole cluster). RFC 1123 label shape
+    # (alphanumeric at both ends) — forbidding a leading dash closes the
+    # positional flag-injection bypass of the namespace pre-check
+    # (`kubectl get namespace --help` would exit 0 without checking anything).
+    namespace:
+      type: string
+      pattern: "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$"
+      default: ""
+    # A pod Pending longer than this is "stuck". 600s covers the two longest
+    # benign Pending causes: cluster-autoscaler node provisioning and large
+    # image pulls / volume attach.
+    pending_age_seconds:
+      type: integer
+      default: 600
+  additionalProperties: false
+
+collect:
+  # Args assembled via POSIX `set --` (no reliance on undocumented
+  # `--context=''` behavior). FAIL-LOUD: kubectl and jq gated separately —
+  # an unreachable API server exits non-zero with empty stdout →
+  # status=exception (honest), never fabricated `{"results":[]}`.
+  # Non-empty namespace is PRE-CHECKED via `kubectl get namespace`: a LIST
+  # against a nonexistent namespace exits 0 with empty items — without the
+  # pre-check a namespace typo would be blessed as status=ok "no findings"
+  # (silent false negative). The pre-check GET is covered by the `view`
+  # ClusterRole.
+  # Age computed entirely in jq (`fromdateiso8601`; creationTimestamp is
+  # guaranteed second-precision RFC3339) — no GNU `date -d` dependency.
+  command: |
+    set --
+    [ -n {{ context | sh }} ] && set -- "$@" --context {{ context | sh }}
+    if [ -n {{ namespace | sh }} ]; then
+      kubectl get namespace {{ namespace | sh }} "$@" >/dev/null || { echo "namespace not found or not readable" >&2; exit 1; }
+      set -- "$@" -n {{ namespace | sh }}
+    else
+      set -- "$@" -A
+    fi
+    pods=$(kubectl get pods "$@" --field-selector=status.phase=Pending -o json) || { echo "kubectl get pods failed" >&2; exit 1; }
+    printf '%s' "$pods" | jq -c '{
+      results: [.items[] | {
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        age_seconds: ((now - (.metadata.creationTimestamp | fromdateiso8601)) | floor),
+        unschedulable: (((.status.conditions // []) | map(select(.type == "PodScheduled" and .reason == "Unschedulable")) | length) > 0),
+        scheduled_reason: (((.status.conditions // []) | map(select(.type == "PodScheduled")) | first | .reason) // "none")
+      }]
+    }' || { echo "jq failed" >&2; exit 1; }
+  timeout_seconds: 30
+
+parse:
+  format: json
+
+output_schema:
+  type: object
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+        properties:
+          name:             { type: string }
+          namespace:        { type: string }
+          age_seconds:      { type: integer }
+          unschedulable:    { type: boolean }
+          scheduled_reason: { type: string }
+        required: [name, namespace, age_seconds, unschedulable, scheduled_reason]
+        additionalProperties: false
+  required: [results]
+  additionalProperties: false
+
+findings:
+  - for_each: "results as p"
+    when: "p.unschedulable and p.age_seconds > pending_age_seconds"
+    severity: critical
+    message: "pod {p[namespace]}/{p[name]} unschedulable for {p[age_seconds]}s (scheduler verdict: {p[scheduled_reason]})"
+  - for_each: "results as p"
+    when: "p.unschedulable and p.age_seconds <= pending_age_seconds"
+    severity: warning
+    message: "pod {p[namespace]}/{p[name]} unschedulable (age {p[age_seconds]}s, autoscaler may still recover)"
+  - for_each: "results as p"
+    when: "not p.unschedulable and p.age_seconds > pending_age_seconds"
+    severity: warning
+    message: "pod {p[namespace]}/{p[name]} Pending {p[age_seconds]}s without Unschedulable verdict (PodScheduled reason: {p[scheduled_reason]})"

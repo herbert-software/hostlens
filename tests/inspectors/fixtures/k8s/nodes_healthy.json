@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v kubectl",
+      "stdout": "/usr/bin/kubectl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v jq",
+      "stdout": "/usr/bin/jq\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "set --\n[ -n '' ] && set -- \"$@\" --context ''\nnodes=$(kubectl get nodes \"$@\" -o json) || { echo \"kubectl get nodes failed\" >&2; exit 1; }\nprintf '%s' \"$nodes\" | jq -c '{\n  results: [.items[] | {\n    name: .metadata.name,\n    ready: (((.status.conditions // []) | map(select(.type == \"Ready\")) | first | .status) // \"Unknown\"),\n    memory_pressure: (((.status.conditions // []) | map(select(.type == \"MemoryPressure\")) | first | .status) // \"Unknown\"),\n    disk_pressure: (((.status.conditions // []) | map(select(.type == \"DiskPressure\")) | first | .status) // \"Unknown\"),\n    pid_pressure: (((.status.conditions // []) | map(select(.type == \"PIDPressure\")) | first | .status) // \"Unknown\")\n  }]\n}' || { echo \"jq failed\" >&2; exit 1; }",
+      "stdout": "{\"results\": [{\"name\": \"node-a\", \"ready\": \"True\", \"memory_pressure\": \"False\", \"disk_pressure\": \"False\", \"pid_pressure\": \"False\"}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}

@@ -1,0 +1,30 @@
+{
+  "impersonate": "local",
+  "capabilities": [
+    "shell"
+  ],
+  "commands": [
+    {
+      "cmd": "command -v kubectl",
+      "stdout": "/usr/bin/kubectl\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "command -v jq",
+      "stdout": "/usr/bin/jq\n",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    },
+    {
+      "cmd": "set --\n[ -n '' ] && set -- \"$@\" --context ''\nif [ -n '' ]; then\n  kubectl get namespace '' \"$@\" >/dev/null || { echo \"namespace not found or not readable\" >&2; exit 1; }\n  set -- \"$@\" -n ''\nelse\n  set -- \"$@\" -A\nfi\nevents=$(kubectl get events \"$@\" --field-selector=type=Warning -o json) || { echo \"kubectl get events failed\" >&2; exit 1; }\nprintf '%s' \"$events\" | jq -c '{\n  results: [\n    .items\n    | map({\n        reason: (.reason // \"Unknown\"),\n        kind: (.involvedObject.kind // \"Unknown\"),\n        namespace: (.metadata.namespace // \"\"),\n        n: (.count // .series.count // 1)\n      })\n    | group_by([.reason, .kind, .namespace])[]\n    | {\n        reason: .[0].reason,\n        kind: .[0].kind,\n        namespace: .[0].namespace,\n        count: (map(.n) | add)\n      }\n  ]\n}' || { echo \"jq failed\" >&2; exit 1; }",
+      "stdout": "{\"results\": [{\"reason\": \"BackOff\", \"kind\": \"Pod\", \"namespace\": \"prod\", \"count\": 2}]}",
+      "stderr": "",
+      "exit_code": 0,
+      "duration_seconds": 0.0
+    }
+  ],
+  "files": {}
+}
