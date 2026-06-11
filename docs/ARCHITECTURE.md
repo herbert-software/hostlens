@@ -1137,6 +1137,45 @@ export HOSTLENS_AGENT__PRIMARY_MODEL=deepseek-chat
 
 > **提醒（与 `disable_thinking` 正交）**：`agent.health_check_model` 默认 `claude-haiku-4-5`，第三方端点（如 DeepSeek）不认这个 model id，`hostlens doctor` 会因此报该 backend 不健康。这与 `disable_thinking` 无关 —— 把 `health_check_model` 也配成该端点支持的模型（例如 `export HOSTLENS_AGENT__HEALTH_CHECK_MODEL=deepseek-chat`）即可。
 
+#### OpenRouter — 通过 `/api/v1/messages` 端点接入第三方模型
+
+OpenRouter 在 `https://openrouter.ai/api/v1/messages` 暴露一个 **Anthropic Messages 兼容端点**，可通过现有 `AnthropicAPIBackend`（`type: anthropic_api` + `base_url`）直接接入，无需新 backend 类型。
+
+**实测验证结论**（`tests/manual/openrouter_probe.py`，2026-06-12）：
+
+| 验证项 | 结论 |
+|---|---|
+| `x-api-key` 认证 | ✓ OpenRouter `/api/v1/messages` 接受 Anthropic SDK 默认的 `x-api-key` header |
+| Anthropic `tool_use` schema | ✓ OpenRouter 对 DeepSeek / Qwen 等非 Claude 模型做透明翻译，返回标准 Anthropic `tool_use` block |
+| `cache_control` block | ✓ 不报错；非 Claude 模型 `cache_creation_input_tokens=0`（不实际缓存，但请求正常） |
+| `thinking` block | DeepSeek-v4-pro / Qwen3.7-plus 默认返回 `thinking`+`redacted_thinking` 块，已被 Path 1 容忍（可选 `disable_thinking=false` 接受或 `true` 节省 token） |
+| 地区限制 | `anthropic/claude-*` 模型在中国大陆返回 403（OpenRouter 地理封锁，与代码无关） |
+
+**模型 ID 格式**：OpenRouter 使用 `provider/model-name`，例如 `deepseek/deepseek-v4-pro`、`qwen/qwen3.7-plus`。与直连 DeepSeek 的裸 `deepseek-chat` 不同，`health_check_model` 也须同步修改。
+
+**配置示例（环境变量）**：
+
+```bash
+# OpenRouter — DeepSeek v4 Pro
+export HOSTLENS_BACKEND__TYPE=anthropic_api
+export HOSTLENS_BACKEND__API_KEY=sk-or-v1-...        # OpenRouter key
+export HOSTLENS_BACKEND__BASE_URL=https://openrouter.ai/api
+export HOSTLENS_BACKEND__DISABLE_THINKING=false       # thinking 块已容忍；true 可省 token
+export HOSTLENS_AGENT__PRIMARY_MODEL=deepseek/deepseek-v4-pro
+export HOSTLENS_AGENT__HEALTH_CHECK_MODEL=deepseek/deepseek-v4-pro
+
+# OpenRouter — Qwen
+export HOSTLENS_AGENT__PRIMARY_MODEL=qwen/qwen3.7-plus
+export HOSTLENS_AGENT__HEALTH_CHECK_MODEL=qwen/qwen3.7-plus
+```
+
+也可复制 `.env.example`（仓库根目录，方案 B）填入 key 后 `cp .env.example .env` 即可使用。
+
+**已知待改进项**（不阻塞当前使用，需独立提案）：
+
+- `BackendSettings` 缺 `extra_headers` 字段——无法传 OpenRouter 建议的 `HTTP-Referer` / `X-OpenRouter-Title` 统计 header
+- `BackendCapabilities` 为 ClassVar（类级别常量），无法按实例（模型）覆盖；非 Claude 模型的 `prompt_caching` 实际不生效但仍声明为 `True`，导致 cache hit rate 指标失真
+
 #### 注入方式（不进 ToolContext）
 
 Backend 是 **Agent Loop 的私有依赖**，不进 `ToolContext`：

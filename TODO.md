@@ -506,6 +506,42 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
   - [ ] `docs/integrations/cursor.md`
   - [ ] 在 README 加录屏 / GIF
 
+### M7 后续扩展 — MCP 管控工具集
+
+> M7 落地的是只读三件套（`list_targets` / `list_inspectors` / `run_inspector`）。以下扩展让 AI 助手通过 MCP 完成全套管控操作，无需切回 CLI 或手编 YAML。每组独立提案，按需推进。
+
+#### 7-ext-A：资产管理（Target）
+
+当前 CLI 有 `target add / list / remove / test`，MCP 只有 `list_targets`。
+
+- [ ] `add_target(name, type, host?, user?, key_path?, port?, tags?)` — 写入 `targets.yaml`；`side_effects=write`、`requires_approval=True`；拒绝 EUID=0（复用 CLI 同款逻辑）
+- [ ] `remove_target(name)` — 从 `targets.yaml` 移除；`side_effects=write`、`requires_approval=True`
+- [ ] `test_target(name)` — 测试连通性，返回 `ok/error` + latency；只读，无 approval
+- [ ] `sensitive_output` 声明：`add_target` / `test_target` 的输出可能含 host/user，显式声明 `sensitive_output=True`
+
+#### 7-ext-B：定时任务管理（Schedule）
+
+当前 CLI 有 `schedule list / trigger / status`，MCP 无对应。
+
+- [ ] `list_schedules()` — 列出所有已配置的 schedule manifest，含 next_fire_time、enabled 状态；只读
+- [ ] `trigger_schedule(name)` — 立即触发指定任务（不等下次定时）；`side_effects=write`、`requires_approval=True`
+- [ ] `get_schedule_status(name?, limit?)` — 查询最近 N 次 Run 的结果（run_id、触发时间、目标、inspector 列表、报告 hash、notify 结果）；只读
+- [ ] `sensitive_output=False`（以上均不含凭据，状态信息可安全暴露）
+
+#### 7-ext-C：通知通道管理（Notifier）
+
+当前 CLI 有 `notify channels / test`，MCP 无对应。
+
+- [ ] `list_channels()` — 列出 `notifiers.yaml` 中已配置的通道（name、type=telegram/lark、enabled、only_if 路由表达式）；**不返回 token / secret**（`sensitive_output=False`）
+- [ ] `test_channel(channel)` — 向指定通道发送 ping 消息，返回 ok/error；`side_effects=write`（发真实消息）、`requires_approval=True`
+- [ ] `get_channel_routing(severity?)` — 给定 severity，返回哪些通道会触发（dry-run 路由决策）；只读
+
+#### 7-ext 共同约束
+
+- 每个新 ToolSpec 必须分别撰写 `mcp_description`（面向远程 LLM）和 `agent_description`（面向本地 loop）
+- 写操作（`side_effects=write`）须在 `McpToolsAdapter.dispatch` 的 approval gate 通过后才执行
+- 7-ext-A 和 7-ext-C 的写操作均有外部影响（文件写入、真实消息发出），每个独立提案在起草时需明确「对 AI 调用的撤销路径」
+
 ---
 
 ## M8 — Docker + Kubernetes ExecutionTarget
@@ -647,6 +683,10 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
     - [ ] Bedrock backend 跑通同一套 cassette（除 prompt caching 相关测试外）
     - [ ] Subscription backend 在 daemon 进程中启动必须立刻 exit 1
     - [ ] 切换 backend 不需要修改任何业务代码（只改配置文件 `backend.type`）
+- [ ] **10.6 OpenRouter backend 配置优化**（`add-openrouter-backend-config` 提案；OpenRouter 经 `tests/manual/openrouter_probe.py` 实测已可用，以下是改进项，不阻塞当前使用）
+  - [ ] `BackendSettings` 加 `extra_headers: dict[str, str] | None` 字段，`AnthropicAPIBackend` 透传给 SDK `default_headers`——支持 OpenRouter 推荐的 `HTTP-Referer` / `X-OpenRouter-Title` 统计 header
+  - [ ] `BackendCapabilities` 从 ClassVar 改为实例字段（构造时注入）——允许按模型/端点配置实际支持的 capability，解决非 Claude 模型 `prompt_caching=True` 但 `cache_creation_input_tokens` 恒 0 导致指标失真的问题
+  - [ ] 验收：`HOSTLENS_BACKEND__EXTRA_HEADERS='{"HTTP-Referer":"https://..."}'` 能透传；`deepseek/deepseek-v4-pro` 与 `qwen/qwen3.7-plus` 跑通 `hostlens demo`
 
 ---
 
@@ -660,6 +700,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 - [ ] **Prompt cache hit rate**：每次新增 LLM 调用点都看一遍指标
 - [ ] **OpenSpec 卫生**：每完成一期把 `openspec/changes/` 下的提案归档到 `openspec/specs/`
 - [ ] **README / CLAUDE.md / config.yaml 同步**：架构演进后及时更新
+- [ ] **MCP `add_target` 工具**：当前 MCP server 只有只读三件套（`list_targets` / `list_inspectors` / `run_inspector`）；加 `add_target` 工具后可通过 AI 对话完成服务器资产登记，目前须手动编辑 `~/.config/hostlens/targets.yaml` 或用 `hostlens target add` CLI
 
 ---
 
