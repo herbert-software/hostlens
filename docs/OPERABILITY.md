@@ -163,7 +163,7 @@
 
 - 任何写入 SQLite / 日志 / Notifier payload 的字符串都过 `core/redact.py`
 - 默认脱敏规则：
-  - 任何匹配 `(password|secret|token|api[_-]?key|bearer)\s*[:=]\s*\S+` 的串
+  - 任何匹配 `(password|secret|token|api[_-]?key|bearer)\s*[:=]\s*<值>` 的 `key=value` 赋值，以及 HTTP 头 `Bearer <token>`（空格分隔形）。两者的 value 均**引号感知**——`password="a b"` / `Bearer "a b"` 整体脱敏，不发生裸 `\S+` 在引号内空格截断漏尾
   - 任何形如 JWT 的 `eyJ...`
   - 任何匹配 `sk-[a-zA-Z0-9-]{20,}` 的 Anthropic / OpenAI key 形式
   - **[A] 空格分隔长 flag**：`--password <值>` / `--secret <值>` / `--token <值>` / `--api-key <值>`（关键字 casefold 比对，`--password=<值>` 等 `=` 分隔形已由上面 `key=value` 规则覆盖、本条只补空格分隔形；散文中 `--password <普通词>` 会安全侧 over-mask 下一 token，accepted）

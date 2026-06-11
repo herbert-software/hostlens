@@ -84,6 +84,20 @@ class TestJWT:
         out = redact_text(f"got token={jwt} from upstream")
         assert jwt not in out
 
+    def test_bearer_no_space_token_unchanged(self) -> None:
+        # A real base64url bearer token has no space; output is byte-identical
+        # to the pre-quote-aware `\\S+` form.
+        out = redact_text("Authorization: Bearer eyJabcdefghijklmnopqrstuvwxyz")
+        assert out == "Authorization: Bearer eyJa...wxyz"
+
+    def test_bearer_quoted_value_with_spaces_no_tail_leak(self) -> None:
+        # `Bearer "a b c"` — a bare `(\\S+)` truncated at the in-quote space and
+        # masked only `"a`, leaking ` b c"`. The quote-aware value masks whole.
+        out = redact_text('Authorization: Bearer "a b c"')
+        assert "b c" not in out
+        assert out == "Authorization: Bearer ****"
+        assert redact_text(out) == out  # idempotent
+
 
 class TestSkKey:
     def test_anthropic_sk_key_masked(self) -> None:
@@ -335,6 +349,16 @@ class TestWrapperOptions:
         out = redact_text("docker exec --user root c mysql -psupersecret123")
         assert "supersecret123" not in out
 
+    def test_sudo_value_taking_opts_consume_value(self) -> None:
+        # `-R <dir>` / `-T <timeout>` take a value; the head must still resolve
+        # to `mysql`, not the option's value.
+        for cmd in ("sudo -R /chroot mysql -psupersecret123", "sudo -T 30 mysql -psupersecret123"):
+            assert "supersecret123" not in redact_text(cmd)
+
+    def test_ssh_bind_interface_opt_consumes_value(self) -> None:
+        out = redact_text("ssh -B eth0 host mysql -psupersecret123")
+        assert "supersecret123" not in out
+
     def test_time_value_opt_then_mysql_masked(self) -> None:
         out = redact_text("time -p mysql -psupersecret123")
         assert "supersecret123" not in out
@@ -476,6 +500,8 @@ class TestNegativeProtects:
         "secret=topsecretvalue",
         "token=ghp_1234567890abcdefghij",
         "Authorization: Bearer mytokenvalue123456",
+        'Authorization: Bearer "a b c"',
+        'Authorization: Bearer "my long token value"',
         "eyJ0eXAiOiJKV1Q.eyJleHAiOjE2MDB9.abcDEF1234",
         "sk-abcdefghijklmnopqrstuvwxyz1234567890",
         # [A] long flag — incl. quoted value with spaces (quote-wrapped fixpoint).

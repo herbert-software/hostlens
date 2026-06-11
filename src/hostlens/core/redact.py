@@ -40,7 +40,7 @@ Group 1 = keyword (preserved verbatim).
 Group 2 = the secret value to redact.
 """
 
-_BEARER_HEADER = re.compile(r"(?i)\bBearer\s+(\S+)")
+_BEARER_HEADER = re.compile(r"(?i)\bBearer\s+((?:[^\s\"']+|\"(?:\\.|[^\"\\])*\"?|'[^']*'?)+)")
 """Matches the bare HTTP `Authorization: Bearer <token>` form where
 keyword and token are separated by whitespace rather than `:` / `=`.
 This is the shape that flows into ``BackendError.__str__`` when an
@@ -49,7 +49,13 @@ SDK exception message embeds an upstream HTTP header verbatim — the
 it. The token is masked while the literal word ``Bearer`` is preserved
 to keep the redacted output recognizable as an auth header.
 
-Group 1 = the token to redact (any run of non-whitespace).
+Group 1 is the same quote-aware shell-word fragment as `_KEYWORD_ASSIGN`
+/ `_SHELL_WORD` (masked via `_mask_glued_value`): a bare `(\\S+)` truncates
+a quoted value at the in-quote space (`Bearer "a b"` -> masks only `"a`,
+leaks `b"`). A real base64url bearer token has no space, so its output is
+byte-identical to the old `\\S+` form.
+
+Group 1 = the token to redact.
 """
 
 _SENSITIVE_KEY_NAMES = re.compile(r"(?i)(password|secret|token|api[_-]?key|bearer)")
@@ -147,7 +153,28 @@ _WRAPPER_NAMES = frozenset({"sudo", "env", "nice", "time", "ssh", "docker"})
 # left unredacted, safe-side).
 _WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
     "sudo": frozenset(
-        {"-u", "-g", "-p", "-C", "-U", "-h", "-r", "-t", "--user", "--group", "--prompt", "--chdir"}
+        {
+            "-u",
+            "-g",
+            "-p",
+            "-C",
+            "-U",
+            "-h",
+            "-r",
+            "-t",
+            "-R",
+            "-T",
+            "--user",
+            "--group",
+            "--prompt",
+            "--chdir",
+            "--chroot",
+            "--command-timeout",
+            "--type",
+            "--role",
+            "--close-from",
+            "--host",
+        }
     ),
     "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
     "docker": frozenset(
@@ -160,6 +187,7 @@ _WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
             "-o",
             "-l",
             "-b",
+            "-B",
             "-c",
             "-D",
             "-E",
@@ -438,7 +466,7 @@ def redact_text(s: str) -> str:
         return f"{keyword}={_mask_glued_value(value)}"
 
     out = _KEYWORD_ASSIGN.sub(_sub_assign, s)
-    out = _BEARER_HEADER.sub(lambda m: f"Bearer {_mask(m.group(1))}", out)
+    out = _BEARER_HEADER.sub(lambda m: f"Bearer {_mask_glued_value(m.group(1))}", out)
     out = _JWT.sub(lambda m: _mask(m.group(0)), out)
     out = _SK_KEY.sub(lambda m: _mask(m.group(0)), out)
 
