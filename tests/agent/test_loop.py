@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -52,6 +54,20 @@ from ._helpers import (
     make_spec,
     ok_handler,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Clear ``HOSTLENS_*`` env and chdir off the repo so a dev ``.env`` /
+    exported ``HOSTLENS_*`` don't leak a configured agent into the test
+    asserting ``settings.agent is None`` → ConfigError. ``Settings()`` reads
+    ``.env`` from cwd, so the chdir is what actually blocks the file read."""
+
+    for key in list(os.environ):
+        if key.startswith("HOSTLENS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # Builders

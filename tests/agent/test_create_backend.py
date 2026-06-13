@@ -18,6 +18,7 @@ Covers spec §需求:`create_backend` 工厂 acceptance scenarios:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,21 @@ from hostlens.agent.backends.anthropic_api import AnthropicAPIBackend
 from hostlens.agent.backends.playback import PlaybackBackend
 from hostlens.core.config import AgentSettings, BackendSettings, Settings
 from hostlens.core.exceptions import BackendDaemonUnsafe, ConfigError
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Clear ``HOSTLENS_*`` env and chdir off the repo so a dev ``.env`` /
+    exported ``HOSTLENS_*`` don't leak a configured backend/agent into the
+    tests asserting the unconfigured path (``backend is None`` → ConfigError,
+    ``settings.agent is None`` → fallback). ``Settings()`` reads ``.env`` from
+    cwd, so the chdir is what actually blocks the file read."""
+
+    for key in list(os.environ):
+        if key.startswith("HOSTLENS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+
 
 _FAKE_KEY = (
     "sk-" + "ant-" + "validkey1234"
