@@ -418,7 +418,7 @@ APPROVE/CLEAR → git push → gh pr create
 
 ## 9. 当前阶段
 
-**M0–M8 已落地（M6 已达退出门槛）**（`src/` 有可运行代码、`hostlens` CLI 可装可跑、未发 PyPI）。已交付：
+**M0–M9 已落地（M6 已达退出门槛）**（`src/` 有可运行代码、`hostlens` CLI 可装可跑、未发 PyPI）。已交付：
 
 - **M0** 脚手架 + `hostlens doctor`
 - **M1** ExecutionTarget（local/ssh）/ Inspector 插件系统 / Report 数据模型 + `hostlens inspect` / `target` / `inspectors`
@@ -429,10 +429,12 @@ APPROVE/CLEAR → git push → gh pr create
 - **M6**（✅ 域全满）内置 Inspector 库扩充：`src/hostlens/inspectors/builtin/` 下 **72 个** inspector（已过 ≥40 总数门槛，每域 ≥3），覆盖计算/内存/磁盘/网络/进程/systemd/cron/nginx/mysql/postgres/redis/docker/K8s 控制面/log/系统/security/包管理/TLS chain/语言运行时 JVM·Go 域；经多个 inspector wave 增量交付（`add-os-shell-inspectors-wave1` / `add-single-instance-service-inspectors` / `add-log-and-fault-service-inspectors` / `add-replication-lag-inspectors` / `add-security-baseline-and-package-inspectors` / `add-runtime-inspectors` / `add-tls-chain-validity-inspector` / `add-k8s-control-plane-inspectors` 等已归档）。seed 漂移迁移已收口（`migrate-redis-slowlog-service-contract` / `migrate-postgres-bloat-tables-service-contract` 已归档，slowlog/bloat_tables 全量合规 service-inspector-contract）。K8s 控制面域（pod OOMKilled / evicted / stuck-pending / node conditions / warning events）经 `add-k8s-control-plane-inspectors` 以 kubectl 管理机视角（`targets: [local, ssh]`）交付。wave-2b 尾批 nginx.upstream（upstream 故障）、mysql.deadlocks（InnoDB 死锁）经 `add-nginx-upstream-mysql-deadlocks-inspectors` 交付，Web/DB 域全满
 - **M7** MCP Server：`mcp_server/{tools_adapter.py, server.py}` —— `McpToolsAdapter` + `build_server` / `run_stdio` stdio server + `hostlens mcp serve` CLI；只读三件套（`list_inspectors` / `list_targets` / `run_inspector`）显式 opt-in `"mcp"` surface；`doctor --json` 的 `checks.mcp`（`ok` / `missing`，非致命）；fail-closed 三处对称（`list_for_mcp` 投影 / `build_server` eager / `dispatch` 门）；**stdio-only**（`mcp` optional-dep：`pip install "hostlens[mcp]"`）
 - **M8** Docker/K8s ExecutionTarget：`targets/docker.py`（docker-py）+ `targets/kubernetes.py`（kubernetes-asyncio，exec 走 WsApiClient、read_file 走 tar-over-ws）两个只读 target（#81/#83）+ inspector 侧放开（#82/#84）——`InspectorManifest.targets` Literal 收口为 `local/ssh/docker/k8s` 全集，容器安全 cohort **INCLUDE 28 / EXCLUDE 42**（按 collector 读取源逐项判定，内容式 meta-guard + docker⇔k8s 奇偶不变量钉死）；target 经 `targets.yaml` 配置（`target add --type docker/k8s` CLI 写入留 follow-up）
+- **M9** 受控修复（Remediation）：`remediation/{models,approval,executor,audit,runbook}.py` + `agent/remediation_planner.py`——四片增量交付（`add-remediation-plan-schema` #89 / `add-remediation-planner` #90 / `add-remediation-execution-workflow` #91 / `add-risk-tiered-remediation-execution` #92 已归档）。架构不变量落地：**Agent 表面永久只读**（写路径根本不以 ToolSpec 形式存在、不进 Tool Registry/`ToolContext`）；`RemediationPlan/RemediationStep` 含 `precheck/forward/rollback/verify` 四元 + `risk_level`，校验规则 `high ⟹ precheck 非空`、`rollback 缺失 ⟹ high`；Planner Agent 复用只读 Registry 核实状态、structured output 产 Plan 不执行；独立 `ApprovalGate`（不复用 ToolContext 的 ApprovalService）+ 三态审计（`precheck-blocked`/`forward-failed`/`verify-failed`）写 append-only `audit.log`。**风险分级执行**（按 memory 红线翻转 P3）：仅 **low** 风险走自动闭环执行，**medium/high 只产 runbook 不代执行**（`remediation/runbook.py` + Jinja2 模板），原「飞书远程审批」被否。配套 `text-secret-redaction` spec 加固（Bearer 引号感知 + flag 形密钥 + wrapper 取值，#93/#94）保 audit/runbook 不漏密钥
 
 **下一步候选**（milestone 编号非严格串行；M6 inspector 库与 M5/M7 时间上交叠，按需推进，参考 [TODO.md](TODO.md) 进度总览）：
-- **M9 受控修复（Remediation）** —— `plan → approve → execute → rollback`，**门控**：先在 M1–M8 验证只读诊断准确性达标才解锁（`src/hostlens/remediation/` 当前仅空 `__init__.py` 占位；M1–M8 已齐、M6 已达退出门槛，门控满足，可起提案）
+- **M10.6 OpenRouter backend 配置优化** —— `add-openrouter-backend-config` 提案；OpenRouter 经 `tests/manual/openrouter_probe.py` 实测已可用（docs/`.env.example` 已落 #3f8edc9），剩 `BackendSettings.extra_headers` 透传 + `BackendCapabilities` ClassVar→实例字段两点小改
 - **M3.6 Path 2 `support-extended-thinking`** —— Agent loop 主动请求 + 消费推理 trace（Path 1「容忍 inbound thinking」已落 #53；可插队）
-- **M10 通道扩展 + PyPI 1.0** —— 钉钉 / 企微 / Slack / Email / 通用 Webhook 适配器（Protocol + registry 已预留）+ 发布
+- **M7 后续扩展 MCP 管控工具集** —— 7-ext-A 资产管理（`add_target`/`remove_target`）/ 7-ext-B 定时任务（`list_schedules`/`trigger_schedule`）/ 7-ext-C 通知通道（`list_channels`/`test_channel`），写操作走 MCP `dispatch` approval gate；每组独立提案
+- **M10 通道扩展 + PyPI 1.0** —— 钉钉 / 企微 / Slack / Email / 通用 Webhook 适配器（Protocol + registry 已预留）+ docs 站 + 发布
 
 **纪律红线**（不变）：每期开始前先用 OpenSpec 起 proposal，**不要跳过 spec 直接写代码**；改已有契约必更新对应 spec；实现完成后归档（change → `openspec/changes/archive/`，delta 合入 `openspec/specs/`）。

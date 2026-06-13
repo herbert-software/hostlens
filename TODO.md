@@ -21,7 +21,7 @@
 | M6 | 内置 Inspector 库扩充 | 覆盖 Linux/Nginx/MySQL/Redis/Docker 真实场景 | ✅ |
 | M7 | MCP Server | Claude Code / Cursor 能直接调用 Hostlens | ✅ |
 | M8 | Docker + K8s ExecutionTarget | 容器与集群场景 | ✅ |
-| M9 | 受控修复（Remediation） | plan → approve → execute → rollback 闭环 | ⬜ |
+| M9 | 受控修复（Remediation） | plan → approve → execute → rollback 闭环 | ✅ |
 | M10 | 通道扩展 + 文档发布 | 钉钉/企微/Slack/Email/Webhook + PyPI 1.0 | ⬜ |
 
 ---
@@ -579,7 +579,13 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 
 **目标**：闭环故事 —— Agent 不光能看出问题，还能提出修复建议，经过人工审批后执行，并预备好回滚路径。
 
-**退出条件**：对一个典型问题（如 `/var/log` 占满磁盘），Agent 能生成 plan、CLI 展示 diff、`--yes` 后执行、记录 audit log、保留回滚命令。
+**退出条件**：对一个典型问题（如 `/var/log` 占满磁盘），Agent 能生成 plan、CLI 展示 diff、`--yes` 后执行、记录 audit log、保留回滚命令。✅ 已达成。
+
+**状态：✅ 已落地**（P1a #89 / P1b #90 / P2 #91 / P3 #92 已 merged + archived）。
+
+> **P3 实际形态变更**：原提案 `add-remediation-lark-approval`（飞书远程审批）在实施时按红线「AI 不代做中高风险操作」（见 memory `feedback_ai_no_auto_exec_elevated_risk`）**翻转**为 `add-risk-tiered-remediation-execution`——仅 **low** 风险走自动执行闭环，**medium/high 只产 runbook 不代执行**；飞书远程审批 / high-risk 远程触发被否。下面 P3 任务（9.6）按此 reconcile。
+>
+> **⚠️ 未完成的 follow-up**：本段末「Follow-up：文档遗留清理」四项**未随 M9 提案落地**（`_in_m2` 后缀仍在 4 处、ARCHITECTURE.md 仍留 `apply_remediation_step`/`docker_prune_images` 早期反例、`targets/base.py:39` 仍写「M9 会加 FILE_WRITE」而 M9 实际撤回了该承诺）——是孤儿 tech-debt，含代码注释改动（需走 PR），建议单独起一个小 `chore` 收口。
 
 ### 架构不变量（贯穿所有 M9 提案，先于切分确立）
 
@@ -600,44 +606,47 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 | **P1b** | `add-remediation-planner` | 零（只读 + LLM） | 喂 finding → 打印 Plan（不执行） | 依赖 P1a 冻结 |
 | 🚪 | — 客观门控 — | — | — | **Planner 对 `/var/log` 占满场景产出人判「可执行」的 Plan（forward/verify/rollback 三元组都对、high-risk step 的 precheck 齐备），录像为证** |
 | **P2** | `add-remediation-execution-workflow` | 写（dry-run→真实） | `hostlens fix` 全闭环 | **真实 `exec` 是 P2 最后一个 task**，前面编排全在 dry-run 下验证 |
-| **P3** | `add-remediation-lark-approval`（experimental） | 写（远程触发） | 飞书点批准 → 执行 | 默认 off，token 校验 |
+| **P3** | ~~`add-remediation-lark-approval`~~ → 实交付 `add-risk-tiered-remediation-execution` | 写（仅 low 自动执行） | low 自动闭环 / medium·high 出 runbook | 红线翻转：中高风险不代执行 |
 
 ### 任务
 
 #### P1a — `add-remediation-plan-schema`（纯契约，零写零 LLM）
 
-- [ ] **9.1 Remediation Plan schema**
-  - [ ] `remediation/models.py`：`RemediationPlan` / `RemediationStep`（含 `precheck_cmd` / `forward_cmd` / `rollback_cmd` / `verify_cmd` / `risk_level`）
-  - [ ] **`precheck_cmd: str | None`**（默认 `None`）：执行 `forward_cmd` 前验证假设仍成立（补 `verify_cmd` 的前向对称缺口，挡 TOCTOU / 审批延迟导致的世界漂移，如 PID 复用）
-  - [ ] 校验规则：`risk_level=="high"` ⟹ `precheck_cmd` 不得为 `None`；`rollback_cmd is None` ⟹ `risk_level=="high"`
-  - [ ] 纯单元测试覆盖校验规则；**此提案冻结整个 M9 的契约 SOT**
+- [x] **9.1 Remediation Plan schema**
+  - [x] `remediation/models.py`：`RemediationPlan` / `RemediationStep`（含 `precheck_cmd` / `forward_cmd` / `rollback_cmd` / `verify_cmd` / `risk_level`）
+  - [x] **`precheck_cmd: str | None`**（默认 `None`）：执行 `forward_cmd` 前验证假设仍成立（补 `verify_cmd` 的前向对称缺口，挡 TOCTOU / 审批延迟导致的世界漂移，如 PID 复用）
+  - [x] 校验规则：`risk_level=="high"` ⟹ `precheck_cmd` 不得为 `None`；`rollback_cmd is None` ⟹ `risk_level=="high"`
+  - [x] 纯单元测试覆盖校验规则；**此提案冻结整个 M9 的契约 SOT**
 
 #### P1b — `add-remediation-planner`（Agent 产 Plan，不执行）
 
-- [ ] **9.2 Plan 生成 Agent**
-  - [ ] `agent/remediation_planner.py`：输入 = finding + target，输出 = `RemediationPlan`（structured output，§4.7）；复用只读 Tool Registry 核实状态，**不执行任何 step**
-  - [ ] 高风险动作（`rm -rf` / `kill -9` / 修改 systemd unit）必须显式标 `risk_level=high`（触发 P2 的双重确认 + 强制 precheck）
-  - [ ] LLM 调用走 VCR cassette；demo = 喂 finding → 打印 Plan
+- [x] **9.2 Plan 生成 Agent**
+  - [x] `agent/remediation_planner.py`：输入 = finding + target，输出 = `RemediationPlan`（structured output，§4.7）；复用只读 Tool Registry 核实状态，**不执行任何 step**
+  - [x] 高风险动作（`rm -rf` / `kill -9` / 修改 systemd unit）必须显式标 `risk_level=high`（触发 P2 的双重确认 + 强制 precheck）
+  - [x] LLM 调用走 VCR cassette；demo = 喂 finding → 打印 Plan
 
 #### P2 — `add-remediation-execution-workflow`（写路径；dry-run 先行，真实 exec 最后）
 
-- [ ] **9.3 预览与审批**
-  - [ ] `remediation/approval.py`：独立 `ApprovalGate`（**不复用 ToolContext 的 ApprovalService**）
-  - [ ] CLI: `hostlens fix <run_id>` → 展示 plan diff → 等待 `--yes` 或交互 y/N；`risk_level=high` 走双重确认
-  - [ ] 非交互无 `--yes` → 退出 1（绝不默默执行）；默认 `--dry-run`
-  - [ ] 拒绝以 root 身份运行（EUID==0）
-- [ ] **9.4 执行与回滚**（先全链路 dry-run 验证编排，真实 `target.exec` 接通为本片**最后一个 task**）
-  - [ ] `remediation/executor.py`：顺序执行 steps；每步先跑 `precheck_cmd`（失败 = 世界已漂移 → 中止）、再 `forward_cmd`、再 `verify_cmd`
-  - [ ] 任一步未能成功推进（precheck 拒绝 / forward 报错 / verify 失败）→ 倒序跑已成功 step 的 `rollback_cmd`，走统一收尾路径
-- [ ] **9.5 Audit log**
-  - [ ] 每次 fix 写 `~/.local/share/hostlens/audit.log`（append-only，永不轮转）：who / when / target / plan / outcomes
-  - [ ] 失败区分三态：`precheck-blocked`（前提漂移，没碰）/ `forward-failed`（执行报错）/ `verify-failed`（执行了但结果不对）
+- [x] **9.3 预览与审批**
+  - [x] `remediation/approval.py`：独立 `ApprovalGate`（**不复用 ToolContext 的 ApprovalService**）
+  - [x] CLI: `hostlens fix <run_id>` → 展示 plan diff → 等待 `--yes` 或交互 y/N；`risk_level=high` 走双重确认
+  - [x] 非交互无 `--yes` → 退出 1（绝不默默执行）；默认 `--dry-run`
+  - [x] 拒绝以 root 身份运行（EUID==0）
+- [x] **9.4 执行与回滚**（先全链路 dry-run 验证编排，真实 `target.exec` 接通为本片**最后一个 task**）
+  - [x] `remediation/executor.py`：顺序执行 steps；每步先跑 `precheck_cmd`（失败 = 世界已漂移 → 中止）、再 `forward_cmd`、再 `verify_cmd`
+  - [x] 任一步未能成功推进（precheck 拒绝 / forward 报错 / verify 失败）→ 倒序跑已成功 step 的 `rollback_cmd`，走统一收尾路径
+- [x] **9.5 Audit log**
+  - [x] 每次 fix 写 `~/.local/share/hostlens/audit.log`（append-only，永不轮转）：who / when / target / plan / outcomes
+  - [x] 失败区分三态：`precheck-blocked`（前提漂移，没碰）/ `forward-failed`（执行报错）/ `verify-failed`（执行了但结果不对）
 
-#### P3 — `add-remediation-lark-approval`（experimental，默认 off）
+#### P3 — ~~`add-remediation-lark-approval`~~ → 实交付 `add-risk-tiered-remediation-execution`
 
-- [ ] **9.6 飞书卡片交互按钮**
-  - [ ] M5 预留的卡片按钮接通：飞书群里点"批准修复"→ 触发执行（带 token 校验）
-  - [ ] 标记为 experimental，开关默认 off
+> 原飞书远程审批方案按红线翻转为风险分级执行（见本段顶部 banner）。
+
+- [x] **9.6 风险分级执行**
+  - [x] **low** 风险：走 9.3–9.5 的自动执行闭环（precheck → forward → verify → rollback-ready + audit）
+  - [x] **medium / high** 风险：不代执行，渲染 `remediation/runbook.py` + Jinja2 模板（`templates/runbook.md.j2`）产出人工 runbook，交还操作者在自己终端执行
+  - [x] 飞书远程审批 / high-risk 远程触发**被否**（AI 担不了中高风险责任）
 
 ### Follow-up：文档遗留清理（在对应 M9 提案里改，不预先动）
 
