@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -51,12 +52,33 @@ def test_serve_missing_mcp_sdk_exits_1_with_hint(
 def test_serve_build_server_policy_violation_exits_1_cleanly(
     runner: CliRunner,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # A registry whose mcp-surface tool forgot to declare sensitive_output makes
     # build_server's eager fail-closed check raise; serve must surface that as a
-    # clean exit 1, not a raw traceback.
+    # clean exit 1, not a raw traceback. serve now constructs a daemon-safe
+    # backend and eager-probes it *before* build_server, so reaching the
+    # build_server step requires a backend that passes the probe — supply a fake
+    # one and isolate the dev .env so the assertion targets build_server's exit,
+    # not the backend probe's config error.
     import hostlens.cli.mcp as mcp_cli
     from hostlens.core.exceptions import ToolPolicyViolation
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOSTLENS_INSPECTORS_SEARCH_PATHS", "")
+    monkeypatch.setenv("HOSTLENS_TARGETS_CONFIG_PATH", str(tmp_path / "targets.yaml"))
+    monkeypatch.setenv("HOSTLENS_NOTIFIERS_CONFIG_PATH", str(tmp_path / "notifiers.yaml"))
+    for var in (
+        "HOSTLENS_BACKEND__API_KEY",
+        "HOSTLENS_BACKEND__BASE_URL",
+        "HOSTLENS_BACKEND__DISABLE_THINKING",
+        "HOSTLENS_BACKEND__PROMPT_CACHING",
+        "HOSTLENS_BACKEND__EXTRA_HEADERS",
+        "HOSTLENS_AGENT__PRIMARY_MODEL",
+        "HOSTLENS_AGENT__HEALTH_CHECK_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOSTLENS_BACKEND__TYPE", "fake")
 
     def _build_raises(*_args: Any, **_kwargs: Any) -> Any:
         raise ToolPolicyViolation(
