@@ -20,8 +20,10 @@ points from tasks.md:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,8 @@ from typer.testing import CliRunner
 from hostlens.agent.backend import BackendHealth
 from hostlens.agent.backends.anthropic_api import AnthropicAPIBackend
 from hostlens.cli import app
+from hostlens.cli.doctor import _BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS
+from hostlens.core.config import AgentSettings
 
 
 @pytest.fixture(autouse=True)
@@ -228,3 +232,178 @@ def test_doctor_json_anthropic_health_check_error_does_not_leak_secret(
     assert payload["backend"]["health_check_is_healthy"] is False
     assert payload["backend"]["health_check_error"] is not None
     assert "failed" in payload["backend"]["health_check_error"]
+
+
+# ---------------------------------------------------------------------------
+# configure-backend-health-check-timeout: configurable health-check timeout
+# ---------------------------------------------------------------------------
+
+_FAKE_ANTHROPIC_KEY = (
+    "sk-" + "ant-" + "timeoutfixture"
+)  # pragma: allowlist secret — fake fixture, not a real key
+
+
+def _anthropic_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wire a valid ``anthropic_api`` backend so doctor enters the health-check
+    branch (FakeBackend/PlaybackBackend opt out of ``BackendDiagnostics`` and
+    short-circuit before ``wait_for``)."""
+
+    monkeypatch.setenv("HOSTLENS_BACKEND__TYPE", "anthropic_api")
+    monkeypatch.setenv("HOSTLENS_BACKEND__API_KEY", _FAKE_ANTHROPIC_KEY)
+
+
+# task 2.2 — drift guard between the fallback constant and the field default
+def test_doctor_health_timeout_default_matches_field_default() -> None:
+    """The ``settings.agent is None`` fallback constant MUST equal the
+    ``AgentSettings.health_check_timeout_seconds`` field default, so changing
+    the field default without updating the constant fails loudly here."""
+
+    assert AgentSettings().health_check_timeout_seconds == _BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS
+    assert _BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS == 10.0
+
+
+# task 3.1 ① — slow but healthy: ping under the configured timeout is NOT a timeout
+def test_doctor_slow_but_healthy_does_not_misreport_timeout(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real config path: ``agent.health_check_timeout_seconds=1.0`` (minimum
+    legal value) + a stub that sleeps 0.1s (< timeout) → healthy, no
+    misreported timeout."""
+
+    _anthropic_env(monkeypatch)
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "1.0")
+
+    async def _slow_ok_health_check(self: Any) -> BackendHealth:
+        await asyncio.sleep(0.1)
+        return BackendHealth(is_healthy=True, backend_name="anthropic_api", latency_ms=100.0)
+
+    monkeypatch.setattr(AnthropicAPIBackend, "health_check", _slow_ok_health_check)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["backend"]["health_check_is_healthy"] is True
+    assert payload["backend"]["health_check_error"] is None
+
+
+# task 3.1 ② — timeout triggers; error text reads the configured value (pins :658)
+def test_doctor_timeout_error_text_reads_configured_value(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real config path: ``agent.health_check_timeout_seconds=1.0`` + a stub
+    that sleeps 1.2s (> timeout) → unhealthy with error text **exactly**
+    ``health_check timeout after 1.0s``.
+
+    The configured value (1.0) deliberately differs from the fallback
+    constant (10.0): this is the only acceptance that falsifies a regression
+    where the error f-string still interpolates the fallback constant instead
+    of the effective timeout. ``wait_for`` cancels at 1.0s, so the 1.2s sleep
+    never runs to completion."""
+
+    _anthropic_env(monkeypatch)
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "1.0")
+
+    async def _too_slow_health_check(self: Any) -> BackendHealth:
+        await asyncio.sleep(1.2)
+        return BackendHealth(is_healthy=True, backend_name="anthropic_api", latency_ms=1200.0)
+
+    monkeypatch.setattr(AnthropicAPIBackend, "health_check", _too_slow_health_check)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["backend"]["health_check_is_healthy"] is False
+    assert payload["backend"]["health_check_error"] == "health_check timeout after 1.0s"
+
+
+# task 3.2 — timeout is informational: it does NOT flip ready / exit code,
+# and the BackendHealthRow field set stays fixed (6 fields + extra="forbid")
+def test_doctor_timeout_does_not_flip_ready_and_schema_stable(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A health-check timeout must keep ``ready is True`` / exit 0 (backend
+    health does not participate in ``_is_ready``), and ``BackendHealthRow``
+    must keep exactly its 6 fixed fields."""
+
+    _anthropic_env(monkeypatch)
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "1.0")
+
+    async def _too_slow_health_check(self: Any) -> BackendHealth:
+        await asyncio.sleep(1.2)
+        return BackendHealth(is_healthy=True, backend_name="anthropic_api", latency_ms=1200.0)
+
+    monkeypatch.setattr(AnthropicAPIBackend, "health_check", _too_slow_health_check)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ready"] is True
+    assert payload["backend"]["health_check_is_healthy"] is False
+    # Field set is exactly the 6 fixed BackendHealthRow fields (extra="forbid"
+    # forbids additions; this pins the doctor JSON schema stable).
+    assert set(payload["backend"].keys()) == {
+        "type",
+        "api_key_set",
+        "api_key_fingerprint",
+        "health_check_is_healthy",
+        "health_check_latency_ms",
+        "health_check_error",
+    }
+
+
+# task 3.3 — settings.agent is None → fallback default 10.0, no AttributeError
+def test_doctor_agent_none_falls_back_without_attribute_error(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``agent`` block (``settings.agent is None``) + a probeable backend →
+    doctor wraps health_check with the fallback default 10.0 and does NOT
+    raise ``AttributeError``. The stub returns fast so the test stays quick;
+    correctness here is "doctor completes cleanly", proven by exit 0 + a
+    populated health row."""
+
+    _anthropic_env(monkeypatch)
+    # No HOSTLENS_AGENT__* env → settings.agent stays None.
+
+    async def _ok_health_check(self: Any) -> BackendHealth:
+        return BackendHealth(is_healthy=True, backend_name="anthropic_api", latency_ms=5.0)
+
+    monkeypatch.setattr(AnthropicAPIBackend, "health_check", _ok_health_check)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["backend"]["health_check_is_healthy"] is True
+    # No AttributeError surfaced into the health row.
+    assert payload["backend"]["health_check_error"] is None
+
+
+# task 5.1 — timeout error text carries no secret / token-shaped substring
+def test_doctor_timeout_error_text_has_no_token_shape(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout error text is ``health_check timeout after {N}s`` — numbers
+    only, no secrets. Assert it carries no ``sk-``-style token shape (the
+    configured api_key must not leak into the timeout message)."""
+
+    _anthropic_env(monkeypatch)
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "1.0")
+
+    async def _too_slow_health_check(self: Any) -> BackendHealth:
+        await asyncio.sleep(1.2)
+        return BackendHealth(is_healthy=True, backend_name="anthropic_api", latency_ms=1200.0)
+
+    monkeypatch.setattr(AnthropicAPIBackend, "health_check", _too_slow_health_check)
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    raw_stdout = result.stdout
+    payload = json.loads(raw_stdout)
+    error_text = payload["backend"]["health_check_error"]
+    assert error_text == "health_check timeout after 1.0s"
+    # No api_key / token-shaped substring anywhere in the timeout message.
+    assert _FAKE_ANTHROPIC_KEY not in raw_stdout
+    assert re.search(r"sk-[A-Za-z0-9-]{4,}", error_text) is None

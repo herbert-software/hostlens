@@ -156,10 +156,13 @@ class AgentSettings(BaseModel):
     switching transport (``anthropic_api`` → ``bedrock``) does not require
     rewriting the agent block.
 
-    The numeric bounds (``ge`` / ``le`` on ``Field``) defend against typos
-    that would otherwise burn a full ``token_budget_input=10_000_000``
-    quota in a single Agent turn. Bounds are aligned with the Anthropic
-    Messages API current limits.
+    The numeric bounds (``ge`` / ``le`` on ``Field``) defend against typos.
+    For the token-budget fields a typo would otherwise burn a full
+    ``token_budget_input=10_000_000`` quota in a single Agent turn (bounds
+    aligned with the Anthropic Messages API current limits). Not every bound
+    here is a quota guard: ``health_check_timeout_seconds`` is a
+    responsiveness ceiling (keeps doctor bounded), not a token-consumption
+    cap.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -170,6 +173,14 @@ class AgentSettings(BaseModel):
     # ``BackendDiagnostics.health_check`` ping calls do not consume Opus
     # quota (spec §需求:Settings 必须支持 backend 与 agent 两个独立 namespace).
     health_check_model: str = "claude-haiku-4-5"
+    # Hard timeout doctor wraps ``BackendDiagnostics.health_check()`` with.
+    # Default 10.0 (up from the old hardcoded 5.0) gives "healthy but slow"
+    # backends — e.g. DeepSeek / Qwen routed via OpenRouter, whose
+    # ``max_tokens=10`` ping often exceeds 5s — headroom so doctor stops
+    # misreporting them as timed-out. ``le=120`` keeps doctor bounded even
+    # when the backend endpoint hangs; ``ge=1`` forbids 0/negative (which
+    # would make ``wait_for(timeout=0)`` cancel every probe instantly).
+    health_check_timeout_seconds: float = Field(default=10.0, ge=1, le=120)
     max_turns: int = Field(default=20, ge=1, le=100)
     token_budget_input: int = Field(default=100_000, ge=1, le=1_000_000)
     token_budget_output: int = Field(default=30_000, ge=1, le=200_000)

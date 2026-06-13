@@ -1118,6 +1118,7 @@ agent:
   max_turns: 20
   token_budget_input: 100000
   token_budget_output: 30000
+  health_check_timeout_seconds: 10     # doctor 包裹 backend health_check 的硬超时 (秒); 慢 backend 调高
 ```
 
 #### `backend.disable_thinking` — 接 thinking-默认-开的 anthropic 兼容端点
@@ -1136,6 +1137,7 @@ export HOSTLENS_AGENT__PRIMARY_MODEL=deepseek-chat
 ```
 
 > **提醒（与 `disable_thinking` 正交）**：`agent.health_check_model` 默认 `claude-haiku-4-5`，第三方端点（如 DeepSeek）不认这个 model id，`hostlens doctor` 会因此报该 backend 不健康。这与 `disable_thinking` 无关 —— 把 `health_check_model` 也配成该端点支持的模型（例如 `export HOSTLENS_AGENT__HEALTH_CHECK_MODEL=deepseek-chat`）即可。
+> 第二个致因：**健康但慢的 backend**（DeepSeek / Qwen via OpenRouter 等推理系，含排队 + 首 token 延迟）一次 `max_tokens=10` 的 ping >timeout 会被 doctor 误报 `health_check timeout`，此时 backend 其实正常。处方是调高 `agent.health_check_timeout_seconds`（默认 10，范围 `1–120s`）给慢 backend 余量，而不是改 `health_check_model`。
 
 #### OpenRouter — 通过 `/api/v1/messages` 端点接入第三方模型
 
@@ -1152,6 +1154,8 @@ OpenRouter 在 `https://openrouter.ai/api/v1/messages` 暴露一个 **Anthropic 
 | 地区限制 | `anthropic/claude-*` 模型在中国大陆返回 403（OpenRouter 地理封锁，与代码无关） |
 
 **模型 ID 格式**：OpenRouter 使用 `provider/model-name`，例如 `deepseek/deepseek-v4-pro`、`qwen/qwen3.7-plus`。与直连 DeepSeek 的裸 `deepseek-chat` 不同，`health_check_model` 也须同步修改。
+
+**慢模型 doctor 误报**：经 OpenRouter 路由的推理系模型（DeepSeek / Qwen）一次 ping 常 >默认超时被 doctor 误报 `health_check timeout`（backend 实际正常）；调高 `agent.health_check_timeout_seconds`（默认 10，范围 `1–120s`）即可。
 
 **`base_url` 注意**：必须填 `https://openrouter.ai/api`，SDK 会自动追加 `/v1/messages`。**勿写成 `https://openrouter.ai/api/v1`** —— 会变成双 `/v1`（`.../api/v1/v1/messages`）导致 400。
 

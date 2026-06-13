@@ -196,7 +196,7 @@ class BackendHealthRow(BaseModel):
     api_key_fingerprint: str | None = None
     # Optional — only populated when the backend exposes ``BackendDiagnostics``
     # AND the health-check call completed (success OR failure) within the
-    # 5-second timeout.
+    # configured health-check timeout.
     health_check_is_healthy: bool | None = None
     health_check_latency_ms: float | None = None
     health_check_error: str | None = None

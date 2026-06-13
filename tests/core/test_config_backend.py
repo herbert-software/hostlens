@@ -368,6 +368,95 @@ def test_agent_defaults_match_spec() -> None:
     assert a.primary_model == "claude-opus-4-7"
     assert a.fallback_model is None
     assert a.health_check_model == "claude-haiku-4-5"
+    assert a.health_check_timeout_seconds == 10.0
     assert a.max_turns == 20
     assert a.token_budget_input == 100_000
     assert a.token_budget_output == 30_000
+
+
+# (h) agent.health_check_timeout_seconds: default / env override / range
+def test_agent_health_check_timeout_default() -> None:
+    """Spec §场景:agent.health_check_timeout_seconds 缺省为 10.0."""
+
+    assert AgentSettings().health_check_timeout_seconds == 10.0
+
+
+def test_agent_health_check_timeout_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §场景:agent.health_check_timeout_seconds 经 env 加载.
+
+    The nested env var coerces the string ``"40"`` to ``float`` ``40.0``.
+    """
+
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "40")
+    settings = load_settings()
+    assert settings.agent is not None
+    assert settings.agent.health_check_timeout_seconds == 40.0
+
+
+def test_agent_health_check_timeout_below_range_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §场景:agent.health_check_timeout_seconds 范围校验 (lower bound).
+
+    ``0`` violates ``ge=1``. We assert on the **complete constraint phrase**
+    Pydantic v2 actually emits (``greater than or equal to 1``), which only
+    appears for the lower-bound violation — NOT on a bare ``"1"`` substring
+    (vacuous: ``_format_validation_error`` always emits the ``"1 configuration
+    error:"`` header, so ``"1" in msg`` is true for every input).
+    """
+
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    msg = str(excinfo.value)
+    assert "health_check_timeout_seconds" in msg
+    assert "greater than or equal to 1" in msg
+
+
+def test_agent_health_check_timeout_negative_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §场景:agent.health_check_timeout_seconds 范围校验 (negative)."""
+
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "-5")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    msg = str(excinfo.value)
+    assert "health_check_timeout_seconds" in msg
+    assert "greater than or equal to 1" in msg
+
+
+def test_agent_health_check_timeout_above_range_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §场景:agent.health_check_timeout_seconds 范围校验 (upper bound).
+
+    ``200`` violates ``le=120``; assert on the full phrase ``less than or
+    equal to 120`` which appears only for the upper-bound violation.
+    """
+
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "200")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    msg = str(excinfo.value)
+    assert "health_check_timeout_seconds" in msg
+    assert "less than or equal to 120" in msg
+
+
+def test_agent_health_check_timeout_non_numeric_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §场景:agent.health_check_timeout_seconds 范围校验 (non-numeric).
+
+    A non-numeric ``"abc"`` trips Pydantic's float parser; assert on the
+    ``valid number`` phrase which appears only for the parse failure.
+    """
+
+    monkeypatch.setenv("HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS", "abc")
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings()
+    msg = str(excinfo.value)
+    assert "health_check_timeout_seconds" in msg
+    assert "valid number" in msg

@@ -26,6 +26,7 @@ agent:
   max_turns: 20
   token_budget_input: 100000
   token_budget_output: 30000
+  health_check_timeout_seconds: 10
 ```
 
 Both sections are independent. `backend` covers authentication and

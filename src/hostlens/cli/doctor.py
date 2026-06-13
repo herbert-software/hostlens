@@ -569,12 +569,15 @@ def _is_ready(
 # ---------------------------------------------------------------------------
 
 
-_BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS = 5.0
-"""Hard timeout for ``BackendDiagnostics.health_check`` calls.
+_BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS = 10.0
+"""Fallback health-check timeout used when ``settings.agent is None``.
 
-Doctor must stay responsive even when the backend's HTTP endpoint hangs;
-the 5 s ceiling is generous for a Haiku ping (typical < 1 s) while
-keeping doctor below the operator's "is this hung?" threshold."""
+The configured timeout lives in ``settings.agent.health_check_timeout_seconds``;
+``_check_backend`` reads that when ``settings.agent`` is present. This constant
+is the fallback for M0/M1 configs that ship no ``agent`` block. Its value MUST
+match the field default (a drift test pins them equal); held as a literal float
+rather than ``model_fields[...].default`` because ``FieldInfo.default: Any``
+would leak ``Any`` under ``mypy --strict``."""
 
 
 def _check_backend(settings: Settings) -> BackendHealthRow | None:
@@ -644,19 +647,25 @@ def _check_backend(settings: Settings) -> BackendHealthRow | None:
         return row
 
     # Run health_check with a hard timeout so a hung backend does not
-    # block doctor for tens of seconds.
+    # block doctor for tens of seconds. The configured timeout is read once
+    # into a local so the ``wait_for`` ceiling and the error-message f-string
+    # render the SAME value — otherwise the message could claim the fallback
+    # while the wait used the configured value.
+    effective_timeout = (
+        settings.agent.health_check_timeout_seconds
+        if settings.agent is not None
+        else _BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS
+    )
     try:
         health = asyncio.run(
             asyncio.wait_for(
                 backend.health_check(),
-                timeout=_BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS,
+                timeout=effective_timeout,
             )
         )
     except TimeoutError:
         row.health_check_is_healthy = False
-        row.health_check_error = (
-            f"health_check timeout after {_BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS}s"
-        )
+        row.health_check_error = f"health_check timeout after {effective_timeout}s"
         return row
     except Exception as exc:  # pragma: no cover — defensive
         # Backend health_check should never raise (the contract is to

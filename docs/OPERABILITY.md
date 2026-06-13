@@ -119,6 +119,7 @@
 ### 5.2 健康检查（M4 已落地: doctor + status; HTTP 端点留后续）
 
 - **M4 实际交付的健康面**：`hostlens doctor --json` 的 `checks.schedules`（manifest 加载错误 / 各 job next_fire_time / 最近 N 次 Run 状态分布）+ `hostlens schedule status`（最近 Run 状态分布）。
+- **backend 连通性探测超时**：`hostlens doctor` 对 backend 做 `health_check()` ping 时用一个硬超时包裹（默认 **10s**，配置键 `agent.health_check_timeout_seconds`，范围 `1–120s`，env `HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS`）。用途：防 doctor 因慢 backend（DeepSeek / Qwen via OpenRouter 等推理系）一次 ping >timeout 被误报 `timeout` 或挂死。超时是**信息性**输出（`health_check timeout after {N}s`），**不**翻转 doctor `ready` / exit code；`settings.agent` 缺省时回落默认 10s。
 - **规划（尚未实现）**：可选 HTTP `:8765/healthz`（默认绑 `127.0.0.1`），返回 `{"status": "ok", "scheduler_running": bool, "next_fire": ..., "last_run_age_seconds": int, "memory_mb": int}`；内存超过 `daemon.memory_limit_mb`（默认 500MB）触发 `MemoryPressure` 警告。HTTP 端点 + 内存监控留后续里程碑。
 
 ### 5.3 优雅停机（M4 已落地）
