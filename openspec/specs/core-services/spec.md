@@ -130,6 +130,7 @@
 - `primary_model: str = "claude-opus-4-7"`（M2 默认 Anthropic Opus 4.7 model id；用户可在 yaml 覆盖）
 - `fallback_model: str | None = None`
 - `health_check_model: str = "claude-haiku-4-5"`（doctor / BackendDiagnostics.health_check 用的廉价探测 model；与 primary 解耦防止占用 Opus 配额）
+- `health_check_timeout_seconds: float = 10.0`（doctor 包裹 `BackendDiagnostics.health_check()` 调用的硬超时秒数；**必须 1-120 范围**。默认 10.0 取代旧的硬编码 5.0，给「健康但慢」的 backend——含经 OpenRouter 路由的 DeepSeek / Qwen 等推理系，一次 `max_tokens=10` 的 ping 常 >5s——留余量、避免误报 timeout；上界 120 保证 doctor 始终有界、不会因 backend 挂死而无限阻塞。env 覆盖 `HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS`；doctor 消费见 llm-backend-protocol spec）
 - `max_turns: int = 20`（必须 1-100 范围）
 - `token_budget_input: int = 100_000`（必须 1-1_000_000 范围）
 - `token_budget_output: int = 30_000`（必须 1-200_000 范围）
@@ -215,3 +216,18 @@
 
 - **当** 设置 `HOSTLENS_BACKEND__PROMPT_CACHING=false`（且其余 backend 必填字段满足），调 `load_settings()`
 - **那么** 加载出的 `settings.backend.prompt_caching is False`
+
+#### 场景:`agent.health_check_timeout_seconds` 缺省为 10.0
+
+- **当** 配置含 `agent:` 节但**不**含 `health_check_timeout_seconds`（其余 agent 字段满足），调 `load_settings()`
+- **那么** 必须 exit 0；`settings.agent.health_check_timeout_seconds == 10.0`
+
+#### 场景:`agent.health_check_timeout_seconds` 经 env 加载
+
+- **当** 设置 `HOSTLENS_AGENT__HEALTH_CHECK_TIMEOUT_SECONDS=40`（且其余 agent 必填字段满足），调 `load_settings()`
+- **那么** 加载出的 `settings.agent.health_check_timeout_seconds == 40.0`
+
+#### 场景:`agent.health_check_timeout_seconds` 范围校验
+
+- **当** 配置含 `agent: {primary_model: x, health_check_timeout_seconds: 0}`（或 `200` / 负数）调 `load_settings()`
+- **那么** 必须 raise `ConfigError`，消息指明 `health_check_timeout_seconds` 越界（必须在 1-120 范围）；**禁止**带病加载
