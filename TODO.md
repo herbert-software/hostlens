@@ -506,41 +506,45 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
   - [ ] `docs/integrations/cursor.md`
   - [ ] 在 README 加录屏 / GIF
 
-### M7 后续扩展 — MCP 管控工具集
+### M7 后续扩展 — MCP 管控工具集（按 side_effects 读写分期）
 
-> M7 落地的是只读三件套（`list_targets` / `list_inspectors` / `run_inspector`）。以下扩展让 AI 助手通过 MCP 完成全套管控操作，无需切回 CLI 或手编 YAML。每组独立提案，按需推进。
+> M7 落地只读三件套（`list_targets` / `list_inspectors` / `run_inspector`）。本扩展让 AI 助手通过 MCP 完成全套管控操作，无需切回 CLI 或手编 YAML。
 
-#### 7-ext-A：资产管理（Target）
+> **2026-06-13 探索结论（取代下方原 A/B/C 分组）**：按 `side_effects` 切**读 / 写两期**，而非按域切三组。硬约束在 `McpToolsAdapter.dispatch`：当前 **rule ③ 硬拒** `side_effects ∈ {write,destructive}`、**rule ④ 硬拒** `requires_approval=True`（reason `approval_flow_not_supported_in_m2`），且 MCP `context_factory` 注入的是永远 refuse 的 `NoopApprovalService`。原 A/B/C 分组里每个写工具（`add_target`/`remove_target`/`trigger_schedule`/`test_channel`）都标 `requires_approval=True`——**按当前 gate 根本到不了 handler**，是不可实施的规划。故重构为：**读半零闸门改动、可立刻落**；**写半必须先建 MCP approval 机制**。四点收敛决策：①读写分期 ②补 reports 读三件套（原规划漏） ③`add_target`→批量 `import_targets`（驱动场景=已有 target 列表迁移，一条条敲 CLI 太烦） ④trigger 的「发通知」从只读触发里拆出独立写工具。
 
-当前 CLI 有 `target add / list / remove / test`，MCP 只有 `list_targets`。
+#### 提案① `add-mcp-readonly-management-tools`（读期，零闸门改动，先落）
 
-- [ ] `add_target(name, type, host?, user?, key_path?, port?, tags?)` — 写入 `targets.yaml`；`side_effects=write`、`requires_approval=True`；拒绝 EUID=0（复用 CLI 同款逻辑）
-- [ ] `remove_target(name)` — 从 `targets.yaml` 移除；`side_effects=write`、`requires_approval=True`
-- [ ] `test_target(name)` — 测试连通性，返回 `ok/error` + latency；只读，无 approval
-- [ ] `sensitive_output` 声明：`add_target` / `test_target` 的输出可能含 host/user，显式声明 `sensitive_output=True`
+七个只读工具，**仅给已有 handler 声明 `surfaces ∋ "mcp"` + `sensitive_output` + 投影适配**，复用既有 store/loader/runner，不重写业务逻辑：
 
-#### 7-ext-B：定时任务管理（Schedule）
+- [x] `list_schedules()` — schedule manifest + next_fire_time + enabled 状态；`sensitive_output=True`（暴露调度结构）
+- [x] `get_schedule_status(name?, limit?)` — 最近 N 次 Run 留痕（run_id / 触发时间 / 目标 / inspector 集合 / report_hash / notify 结果）；`sensitive_output=True`
+- [x] `run_schedule_now(name)` — **`notify` 固定为 false**：跑 schedule 绑的只读 inspector（含 intent pipeline）+ 持久化 Report，**不发通知**。本质 = 批量版 `run_inspector`，故 `side_effects=read`（M7 已接受「远程 LLM 在主机上跑只读巡检」这条边界，批量不跨新边界）。发通知拆到提案② `notify_report`，以保 `side_effects` 在 ToolSpec 上**静态**（不靠 `notify=true` 参数在 read/write 间横跳）
+- [x] `list_channels()` — `notifiers.yaml` 通道（name / type / enabled / only_if 路由）；**绝不返回 token / secret**；脱敏后仍暴露渠道结构 → `sensitive_output=True`
+- [x] `list_reports(target?)` — 历史报告列表；`sensitive_output=True`
+- [x] `show_report(run_id)` — 取回单份 Report（含 findings / hypotheses）；`sensitive_output=True`
+- [x] `diff_reports(run_id_a, run_id_b)` — regression diff；`sensitive_output=True`
+- [x] 共同：每个新 ToolSpec 分别撰 `mcp_description`（远程 LLM）/ `agent_description`（本地 loop），不复用
 
-当前 CLI 有 `schedule list / trigger / status`，MCP 无对应。
+#### 提案② `add-mcp-write-approval-flow`（写期，核心是两段式 approval 机制）
 
-- [ ] `list_schedules()` — 列出所有已配置的 schedule manifest，含 next_fire_time、enabled 状态；只读
-- [ ] `trigger_schedule(name)` — 立即触发指定任务（不等下次定时）；`side_effects=write`、`requires_approval=True`
-- [ ] `get_schedule_status(name?, limit?)` — 查询最近 N 次 Run 的结果（run_id、触发时间、目标、inspector 列表、报告 hash、notify 结果）；只读
-- [ ] `sensitive_output=False`（以上均不含凭据，状态信息可安全暴露）
+**approval 模型（探索定稿）：两段式 token，Hostlens 强制，commit 必须带外。** 关键正确性约束：propose 把 token 返给 LLM，但 commit **只能**经人类在自己终端 `hostlens mcp approve <token>` 完成——LLM 物理上驱动不了写盘。**反模式**：用第二个 MCP `confirm_action(token)` 工具提交，则 LLM 自己就拿到 token、可自问自答，两段式沦为花架子。与 §4.5 `plan→preview→approve→execute`、M9「medium/high 不代执行」(`feedback_ai_no_auto_exec_elevated_risk`) 同形。
 
-#### 7-ext-C：通知通道管理（Notifier）
+**意外干净属性**：MCP server 进程永远只读（propose 不写盘）；唯一写盘点在 CLI `approve` 进程 → 现成的 `_refuse_root_for_write(EUID==0)` 守卫天然覆盖，写拒 root 红线不用在 MCP 层重造。
 
-当前 CLI 有 `notify channels / test`，MCP 无对应。
+建议再切两片（各独立提案，PR scope 干净，符合「每组独立提案」）：
 
-- [ ] `list_channels()` — 列出 `notifiers.yaml` 中已配置的通道（name、type=telegram/lark、enabled、only_if 路由表达式）；**不返回 token / secret**（`sensitive_output=False`）
-- [ ] `test_channel(channel)` — 向指定通道发送 ping 消息，返回 ok/error；`side_effects=write`（发真实消息）、`requires_approval=True`
-- [ ] `get_channel_routing(severity?)` — 给定 severity，返回哪些通道会触发（dry-run 路由决策）；只读
+**②a `add-mcp-write-approval-mechanism`（纯机制 + 最小验证）**
 
-#### 7-ext 共同约束
+- [ ] pending-action store：token / action 类型 / payload（待写 diff）/ created_at / 过期 / 单次使用 / 状态（pending→approved→executed / expired）；design.md 决断**复用 M9 `remediation/approval.py` 的 ApprovalGate + append-only audit 形态**还是另起
+- [ ] CLI `hostlens mcp approve <token>` / `hostlens mcp pending`：读 store、重校验（含 EUID≠0）、执行、写 audit、标记 executed
+- [ ] dispatch 放开 rule ④ 走 **propose 旁路**（rule ③ 仍拒**直接**写——写只能经 propose→人类 approve）
+- [ ] 最小验证写工具 `test_channel(channel)`：发一条测试消息，最小爆炸半径验证两段式端到端跑通
 
-- 每个新 ToolSpec 必须分别撰写 `mcp_description`（面向远程 LLM）和 `agent_description`（面向本地 loop）
-- 写操作（`side_effects=write`）须在 `McpToolsAdapter.dispatch` 的 approval gate 通过后才执行
-- 7-ext-A 和 7-ext-C 的写操作均有外部影响（文件写入、真实消息发出），每个独立提案在起草时需明确「对 AI 调用的撤销路径」
+**②b `add-mcp-write-management-tools`（招牌写工具，叠在已验证机制上）**
+
+- [ ] `import_targets(entries[])` — **招牌：批量迁移**。input_schema **只收 `*_env`（环境变量名），绝无 `password` 明文字段**；propose 返 `targets.yaml` 的 before/after diff 预览；`mcp_description` 写明行为约定：源数据遇明文密钥 → 映射成 env 名 + 提示人类 `export`，**绝不把明文写进 yaml**
+- [ ] `remove_target(name)` — destructive，走同一两段式 gate
+- [ ] `notify_report(report_id, channels)` — trigger 的「发通知」半，外部副作用（真实消息）走 gate
 
 ---
 
@@ -709,7 +713,7 @@ HOSTLENS_INSPECTORS_SEARCH_PATHS=./examples/m1-report/inspectors \
 - [ ] **Prompt cache hit rate**：每次新增 LLM 调用点都看一遍指标
 - [ ] **OpenSpec 卫生**：每完成一期把 `openspec/changes/` 下的提案归档到 `openspec/specs/`
 - [ ] **README / CLAUDE.md / config.yaml 同步**：架构演进后及时更新
-- [ ] **MCP `add_target` 工具**：当前 MCP server 只有只读三件套（`list_targets` / `list_inspectors` / `run_inspector`）；加 `add_target` 工具后可通过 AI 对话完成服务器资产登记，目前须手动编辑 `~/.config/hostlens/targets.yaml` 或用 `hostlens target add` CLI
+- [ ] **MCP 资产登记**：当前 MCP server 只有只读三件套；通过 AI 对话完成资产登记的能力已重规划为 M7-ext 写期提案②b 的 `import_targets`（批量迁移，两段式 approval），见上方「M7 后续扩展 — MCP 管控工具集」。在该提案落地前，资产登记须手动编辑 `~/.config/hostlens/targets.yaml` 或用 `hostlens target add` CLI
 
 ---
 

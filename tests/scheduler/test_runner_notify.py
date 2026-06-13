@@ -327,6 +327,83 @@ async def test_only_if_runtime_error_isolated(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 3b. dispatch_notify=False suppresses the whole notify stage (only_if + send)
+# while still persisting the Report and leaving the rest of the Run unchanged.
+# --------------------------------------------------------------------------- #
+
+
+async def test_dispatch_notify_false_suppresses_routing_and_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_store, report_store = _stores(tmp_path)
+    sender = _RecordingNotifier("on-channel")
+    # A configured channel with an only_if so we can prove BOTH the routing
+    # evaluation and the send are skipped — an empty notify_results alone is
+    # vacuous (it also holds when no channel is configured).
+    manifest = _manifest([NotifyConfig(channel="on-channel", only_if="severity >= warning")])
+
+    # Spy on the routing entry point the runner imports; if suppression works
+    # it is never evaluated.
+    import hostlens.scheduler.runner as runner_module
+
+    routing_calls = 0
+    real_should_send = runner_module.should_send
+
+    async def _spy_should_send(*args: Any, **kwargs: Any) -> Any:
+        nonlocal routing_calls
+        routing_calls += 1
+        return await real_should_send(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "should_send", _spy_should_send)
+
+    runner = _runner(
+        manifest=manifest,
+        channels={"on-channel": cast(Notifier, sender)},
+        run_store=run_store,
+        report_store=report_store,
+    )
+
+    report = _report(severity="critical")
+    suppressed = await runner._map_outcome(
+        manifest=manifest,
+        target_name=_TARGET,
+        triggered_at=datetime(2026, 5, 26, tzinfo=UTC),
+        started_at=datetime(2026, 5, 26, tzinfo=UTC),
+        report=report,
+        terminal_status="ok",
+        dispatch_notify=False,
+    )
+
+    # Report persisted + RunStatus / report_id intact, notify fully suppressed.
+    assert suppressed.status is RunStatus.OK
+    assert suppressed.report_id is not None
+    assert suppressed.notify_results == []
+    # The load-bearing assertions: routing was never evaluated and nothing was
+    # sent (not merely an empty list, which holds even with no channel).
+    assert routing_calls == 0
+    assert len(sender.sent) == 0
+
+    # Crosscheck: the default dispatch_notify=True path on the same manifest
+    # DOES route + send (proving the channel is wired and only_if passes), and
+    # yields the same status / a resolvable report_id.
+    routing_calls = 0
+    sender.sent.clear()
+    dispatched = await runner._map_outcome(
+        manifest=manifest,
+        target_name=_TARGET,
+        triggered_at=datetime(2026, 5, 26, tzinfo=UTC),
+        started_at=datetime(2026, 5, 26, tzinfo=UTC),
+        report=_report(severity="critical"),
+        terminal_status="ok",
+    )
+    assert dispatched.status is suppressed.status
+    assert dispatched.report_id is not None
+    assert routing_calls == 1
+    assert len(sender.sent) == 1
+    assert [r.status for r in dispatched.notify_results] == ["sent"]
+
+
+# --------------------------------------------------------------------------- #
 # 4. No-Report status → no dispatch, notify_results == []
 # --------------------------------------------------------------------------- #
 

@@ -171,7 +171,7 @@ class SchedulerRunner:
         self._target_registry = target_registry
         # Loaded channel instances ({instance_name: Notifier}); empty when no
         # notifiers.yaml was wired. Assembly-time channel-existence validation
-        # below turns an unknown manifest reference into a fail-loud ValueError.
+        # below turns an unknown manifest reference into a fail-loud ConfigError.
         self._channels: dict[str, Notifier] = channels if channels is not None else {}
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         self._grace_seconds = grace_seconds
@@ -334,17 +334,24 @@ class SchedulerRunner:
     # Job body (shared by the timer and `trigger`)
     # ------------------------------------------------------------------ #
 
-    async def trigger(self, name: str) -> Run:
+    async def trigger(self, name: str, *, dispatch_notify: bool = True) -> Run:
         """Run one manifest's job body immediately, returning the persisted `Run`.
 
         Raises `KeyError` for an unknown name (fail-loud).
+
+        ``dispatch_notify`` threads down to ``_dispatch_notify`` (default
+        ``True`` keeps the timer/daemon path byte-identical). A caller that
+        passes ``False`` (e.g. the ``run_schedule_now`` MCP tool) suppresses
+        the whole notify stage — the Report is still produced and persisted,
+        ``notify_results`` is ``[]``, and the ``RunStatus`` decision is
+        unchanged.
         """
         if name not in self._manifests:
             raise KeyError(f"unknown schedule name: {name!r}")
         manifest = self._manifests[name]
         triggered_at = self._clock()
         try:
-            return await self._run_job(name)
+            return await self._run_job(name, dispatch_notify=dispatch_notify)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -370,7 +377,7 @@ class SchedulerRunner:
             await self._run_store.save(run)
             raise
 
-    async def _run_job(self, name: str) -> Run:
+    async def _run_job(self, name: str, *, dispatch_notify: bool = True) -> Run:
         # Register this task in the in-flight set BEFORE any ``await`` so a
         # SIGTERM arriving mid-job sees it (design D-5). ``current_task()`` is
         # never None inside a running coroutine.
@@ -449,6 +456,7 @@ class SchedulerRunner:
                     started_at=started_at,
                     report=report,
                     terminal_status=captured["terminal_status"],
+                    dispatch_notify=dispatch_notify,
                 )
             )
             try:
@@ -471,6 +479,7 @@ class SchedulerRunner:
         started_at: datetime,
         report: Report | None,
         terminal_status: str | None,
+        dispatch_notify: bool = True,
     ) -> Run:
         """Map the pipeline outcome to a `Run` and persist it atomically.
 
@@ -485,6 +494,7 @@ class SchedulerRunner:
             started_at=started_at,
             report=report,
             terminal_status=terminal_status,
+            dispatch_notify=dispatch_notify,
         )
         await self._run_store.save(run)
         return run
@@ -498,6 +508,7 @@ class SchedulerRunner:
         started_at: datetime,
         report: Report | None,
         terminal_status: str | None,
+        dispatch_notify: bool = True,
     ) -> Run:
         finished_at = self._clock()
         run_id = str(uuid.uuid4())
@@ -545,7 +556,12 @@ class SchedulerRunner:
         # Report is persisted and before the terminal Run is constructed. Any
         # routing / render / send failure is isolated into a NotifyResult and
         # never changes the already-decided RunStatus (design D-7).
-        notify_results = await self._dispatch_notify(manifest, report)
+        #
+        # ``dispatch_notify=False`` suppresses the whole notify stage (including
+        # ``only_if`` evaluation) so a caller like ``run_schedule_now`` produces
+        # and persists the Report without sending; the RunStatus decision above
+        # is already made and is unaffected.
+        notify_results = await self._dispatch_notify(manifest, report) if dispatch_notify else []
 
         inspectors = [ir.name for ir in report.meta.inspectors_used]
         return Run(
