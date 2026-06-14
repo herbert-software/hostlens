@@ -19,8 +19,10 @@ construction off the loader's plate and lets the loader run safely from
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -44,6 +46,7 @@ __all__ = [
     "TargetEntry",
     "TargetsConfig",
     "load_targets_config",
+    "save_targets_config",
 ]
 
 
@@ -517,3 +520,208 @@ def _strip_placeholders(
             )
         return None
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Persistence: raw round-trip serialisation + atomic write
+# ---------------------------------------------------------------------------
+#
+# These two serialisers live in the loader module (not ``cli/target.py``)
+# because ``save_targets_config`` reuses them: a reverse import from
+# ``config`` to ``cli`` would create a ``config↔cli`` import cycle and break
+# this module's "free of concrete-target imports / safe to import from
+# doctor" isolation. They depend only on ``LocalEntry`` / ``SSHEntry`` +
+# yaml/Path, so living here does not violate that isolation.
+
+
+def _load_raw_targets_dict(cfg_path: Path, *, fallback_version: str = "1") -> dict[str, Any]:
+    """Return the raw ``yaml.safe_load`` dict for the targets config.
+
+    Critical to credential safety: this path does NOT run
+    ``${VAR}`` placeholder expansion (that lives in
+    ``load_targets_config``). When ``hostlens target add`` / ``remove`` /
+    ``import`` round-trips the file, we MUST keep the placeholder strings
+    intact on entries other than the one being written — otherwise the
+    loader's eager expansion would surface real secret values, and writing
+    the config back would persist them in plaintext to disk.
+
+    Missing or empty files default to a minimal skeleton
+    ``{"version": fallback_version, "targets": []}`` so callers can
+    treat the result as always-mutable.
+    """
+
+    if not cfg_path.exists():
+        return {"version": fallback_version, "targets": []}
+    text = cfg_path.read_text() or ""
+    parsed = yaml.safe_load(text)
+    if not isinstance(parsed, dict):
+        return {"version": fallback_version, "targets": []}
+    parsed.setdefault("version", fallback_version)
+    parsed.setdefault("targets", [])
+    return parsed
+
+
+def _entry_to_dict(
+    entry: LocalEntry | SSHEntry, *, password_env: str | None, passphrase_env: str | None
+) -> dict[str, Any]:
+    """Serialise an entry back into the yaml representation.
+
+    Secret fields (``password`` / ``passphrase``) are written as
+    ``${VAR}`` placeholders when the corresponding env-var name is passed
+    via ``password_env`` / ``passphrase_env`` — matches the spec scenario
+    `target add 凭据参数命名一致` and avoids ever writing literal passwords to
+    disk. The env names are independent parameters (never read from
+    ``entry.password``, which may already hold the expanded plaintext).
+    """
+
+    common: dict[str, Any] = {
+        "name": entry.name,
+        "type": entry.type,
+    }
+    # ``enabled`` defaults to True; we still write it explicitly so the
+    # yaml stays self-describing for operators reading the file.
+    if entry.enabled is False:
+        common["enabled"] = False
+    if entry.display_name is not None:
+        common["display_name"] = entry.display_name
+    if entry.description is not None:
+        common["description"] = entry.description
+    if entry.tags:
+        common["tags"] = list(entry.tags)
+
+    if isinstance(entry, SSHEntry):
+        common["host"] = entry.host
+        common["user"] = entry.user
+        if entry.port != 22:
+            common["port"] = entry.port
+        if entry.key_path is not None:
+            common["key_path"] = entry.key_path
+        if password_env is not None:
+            common["password"] = "${" + password_env + "}"
+        if passphrase_env is not None:
+            common["passphrase"] = "${" + passphrase_env + "}"
+        if entry.connect_timeout is not None:
+            common["connect_timeout"] = entry.connect_timeout
+    return common
+
+
+def _atomic_write_yaml(path: Path, raw_dict: dict[str, Any]) -> None:
+    """Atomically write ``raw_dict`` as yaml to ``path`` with ``0o600`` perms.
+
+    ``targets.yaml`` records host / user / key_path — a lateral-movement
+    map — so it must never be world-readable, and a half-written file would
+    leave the registry unloadable. The write is therefore atomic and
+    permission-tightened:
+
+    - The parent dir is created ``0o700`` if absent, else tightened to
+      ``0o700`` (an existing ``0o755`` config dir is narrowed every write,
+      so the secret-dir guarantee survives a pre-existing loose dir).
+    - A temp file is created with ``mkstemp(dir=<same dir>)`` (same
+      filesystem so ``os.replace`` is atomic; unpredictable name defeats
+      symlink / predictable-path attacks).
+    - ``os.fchmod(fd, 0o600)`` is set explicitly before the rename — not
+      relying on the ``mkstemp`` default — so the contract is testable.
+    - ``os.replace`` swaps the temp file into place; an interruption leaves
+      either the old file or the new file, never a truncated one.
+
+    Filesystem failures (parent not writable, ``mkstemp`` ``OSError``) are
+    wrapped in ``ConfigError(kind="targets_config_write_failed")`` so
+    callers map them to a structured exit code rather than a bare
+    ``OSError`` traceback.
+    """
+
+    parent = path.parent
+    try:
+        if not parent.exists():
+            os.makedirs(parent, mode=0o700)
+        else:
+            os.chmod(parent, 0o700)
+    except OSError as exc:
+        raise ConfigError(
+            "failed to prepare targets config directory",
+            kind="targets_config_write_failed",
+            original=exc,
+            path=str(parent),
+        ) from exc
+
+    payload = yaml.safe_dump(raw_dict, sort_keys=False)
+    try:
+        fd, tmp_name = tempfile.mkstemp(dir=str(parent), prefix=".targets-", suffix=".yaml.tmp")
+    except OSError as exc:
+        raise ConfigError(
+            "failed to create temporary targets config file",
+            kind="targets_config_write_failed",
+            original=exc,
+            path=str(parent),
+        ) from exc
+
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, path)
+    except OSError as exc:
+        # ``os.replace`` failed (or the write did) — drop the temp file so
+        # we never leave a half-written ``.targets-*.tmp`` behind, then
+        # surface a structured error.
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise ConfigError(
+            "failed to write targets config",
+            kind="targets_config_write_failed",
+            original=exc,
+            path=str(path),
+        ) from exc
+
+
+def save_targets_config(
+    path: Path,
+    entries: list[tuple[LocalEntry | SSHEntry, str | None, str | None]],
+) -> None:
+    """Idempotently upsert ``entries`` into ``targets.yaml`` (atomic, ``0o600``).
+
+    The inverse of ``load_targets_config`` for the write side, sharing the
+    ``_PLACEHOLDER_ALLOWED_FIELDS`` placeholder discipline and the same
+    ``targets.yaml`` file (hence it owns the ``TargetsConfig`` persistence
+    contract).
+
+    Each element is ``(entry, password_env, passphrase_env)``: the
+    credential env names are threaded **separately** so ``_entry_to_dict``
+    re-derives the ``${VAR}`` placeholder from the env name (never from
+    ``entry.password``, which may hold the expanded plaintext). cred-less /
+    key_path entries pass ``None`` for both.
+
+    Behaviour:
+
+    - **Pre-validate** the existing file with
+      ``load_targets_config(expand_env=False)`` so a corrupt / misplaced
+      placeholder file raises ``ConfigError`` *before* any write (callers
+      map to exit 2) rather than silently round-tripping bad data.
+    - **Idempotent upsert** by ``name``: an entry whose name already exists
+      is skipped (not appended, not overwritten) so re-runs are safe.
+    - **``${VAR}`` preservation**: existing entries are round-tripped via
+      ``_load_raw_targets_dict`` (no expansion) so their placeholders are
+      written back verbatim, never flattened into plaintext secrets.
+    - **Atomic ``0o600`` write** via ``_atomic_write_yaml``.
+    """
+
+    # Pre-validate the on-disk file. ``expand_env=False`` so unrelated
+    # entries referencing currently-unset env vars do not block the write,
+    # while a genuinely corrupt file / misplaced placeholder still raises.
+    existing = load_targets_config(path, expand_env=False)
+    existing_names = {entry.name for entry in existing.targets}
+
+    raw = _load_raw_targets_dict(path, fallback_version=existing.version)
+    raw.setdefault("targets", [])
+
+    seen = set(existing_names)
+    for entry, password_env, passphrase_env in entries:
+        if entry.name in seen:
+            continue
+        seen.add(entry.name)
+        raw["targets"].append(
+            _entry_to_dict(entry, password_env=password_env, passphrase_env=passphrase_env)
+        )
+
+    _atomic_write_yaml(path, raw)

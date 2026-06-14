@@ -428,6 +428,153 @@ gets flagged this way during local debugging, log the variable in
 question through structlog with a key name like `policy_doc` instead
 of including the literal token `password`.
 
+## `hostlens target import` — batch onboarding
+
+Adding servers one at a time with `hostlens target add` does not scale to a
+fleet of dozens. `hostlens target import <inventory>` batch-onboards targets
+from an inventory file through a four-stage **read-only → write** pipeline:
+
+```
+InventorySource (parse, no network)  →  list[CandidateTarget]
+        ↓
+TargetProbe (reuse ExecutionTarget)  →  reachability + capabilities + OS fingerprint
+        ↓
+ImportPlan (human-readable diff)     →  to_add / skipped / failed_probe / invalid_candidate
+        ↓  ── --dry-run stops here (no local write) ── │ ── --yes continues ──
+save_targets_config (atomic 0600 + idempotent upsert)  →  ~/.config/hostlens/targets.yaml
+```
+
+The first three stages are read-only; the local write happens only on the
+`--yes` path, last. This realises [`CLAUDE.md` §4.5](../../CLAUDE.md)'s
+"plan / preview before any write" rule.
+
+### Usage
+
+```
+hostlens target import <inventory> [--source ssh_config|yaml] \
+    [--dry-run] [--yes] [--skip-unreachable|--include-unreachable] \
+    [--concurrency N] [--json]
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `<inventory>` | — | path to an ssh_config file or a yaml inventory (positional, required) |
+| `--source ssh_config\|yaml` | content-sniff | force the inventory source; omit to detect by content / extension. Unknown value exits **2** (not 3) |
+| `--dry-run` | **on** (default) | render the plan and exit 0 **without writing** `targets.yaml`. Mutually exclusive with `--yes` |
+| `--yes` | off | write the resolved targets to `targets.yaml`. There is **no** per-row `y/N` prompt — `--yes` is the whole-batch confirmation |
+| `--skip-unreachable` | **on** (default) | only onboard candidates that probed reachable |
+| `--include-unreachable` | off | escape hatch: also register probe-failed candidates, written `enabled=False` (so later inspections don't probe them). Mutually exclusive with `--skip-unreachable` |
+| `--concurrency N` | `10` | max simultaneous probe connections (semaphore bound), avoids a handshake storm across dozens of hosts |
+| `--json` | off | emit the `ImportPlan` as a single machine-readable JSON document to stdout |
+
+There is no `--yes` interactive prompt: absence of `--yes` **is** the dry-run
+preview, which is why a missing `--yes` exits 0 rather than 1 (no
+"non-interactive needs `--yes`" branch as `target remove` has).
+
+### Honest note: `--dry-run` still probes remote hosts
+
+`--dry-run` (the default) has **zero side-effect on the local `targets.yaml`**
+— it never creates or modifies the file. But it **still opens read-only SSH
+connections** to each inventory host to determine reachability and read
+capabilities (the probe is the plan's input). "Offline" only describes the
+**parse** stage (no network, no DNS): a malformed inventory reports a syntax
+error without ever connecting. The probe stage does connect. So:
+
+- A yaml inventory containing only `type: local` entries probes the **local
+  machine** (subprocess `exec`) and needs no SSH at all.
+- An ssh_config inventory probes the **real SSH hosts** even under `--dry-run`.
+  Treat `--dry-run` against an ssh_config as "preview the write, but do reach
+  out to the hosts read-only."
+
+The `to_add` bucket lists every candidate's final connection address, so
+`--dry-run` doubles as a **pre-write address audit point**: eyeball the plan
+for unexpected hosts before passing `--yes`.
+
+### Exit codes
+
+| code | meaning |
+|---|---|
+| `0` | success — includes a dry-run preview, an empty inventory (empty plan), and `--include-unreachable` registering all-failed candidates |
+| `1` | business failure — refused to run as root (`--yes` write path), or `--yes` written but **all** candidates failed probe and `--include-unreachable` was not passed (nothing to onboard) |
+| `2` | parameter / config error — unknown `--source`, `--dry-run` + `--yes` together, inventory parse failure, a corrupt / illegally-placeholdered existing `targets.yaml`, or `load_settings()` failure |
+
+`--dry-run` and `--yes` are **mutually exclusive** (fail-safe: prevents a
+muscle-memory `--dry-run` plus an added `--yes` from silently writing) — passing
+both exits 2. The write path (with `--yes`) **refuses to run as root**
+(`EUID==0`) and exits 1 before touching `targets.yaml`; a `--dry-run` preview is
+read-only locally and tolerates root.
+
+### Behaviour summary (see the spec for the full contract)
+
+- **name normalisation** — the source identifier (e.g. an ssh_config `Host`
+  alias) is normalised to the `^[a-z][a-z0-9_\-]{0,63}$` target-name pattern
+  (lowercase, illegal chars → `-`, leading non-letters stripped, truncated to
+  64). A clash that cannot be normalised uniquely raises
+  `ConfigError(ambiguous_target_name)`.
+- **plaintext secrets are fail-closed** — an inventory carrying an inline
+  `password` / `passphrase` value raises
+  `ConfigError(plaintext_secret_forbidden)` at parse time; the plaintext is
+  never read into a candidate, the plan, or any log. Credentials are carried
+  only as **references** (`*_env` env var names matching `^[A-Z_][A-Z0-9_]*$`,
+  or `key_path`), which the writer renders back as `${VAR}` placeholders.
+- **idempotent** — a candidate whose normalised name already exists in
+  `targets.yaml` lands in `skipped` (no overwrite); re-running `--yes` is safe.
+  Updating an existing target (e.g. a changed IP) is **not** supported in this
+  version — use `target remove` + re-import, or edit the yaml.
+- **failure isolation** — a single host that times out / fails auth is bucketed
+  into `failed_probe` (with a redacted `error_kind`, never a host IP /
+  `user@host` / traceback) and never aborts the rest of the batch.
+
+See the [`target-import` / `inventory-source` specs](../../openspec/specs/) for
+the precise `CandidateTarget` / `ProbeResult` / `ImportPlan` schemas, the
+`error_kind` closed set, and the fingerprint key allowlist.
+
+### Demo Path
+
+Two paths, offline-first (path 1 needs no SSH and no paid API).
+
+**Path 1 — offline `local` inventory (no SSH):**
+
+```bash
+pip install -e ".[dev]"
+
+# A yaml inventory with a single local entry — the probe runs against this
+# machine, so no SSH is involved at any stage.
+cat > /tmp/demo-inventory.yml <<'EOF'
+hosts_local:
+  demo-localhost:
+    type: local
+EOF
+
+# 1. dry-run (the default): parse → promote → probe local (one read-only exec
+#    to judge reachability + read capabilities for display) → render the
+#    ImportPlan, marked DRY-RUN, nothing written.
+hostlens target import /tmp/demo-inventory.yml --source yaml
+
+# 2. write: --yes writes ~/.config/hostlens/targets.yaml (atomic 0600 + idempotent).
+hostlens target import /tmp/demo-inventory.yml --source yaml --yes
+
+# 3. idempotency: re-run --yes → demo-localhost lands in `skipped` (upsert,
+#    not re-added).
+hostlens target import /tmp/demo-inventory.yml --source yaml --yes
+
+# 4. verify.
+hostlens target list   # should list demo-localhost
+```
+
+**Path 2 — `ssh_config` inventory (probes real SSH hosts):**
+
+```bash
+# NOTE: --dry-run still opens read-only SSH connections to every Host in the
+# config — "offline" only means the *parse* stage skips the network. Against
+# real ssh hosts this step DOES connect (read-only) before showing the plan.
+hostlens target import ~/.ssh/config --source ssh_config --dry-run
+
+# A non-standard third-party inventory (e.g. ~/tizi/hosts, whose fields are
+# not the Hostlens yaml schema) is read through the ssh_config source, not yaml:
+hostlens target import ~/tizi/hosts --source ssh_config --dry-run
+```
+
 ## `hostlens doctor --check-targets`
 
 For each configured target, `doctor` reports:

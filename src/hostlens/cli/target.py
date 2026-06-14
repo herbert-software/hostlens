@@ -3,12 +3,14 @@
 Spec: ``openspec/changes/add-execution-target-abstraction/specs/execution-target/spec.md``
 §需求:`hostlens target` CLI 命令集且写命令拒绝 root.
 
-The four subcommands ``add`` / ``list`` / ``remove`` / ``test`` are wired
-into ``hostlens.cli.app`` so ``hostlens target --help`` displays them.
+The five subcommands ``add`` / ``list`` / ``remove`` / ``test`` / ``import``
+are wired into ``hostlens.cli.app`` so ``hostlens target --help`` displays
+them.
 
-Write commands (``add`` / ``remove``) refuse to run when ``os.geteuid() ==
-0`` (CLAUDE.md §4.5 + global "writes must reject root" rule). Read
-commands (``list`` / ``test``) tolerate root.
+Write commands (``add`` / ``remove``, and ``import`` on the ``--yes`` write
+path) refuse to run when ``os.geteuid() == 0`` (CLAUDE.md §4.5 + global "writes
+must reject root" rule). Read commands (``list`` / ``test``, and ``import``'s
+default dry-run preview) tolerate root.
 
 Errors go to stderr (via ``typer.echo(..., err=True)``); structured data
 (yaml writes, JSON output) goes to stdout. The CLI never writes a
@@ -20,19 +22,14 @@ target name reach the user.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import sys
-from pathlib import Path
 from typing import Any
 
 import typer
-
-# ``PyYAML`` ships no PEP 561 marker; ``types-PyYAML`` is a separate dist
-# the project does not depend on. Suppress at the import site instead of
-# polluting the global mypy config.
-import yaml
 from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
@@ -42,8 +39,13 @@ from hostlens.core.exceptions import ConfigError, TargetError
 from hostlens.targets.config import (
     LocalEntry,
     SSHEntry,
+    _atomic_write_yaml,
+    _entry_to_dict,
+    _load_raw_targets_dict,
     load_targets_config,
+    save_targets_config,
 )
+from hostlens.targets.onboard import assemble_save_entries, build_import_plan
 from hostlens.targets.registry import build_registry_from_config
 
 __all__ = ["target_app"]
@@ -91,6 +93,14 @@ def _refuse_root_for_write(verb: str) -> None:
 # expanded, silently surfacing the literal ``${var}`` as the credential.
 _ENV_VAR_NAME_PATTERN: re.Pattern[str] = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
+# Known ``--source`` values for ``target import``. The flag is a **bare
+# ``str``** validated manually here (not a Typer ``Choice`` / ``Enum``): an
+# Enum's unknown-value path raises Click ``UsageError``, which
+# ``cli/__init__.py`` rewrites to exit 3 — but an unknown ``--source`` is a
+# parameter error and the project contract is exit 2. Manual validation lets us
+# raise ``typer.Exit(2)`` directly.
+_KNOWN_IMPORT_SOURCES: frozenset[str] = frozenset({"ssh_config", "yaml"})
+
 
 def _validate_env_var_name(verb: str, flag: str, value: str) -> None:
     if _ENV_VAR_NAME_PATTERN.fullmatch(value) is None:
@@ -117,76 +127,6 @@ def _emit_target_error(verb: str, exc: TargetError) -> None:
     if exc.target is not None:
         parts.append(f"target={exc.target}")
     typer.echo(" ".join(parts), err=True)
-
-
-def _load_raw_targets_dict(cfg_path: Path, *, fallback_version: str = "1") -> dict[str, Any]:
-    """Return the raw ``yaml.safe_load`` dict for the targets config.
-
-    Critical to credential safety: this path does NOT run
-    ``${VAR}`` placeholder expansion (that lives in
-    ``load_targets_config``). When ``hostlens target add`` / ``remove``
-    round-trips the file, we MUST keep the placeholder strings intact
-    on entries other than the one being added — otherwise the loader's
-    eager expansion would surface real secret values, and writing the
-    config back would persist them in plaintext to disk.
-
-    Missing or empty files default to a minimal skeleton
-    ``{"version": fallback_version, "targets": []}`` so callers can
-    treat the result as always-mutable.
-    """
-
-    if not cfg_path.exists():
-        return {"version": fallback_version, "targets": []}
-    text = cfg_path.read_text() or ""
-    parsed = yaml.safe_load(text)
-    if not isinstance(parsed, dict):
-        return {"version": fallback_version, "targets": []}
-    parsed.setdefault("version", fallback_version)
-    parsed.setdefault("targets", [])
-    return parsed
-
-
-def _entry_to_dict(
-    entry: LocalEntry | SSHEntry, *, password_env: str | None, passphrase_env: str | None
-) -> dict[str, Any]:
-    """Serialise an entry back into the yaml representation.
-
-    Secret fields (``password`` / ``passphrase``) are written as
-    ``${VAR}`` placeholders when the CLI was invoked with the
-    corresponding ``--password-env`` / ``--passphrase-env`` flag —
-    matches the spec scenario `target add 凭据参数命名一致` and avoids
-    ever writing literal passwords to disk via the CLI.
-    """
-
-    common: dict[str, Any] = {
-        "name": entry.name,
-        "type": entry.type,
-    }
-    # ``enabled`` defaults to True; we still write it explicitly so the
-    # yaml stays self-describing for operators reading the file.
-    if entry.enabled is False:
-        common["enabled"] = False
-    if entry.display_name is not None:
-        common["display_name"] = entry.display_name
-    if entry.description is not None:
-        common["description"] = entry.description
-    if entry.tags:
-        common["tags"] = list(entry.tags)
-
-    if isinstance(entry, SSHEntry):
-        common["host"] = entry.host
-        common["user"] = entry.user
-        if entry.port != 22:
-            common["port"] = entry.port
-        if entry.key_path is not None:
-            common["key_path"] = entry.key_path
-        if password_env is not None:
-            common["password"] = "${" + password_env + "}"
-        if passphrase_env is not None:
-            common["passphrase"] = "${" + passphrase_env + "}"
-        if entry.connect_timeout is not None:
-            common["connect_timeout"] = entry.connect_timeout
-    return common
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +261,15 @@ def add_cmd(
     raw.setdefault("targets", [])
     raw["targets"].append(new_entry_dict)
 
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    # Atomic ``0o600`` write (creates / tightens the parent dir to
+    # ``0o700``). Same byte output as the prior ``write_text`` but no longer
+    # leaves the file world-readable or half-written, and not abradable by a
+    # subsequent ``import`` that already wrote ``0o600``.
+    try:
+        _atomic_write_yaml(cfg_path, raw)
+    except ConfigError as exc:
+        typer.echo(f"hostlens target add: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     typer.echo(f"added target {name!r} ({target_type}) to {cfg_path}")
 
 
@@ -440,7 +387,11 @@ def remove_cmd(
     # validated the file is parseable before we mutate it.
     raw = _load_raw_targets_dict(cfg_path, fallback_version=config.version)
     raw["targets"] = [item for item in raw.get("targets", []) if item.get("name") != name]
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    try:
+        _atomic_write_yaml(cfg_path, raw)
+    except ConfigError as exc:
+        typer.echo(f"hostlens target remove: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
     typer.echo(f"removed target {name!r} from {cfg_path}")
 
 
@@ -505,3 +456,201 @@ def test_cmd(
             err=True,
         )
         raise typer.Exit(code=1)
+
+
+@target_app.command("import")
+def import_cmd(
+    inventory: str = typer.Argument(
+        ...,
+        help="Path to the inventory source (ssh_config file or yaml inventory).",
+    ),
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        help="Inventory source: 'ssh_config' or 'yaml'. Omit to content-sniff.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview the import plan without writing (this is the DEFAULT behaviour).",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Write the resolved targets to targets.yaml (otherwise dry-run preview only).",
+    ),
+    skip_unreachable: bool = typer.Option(
+        False,
+        "--skip-unreachable",
+        help="Only onboard reachable candidates (this is the DEFAULT behaviour).",
+    ),
+    include_unreachable: bool = typer.Option(
+        False,
+        "--include-unreachable",
+        help="Also register probe-failed candidates with enabled=False (escape hatch).",
+    ),
+    concurrency: int = typer.Option(
+        10,
+        "--concurrency",
+        help="Max simultaneous probe connections (semaphore bound).",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the import plan as machine-readable JSON to stdout.",
+    ),
+) -> None:
+    """Batch-onboard targets from an inventory source (dry-run by default).
+
+    Pipeline: source → promote → probe → plan → save. ``--dry-run`` (the
+    default) renders the plan and exits 0 without writing; ``--yes`` writes
+    ``to_add`` (and, with ``--include-unreachable``, the failed candidates as
+    ``enabled=False``). There is no per-row prompt — absence of ``--yes`` is the
+    dry-run preview, which is why missing ``--yes`` exits 0 rather than 1.
+    """
+
+    # ``--dry-run`` and ``--yes`` are mutually exclusive: passing both is a
+    # fail-safe parameter error (prevents muscle-memory ``--dry-run`` plus an
+    # added ``--yes`` from silently writing). Exit 2 (parameter error).
+    if dry_run and yes:
+        typer.echo(
+            "hostlens target import: --dry-run and --yes are mutually exclusive",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # ``--skip-unreachable`` (default) and ``--include-unreachable`` are
+    # opposites; passing both is a parameter error (exit 2).
+    if skip_unreachable and include_unreachable:
+        typer.echo(
+            "hostlens target import: --skip-unreachable and --include-unreachable "
+            "are mutually exclusive",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # ``--source`` is a bare str validated here so an unknown value maps to
+    # exit 2 (a Typer Choice/Enum would route through Click UsageError → exit
+    # 3, breaking the "parameter error == exit 2" contract).
+    if source is not None and source not in _KNOWN_IMPORT_SOURCES:
+        known = ", ".join(sorted(_KNOWN_IMPORT_SOURCES))
+        typer.echo(
+            f"hostlens target import: unknown --source {source!r}; must be one of: {known}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    will_write = yes
+    # Root refusal fires before any other write side-effect, but only on the
+    # write path: a dry-run preview is read-only (it still probes remote hosts,
+    # but never touches the local targets.yaml), so it must not refuse root.
+    if will_write:
+        _refuse_root_for_write("import")
+
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        typer.echo(f"hostlens target import: configuration error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    cfg_path = settings.targets_config_path
+
+    # ``--json`` requires stdout to be a single valid JSON document. The config
+    # loader emits a structlog DEBUG line to stdout when ``targets.yaml`` is
+    # absent (``PrintLoggerFactory`` writes to stdout), which would corrupt the
+    # JSON. So while building the plan (and later while writing) we redirect
+    # stdout to stderr; only the explicit ``render_json`` below reaches the real
+    # stdout. In human mode this is a no-op. ``redirect_stdout`` is not
+    # reusable, so build a fresh manager per critical section.
+    def _quiet_stdout() -> contextlib.AbstractContextManager[Any]:
+        if json_output:
+            return contextlib.redirect_stdout(sys.stderr)
+        return contextlib.nullcontext()
+
+    with _quiet_stdout():
+        # Pre-validate the existing targets.yaml (mirrors ``target add``): a
+        # corrupt / misplaced-placeholder file raises ConfigError → exit 2
+        # rather than being silently round-tripped. ``expand_env=False`` so
+        # unrelated entries referencing currently-unset env vars do not block.
+        try:
+            existing = load_targets_config(cfg_path, expand_env=False)
+        except (ConfigError, ValidationError) as exc:
+            typer.echo(
+                f"hostlens target import: failed to load existing targets config: {exc}",
+                err=True,
+            )
+            raise typer.Exit(code=2) from exc
+
+        existing_names = {entry.name for entry in existing.targets}
+
+        # Build the plan: parse + promote + probe + classify. Parse errors
+        # (inventory syntax / unknown source / ambiguous sniff) raise
+        # ConfigError → exit 2; the rest (unreachable hosts, invalid candidates)
+        # are bucketed into the plan, never raised.
+        try:
+            plan = asyncio.run(
+                build_import_plan(
+                    inventory,
+                    source=source,
+                    settings=settings,
+                    existing_names=existing_names,
+                    concurrency=concurrency,
+                )
+            )
+        except ConfigError as exc:
+            typer.echo(f"hostlens target import: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+
+    if json_output:
+        sys.stdout.write(plan.render_json())
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    else:
+        console = Console(highlight=False, soft_wrap=True)
+        console.print(plan.render_diff(), markup=False)
+
+    # Human-readable status trailers go to stdout normally, but in ``--json``
+    # mode stdout must stay a single valid JSON document — so route any trailer
+    # to stderr when ``--json`` is active (the plan JSON is already on stdout).
+    def _status(message: str) -> None:
+        typer.echo(message, err=json_output)
+
+    if not will_write:
+        # Dry-run (default): render the plan, mark it clearly, exit 0. Zero
+        # local side-effect (the remote read-only probe already ran above).
+        _status(f"DRY-RUN: nothing written. Pass --yes to write these targets to {cfg_path}.")
+        raise typer.Exit(code=0)
+
+    save_entries = assemble_save_entries(plan, include_unreachable=include_unreachable)
+
+    if not save_entries:
+        # ``--yes`` but nothing to write. Two distinct cases land here:
+        #
+        # 1. **All candidates failed probe** (and no ``--include-unreachable``)
+        #    → business failure: the operator wanted to onboard but no host was
+        #    reachable. Exit 1 (spec §场景:--yes 全探活失败且非 include 退 1).
+        # 2. **Empty / already-managed inventory** (no probe failures) →
+        #    nothing to onboard is not a failure; exit 0 (spec §场景:空
+        #    inventory → 空 plan → exit 0, and idempotent re-runs where every
+        #    candidate is ``skipped``).
+        if plan.failed_probe and not include_unreachable:
+            typer.echo(
+                "hostlens target import: no reachable targets to write "
+                "(use --include-unreachable to register unreachable candidates).",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        _status("nothing to import; targets.yaml unchanged.")
+        raise typer.Exit(code=0)
+
+    try:
+        # ``save_targets_config`` re-runs ``load_targets_config`` internally,
+        # which may emit the same absent-file DEBUG line to stdout; keep the
+        # ``--json`` stdout clean by redirecting during the write too.
+        with _quiet_stdout():
+            save_targets_config(cfg_path, save_entries)
+    except (ConfigError, ValidationError) as exc:
+        typer.echo(f"hostlens target import: failed to write targets config: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    _status(f"imported {len(save_entries)} target(s) into {cfg_path}")

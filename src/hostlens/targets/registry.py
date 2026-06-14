@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TargetRegistry",
+    "build_one_target",
     "build_registry_from_config",
 ]
 
@@ -209,3 +210,28 @@ def build_registry_from_config(
             )
         registry.register(target, entry)
     return registry
+
+
+def build_one_target(entry: TargetEntry, settings: Settings) -> ExecutionTarget:
+    """Construct + register a single ``TargetEntry`` and return its target.
+
+    The probe path (``hostlens target import``) needs a single live target
+    from one promoted ``TargetEntry``. It MUST reuse the same
+    construct-then-register path as the multi-target factory so the target's
+    ``_entry`` gets injected by ``TargetRegistry.register`` — a bare
+    ``SSHTarget(name=...)`` leaves ``_entry=None`` and the first ``exec``
+    raises ``TargetError(kind="ssh_no_entry")`` (the whole first-batch SSH
+    cohort would then fail). Wrapping the single entry in a 1-entry
+    ``TargetsConfig`` and threading it through ``build_registry_from_config``
+    reuses all of that construct+register logic without re-copying the
+    ``_entry`` injection — there is exactly one construction SOT.
+
+    ``settings`` is consumed only by the SSH branch (mirrors
+    ``build_registry_from_config``'s ``_settings`` injection); the local
+    branch ignores it but the parameter is kept for signature symmetry.
+    """
+
+    from hostlens.targets.config import TargetsConfig
+
+    config = TargetsConfig(version="1", targets=[entry])
+    return build_registry_from_config(config, settings).get(entry.name)
