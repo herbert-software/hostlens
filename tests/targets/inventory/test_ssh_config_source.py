@@ -179,6 +179,42 @@ def test_pre_host_directives_apply_as_global_defaults(tmp_path: Path) -> None:
     assert candidates["beta"].port == 2222
 
 
+def test_include_inside_host_block_does_not_leak_to_other_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Include inside a Host block applies to that host only, never globally.
+
+    Regression: the pre-Host-globals change must not turn an included file's
+    top-level directive into a global default that bleeds onto later hosts.
+    """
+    ssh = _make_ssh_home(tmp_path, monkeypatch)
+    _write(ssh / "frag", "User frominclude\n")
+    ref = _write(
+        ssh / "config",
+        "Host foo\n  HostName 1.1.1.1\n  Include ~/.ssh/frag\n\nHost bar\n  HostName 2.2.2.2\n",
+    )
+    candidates = {c.name: c for c in SshConfigSource().parse(str(ref))}
+    # foo (the enclosing block) inherits the included directive ...
+    assert candidates["foo"].user == "frominclude"
+    # ... but bar must NOT — no global leak.
+    assert candidates["bar"].user is None
+
+
+def test_include_inside_skipped_match_block_is_not_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Include inside a skipped Match block must not import its hosts."""
+    ssh = _make_ssh_home(tmp_path, monkeypatch)
+    _write(ssh / "frag", "Host sneaky\n  HostName 9.9.9.9\n")
+    ref = _write(
+        ssh / "config",
+        "Host real\n  HostName 1.1.1.1\n\nMatch host x\n  Include ~/.ssh/frag\n",
+    )
+    names = {c.name for c in SshConfigSource().parse(str(ref))}
+    assert names == {"real"}
+    assert "sneaky" not in names
+
+
 def test_include_absolute_outside_tree_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -25,6 +25,7 @@ can audit for unexpected hosts before passing ``--yes``.
 from __future__ import annotations
 
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -202,17 +203,25 @@ class ImportPlan(BaseModel):
         _atomic_write_yaml(path, raw)
 
 
+# Unicode categories dropped from a displayed host/user: C0+C1 controls + DEL
+# (``Cc``), zero-width / bidi-override format chars (``Cf``, incl. U+202E RLO),
+# and line / paragraph separators (``Zl`` / ``Zp``, incl. U+2028 / U+2029).
+_UNSAFE_DISPLAY_CATEGORIES: frozenset[str] = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
 def _strip_control_chars(value: str) -> str:
-    """Drop C0 control characters + DEL from an operator-supplied string.
+    """Drop control / format / line-separator chars from an operator string.
 
     ``host`` / ``user`` come from the inventory (ssh_config ``HostName`` / yaml
     ``host``) and are echoed verbatim in the dry-run audit diff. A crafted
-    inventory could embed ``\\r`` / ANSI bytes to overwrite or spoof the very
-    preview line the operator inspects before passing ``--yes``; stripping
-    controls makes the audit line unforgeable.
+    inventory could embed ``\\r`` / the single-byte CSI ``\\x9b`` / a bidi
+    override (U+202E) to overwrite or spoof the very preview line the operator
+    inspects before passing ``--yes``. Categorise each char so both the C0 *and*
+    C1 control ranges, zero-width / bidi format chars, and line separators are
+    removed — making the audit line unforgeable.
     """
 
-    return "".join(ch for ch in value if ch >= " " and ch != "\x7f")
+    return "".join(ch for ch in value if unicodedata.category(ch) not in _UNSAFE_DISPLAY_CATEGORIES)
 
 
 def _pending_add_label(item: PendingAdd) -> str:

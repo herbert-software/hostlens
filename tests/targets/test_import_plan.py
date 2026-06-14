@@ -151,6 +151,33 @@ def test_render_diff_strips_control_chars_from_host() -> None:
     assert "alice@" in diff
 
 
+def test_render_diff_strips_c1_and_bidi_control_chars() -> None:
+    """C1 (single-byte CSI \\x9b), NEL \\x85, and bidi override U+202E are stripped.
+
+    The two-byte ESC form is C0, but the single-byte C1 CSI / bidi overrides
+    would otherwise survive and still spoof the audit line.
+    """
+
+    plan = ImportPlan(
+        to_add=[
+            PendingAdd(
+                entry=SSHEntry(
+                    name="spoof",
+                    type="ssh",
+                    host="1.2.3.4\x9b2K\x85" + chr(0x202E) + "evil",
+                    user="root",
+                ),
+            )
+        ],
+    )
+    diff = plan.render_diff()
+
+    assert "\x9b" not in diff
+    assert "\x85" not in diff
+    assert chr(0x202E) not in diff
+    assert "1.2.3.4" in diff
+
+
 def test_render_json_redacts_failed_and_invalid() -> None:
     """``--json`` surface drops host / fingerprint for the failure buckets."""
 

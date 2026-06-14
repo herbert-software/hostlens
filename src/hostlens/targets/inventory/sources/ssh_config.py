@@ -18,6 +18,9 @@ Key invariants:
   ``~/.ssh``, globs expanded) and is bounded to the home tree or the
   resolved ``~/.ssh`` tree by a realpath ``commonpath`` check + ``O_NOFOLLOW``
   final read (closes the TOCTOU window). One level of ``Include`` only.
+  Position-aware: an ``Include`` inside a skipped ``Match`` / wildcard block is
+  skipped with it; an ``Include`` inside a ``Host`` block applies to that host,
+  not as a global default.
 - ``IdentityFile`` becomes a ``key_path`` reference: ``~`` is expanded but
   any ``${VAR}`` fails closed (never ``expandvars``); the file is never
   opened / stat-ed at parse time.
@@ -219,13 +222,26 @@ class SshConfigSource:
                 continue
 
             if keyword == "include":
+                if mode == "skip":
+                    # Inside a Match / unsupported-wildcard block — the whole
+                    # block (including its Includes) is skipped, so the included
+                    # hosts must not leak into the import.
+                    _logger.debug("skipping Include inside a skipped block")
+                    continue
                 if not allow_include:
                     _logger.debug("skipping nested Include (one level only)")
                     continue
                 included = self._read_include(value)
                 inc_pending, inc_defaults = self._parse_text(included, allow_include=False)
                 pending.extend(inc_pending)
-                defaults.update(inc_defaults)
+                if mode == "host" and block is not None:
+                    # OpenSSH processes an Include inline, so a top-level
+                    # directive in the included file applies to the *current*
+                    # Host block — not as a global default that would bleed onto
+                    # unrelated later hosts.
+                    block.update(inc_defaults)
+                else:
+                    defaults.update(inc_defaults)
                 continue
 
             if block is not None and mode in ("host", "default"):
