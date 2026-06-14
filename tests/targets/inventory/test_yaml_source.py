@@ -174,6 +174,52 @@ def test_invalid_port_raises_config_error(tmp_path: Path) -> None:
     assert excinfo.value.kind == "invalid_entry"
 
 
+def test_port_out_of_range_rejected(tmp_path: Path) -> None:
+    ref = _write(
+        tmp_path / "inv.yml",
+        "g:\n  h:\n    type: ssh\n    host: 1.1.1.1\n    port: 70000\n",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        YamlSource().parse(str(ref))
+    assert excinfo.value.kind == "invalid_entry"
+
+
+def test_port_zero_rejected(tmp_path: Path) -> None:
+    ref = _write(
+        tmp_path / "inv.yml",
+        "g:\n  h:\n    type: ssh\n    host: 1.1.1.1\n    port: 0\n",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        YamlSource().parse(str(ref))
+    assert excinfo.value.kind == "invalid_entry"
+
+
+def test_port_bool_rejected(tmp_path: Path) -> None:
+    """``port: true`` must not silently coerce to 1 (bool is an int subclass)."""
+    ref = _write(
+        tmp_path / "inv.yml",
+        "g:\n  h:\n    type: ssh\n    host: 1.1.1.1\n    port: true\n",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        YamlSource().parse(str(ref))
+    assert excinfo.value.kind == "invalid_entry"
+
+
+def test_binary_file_raises_config_error_not_traceback(tmp_path: Path) -> None:
+    """A non-UTF-8 file → ConfigError (exit 2), never an uncaught traceback."""
+    ref = tmp_path / "inv.yaml"
+    ref.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        YamlSource().parse(str(ref))
+    assert excinfo.value.kind == "yaml_read_error"
+
+
+def test_can_handle_binary_yaml_returns_false(tmp_path: Path) -> None:
+    ref = tmp_path / "inv.yaml"
+    ref.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+    assert YamlSource().can_handle(str(ref)) is False
+
+
 def test_key_path_tilde_expanded(tmp_path: Path) -> None:
     ref = _write(
         tmp_path / "inv.yml",

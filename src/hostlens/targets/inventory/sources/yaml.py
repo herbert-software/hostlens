@@ -73,7 +73,7 @@ class YamlSource:
         try:
             with open(os.path.expanduser(ref), encoding="utf-8") as handle:
                 parsed = yaml.safe_load(handle.read())
-        except (OSError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
             return False
         return isinstance(parsed, dict)
 
@@ -132,9 +132,9 @@ class YamlSource:
         try:
             with open(path, encoding="utf-8") as handle:
                 return handle.read()
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise ConfigError(
-                "failed to read yaml inventory source",
+                "failed to read yaml inventory source (not readable / not UTF-8)",
                 kind="yaml_read_error",
                 path=path,
                 original=exc,
@@ -213,6 +213,14 @@ class YamlSource:
         port_value = merged.get("port")
         port: int | None
         if port_value is not None:
+            # ``bool`` is an ``int`` subclass — ``port: true`` would otherwise
+            # silently become 1; reject it (and any non-numeric) explicitly.
+            if isinstance(port_value, bool):
+                raise ConfigError(
+                    "yaml inventory 'port' must be an integer",
+                    kind="invalid_entry",
+                    entry=raw_identifier,
+                )
             try:
                 port = int(port_value)
             except (ValueError, TypeError) as exc:
@@ -221,6 +229,12 @@ class YamlSource:
                     kind="invalid_entry",
                     entry=raw_identifier,
                 ) from exc
+            if not 1 <= port <= 65535:
+                raise ConfigError(
+                    "yaml inventory 'port' must be in 1..65535",
+                    kind="invalid_entry",
+                    entry=raw_identifier,
+                )
         else:
             port = None
         return CandidateTarget(

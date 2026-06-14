@@ -109,7 +109,7 @@ class SshConfigSource:
             return True
         try:
             text = self._read_ref(ref)
-        except OSError:
+        except (OSError, UnicodeDecodeError, ConfigError):
             return False
         scanned = 0
         for line in text.splitlines():
@@ -144,9 +144,9 @@ class SshConfigSource:
         try:
             with open(path, encoding="utf-8") as handle:
                 return handle.read()
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise ConfigError(
-                "failed to read ssh_config source",
+                "failed to read ssh_config source (not readable / not UTF-8)",
                 kind="ssh_config_read_error",
                 path=path,
                 original=exc,
@@ -233,7 +233,10 @@ class SshConfigSource:
                     continue
                 included = self._read_include(value)
                 inc_pending, inc_defaults = self._parse_text(included, allow_include=False)
-                pending.extend(inc_pending)
+                # The included file's own defaults (its ``Host *`` / pre-Host
+                # directives) apply to that file's own hosts regardless of where
+                # the Include sits — bake them in (the host's explicit keys win).
+                pending.extend((aka, {**inc_defaults, **blk}) for aka, blk in inc_pending)
                 if mode == "host" and block is not None:
                     # OpenSSH processes an Include inline, so a top-level
                     # directive in the included file applies to the *current*
@@ -275,6 +278,11 @@ class SshConfigSource:
                     f"invalid ssh_config Port: {port_token!r}",
                     kind="invalid_ssh_config",
                 ) from exc
+            if not 1 <= port <= 65535:
+                raise ConfigError(
+                    f"ssh_config Port out of range (1..65535): {port_token!r}",
+                    kind="invalid_ssh_config",
+                )
         else:
             port = None
 
@@ -341,6 +349,11 @@ class SshConfigSource:
             try:
                 with os.fdopen(fd, encoding="utf-8") as handle:
                     contents.append(handle.read())
+            except UnicodeDecodeError as exc:
+                raise ConfigError(
+                    "Include target is not valid UTF-8",
+                    kind="invalid_ssh_config",
+                ) from exc
             except OSError as exc:
                 raise ConfigError(
                     "failed to read Include target",

@@ -215,6 +215,46 @@ def test_include_inside_skipped_match_block_is_not_imported(
     assert "sneaky" not in names
 
 
+def test_include_inside_host_block_applies_included_defaults_to_its_own_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An included file's own Host* default reaches that file's own hosts.
+
+    Regression: routing an in-Host-block Include's defaults must not strand the
+    included file's own concrete hosts without their file's defaults.
+    """
+    ssh = _make_ssh_home(tmp_path, monkeypatch)
+    _write(ssh / "frag", "Host *\n  User fraguser\n\nHost fraghost\n  HostName 9.9.9.9\n")
+    ref = _write(ssh / "config", "Host outer\n  HostName 1.1.1.1\n  Include ~/.ssh/frag\n")
+    candidates = {c.name: c for c in SshConfigSource().parse(str(ref))}
+    # the included file's Host* default reaches its own host ...
+    assert candidates["fraghost"].user == "fraguser"
+    # ... and the enclosing outer host (OpenSSH inline), scoped to here.
+    assert candidates["outer"].user == "fraguser"
+
+
+def test_port_out_of_range_rejected(tmp_path: Path) -> None:
+    ref = _write(tmp_path / "config", "Host h\n  HostName 1.1.1.1\n  Port 70000\n")
+    with pytest.raises(ConfigError) as excinfo:
+        SshConfigSource().parse(str(ref))
+    assert excinfo.value.kind == "invalid_ssh_config"
+
+
+def test_binary_file_raises_config_error_not_traceback(tmp_path: Path) -> None:
+    """A non-UTF-8 ssh_config → ConfigError (exit 2), never an uncaught traceback."""
+    ref = tmp_path / "config"
+    ref.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        SshConfigSource().parse(str(ref))
+    assert excinfo.value.kind == "ssh_config_read_error"
+
+
+def test_can_handle_binary_returns_false(tmp_path: Path) -> None:
+    ref = tmp_path / "weird.txt"
+    ref.write_bytes(b"\xff\xfe\x00\x01 not utf-8")
+    assert SshConfigSource().can_handle(str(ref)) is False
+
+
 def test_include_absolute_outside_tree_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
