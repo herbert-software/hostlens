@@ -16,7 +16,7 @@ job 执行体**必须**按 `manifest.mode` 路由，两条路径都产出 `Repor
 **共享映射规则**（两 mode 一致）:
 
 - 返回 `Report` 且 `meta.status == ok` → `ReportStore.save` 后落 `Run(status=ok, report_id=<saved>, report_hash)`
-- 返回 `Report` 且 `meta.status` 为降级类（`partial` / `degraded_*` / `stored_as_orphan`）→ `Run(status=partial, report_id=<saved>, report_hash)`;**token/turns 预算耗尽（仅 agent 可触发）仍映射 `partial`、禁止映射 `budget_exhausted`**
+- 返回 `Report` 且 `meta.status` 为降级类——既有显式枚举**逐字保留不削**：`partial` / `degraded_no_planner` / `degraded_rate_limited` / `degraded_token_budget` / `degraded_max_turns` / `empty_response` / `stored_as_orphan`——→ `Run(status=partial, report_id=<saved>, report_hash)`;**token/turns 预算耗尽（仅 agent 可触发）产 `degraded_token_budget`/`degraded_max_turns` 的 Report 仍映射 `partial`、禁止映射无-Report 的 `budget_exhausted`**
 - agent 返回 `None` 且 sink `terminal_status == "failed_api_unavailable"` → `Run(status=failed_api_unavailable, report_id=None)`
 - agent 返回 `None` 且非上述（空采集）→ `Run(status=failed, error="pipeline produced no inspector results", report_id=None)`
 - **deterministic 返回 `None`（全 inspector 无结果）→ `Run(status=failed, error="deterministic inspection produced no inspector results", report_id=None)`**;deterministic **不经** LLM 采集，故**不产** `failed_api_unavailable`（narrate 阶段后端不可用按 `degraded` Report 处理、不丢已采集结果）
