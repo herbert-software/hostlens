@@ -273,3 +273,21 @@ def test_include_home_outside_ssh_dir_allowed(
     ref = _write(home / ".ssh" / "config", "Include ~/tizi/hosts\n")
     candidates = SshConfigSource().parse(str(ref))
     assert {c.name for c in candidates} == {"tz"}
+
+
+def test_host_star_provides_global_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Host *`` directives are defaults applied to every host; explicit wins."""
+    ssh = _make_ssh_home(tmp_path, monkeypatch)
+    ref = _write(
+        ssh / "config",
+        "Host *\n  User globaluser\n  Port 2200\n"
+        "Host foo\n  HostName 1.1.1.1\n"
+        "Host bar\n  HostName 2.2.2.2\n  User specific\n",
+    )
+    by_name = {c.name: c for c in SshConfigSource().parse(str(ref))}
+    assert by_name["foo"].user == "globaluser"  # default applied
+    assert by_name["foo"].port == 2200
+    assert by_name["bar"].user == "specific"  # host-specific overrides default
+    assert by_name["bar"].port == 2200  # default still fills the gap

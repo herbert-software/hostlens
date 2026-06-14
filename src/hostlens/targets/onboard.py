@@ -126,11 +126,14 @@ async def build_import_plan(
             entry = promote_candidate(candidate)
         except ValidationError as exc:
             invalid.append(
-                InvalidCandidate(
-                    candidate=candidate,
-                    error_summary=_redact_validation_error(exc),
-                )
+                InvalidCandidate(candidate=candidate, error_summary=_redact_validation_error(exc))
             )
+            continue
+        except ValueError:
+            # promote_candidate's own guards (e.g. ssh missing host); the
+            # message carries no host/credential value, but we keep a fixed
+            # redacted summary to honour the no-value-leak discipline.
+            invalid.append(InvalidCandidate(candidate=candidate, error_summary="promotion_error"))
             continue
         promoted.append((candidate, entry))
 

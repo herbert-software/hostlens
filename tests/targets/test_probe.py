@@ -443,3 +443,18 @@ def test_probe_many_isolates_one_bad_host(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(results) == 2
     assert results[0].reachable is False and results[0].error_kind == "exec_failed"
     assert results[1].reachable is True
+
+
+def test_promote_ssh_defaults_user_to_os_user() -> None:
+    """Missing ``User`` defaults to the OS username (OpenSSH), never empty."""
+    import getpass
+
+    entry = promote_candidate(CandidateTarget(name="x", type="ssh", host="1.1.1.1"))
+    assert isinstance(entry, SSHEntry)
+    assert entry.user == getpass.getuser()
+    assert entry.user != ""
+
+
+def test_promote_ssh_missing_host_raises() -> None:
+    with pytest.raises(ValueError, match="host"):
+        promote_candidate(CandidateTarget(name="x", type="ssh", host=None))

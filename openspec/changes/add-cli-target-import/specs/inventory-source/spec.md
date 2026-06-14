@@ -87,7 +87,9 @@
 
 - **显式地址**:连接地址取 `HostName` 字面量,**禁止**对 `Host` 别名做 DNS 解析(防撞 FakeDNS / split-horizon)。**`HostName` 缺失**时(`Host` 块无 `HostName`):连接地址取 canonical `Host` token 字面量(OpenSSH fallback 语义,asyncssh 连接期再解析),**仍不**由本 source 主动 DNS 解析。
 - **多别名**:取一个 canonical name 经上文 name 派生契约规范化。
-- **`Include` 解析语义(OpenSSH 兼容)**:`~` 展开;**相对路径锚到 `~/.ssh/`**(OpenSSH user-config 规则,**非**进程 CWD);**glob 展开**(`Include ~/.ssh/config.d/*` 展开为每个匹配文件;无匹配视为空、不报错)。首版支持**一层** `Include`;`Match` 块与通配 `Host`(`*`/`?`)跳过并 log(不静默吞、不报错)。
+- **`Include` 解析语义(OpenSSH 兼容)**:`~` 展开;**相对路径锚到 `~/.ssh/`**(OpenSSH user-config 规则,**非**进程 CWD);**glob 展开**(`Include ~/.ssh/config.d/*` 展开为每个匹配文件;无匹配视为空、不报错)。首版支持**一层** `Include`。
+- **`Host *` 全局默认 + 通配/Match 跳过**:`Host *`(精确通配全集)块的指令作为**全局默认**应用到每个 host(`User`/`Port`/`IdentityFile` 等;**host 专属指令优先**,不建模完整 first-match 顺序);其他通配 `Host`(`*.x` / `?`)与 `Match` 块**跳过并 log**(不静默吞、不报错——需 pattern 匹配,首版不实现)。
+- **`User` 缺省**:`Host` 块无 `User` 且无 `Host *` 默认时,提升期 `User` 缺省取**本机当前用户名**(`getpass.getuser()`,OpenSSH 语义),**禁**空字符串(空 user 会断连)。
 - **`Include` 路径边界 + TOCTOU(realpath + O_NOFOLLOW)**:ssh_config 是操作者可信文件(同 `target add` 信任级)。解析出的每个路径(pattern 自身 + 每个 glob 匹配)的 `os.path.realpath` 必须落在**用户 home 树** ∪ **symlink-resolve 后的 `~/.ssh` 树**内——**放行**文档化的 `Include ~/tizi/hosts`(home 内、`~/.ssh` 外)与 `~/.ssh -> ~/dotfiles/ssh` dotfiles symlink,**拒绝** `Include /etc/shadow`(两树皆外)。边界用 `os.path.commonpath([root, realpath]) == root`(任一 root 命中即放行;`ValueError` 视为不命中);**对 pattern 自身先查**(越界路径不论存在与否都拒,因 realpath 解析既有前缀)。实际读取必须 `os.open(path, O_RDONLY | O_NOFOLLOW)`(拒最后一跳 symlink,关 TOCTOU 窗口)。越界 / O_NOFOLLOW 失败 → `ConfigError(kind="include_path_escape")`;异常文本**禁止**回显文件内容,只报路径 kind。
 - **`IdentityFile` 仅作引用**:parse 阶段把 `IdentityFile` 透传为 `key_path` 引用,**禁止**读私钥内容 / `open` / `stat` 该路径;`~` 展开 + `${VAR}` fail-closed 拒绝见 key_path 需求。
 - **`AddressFamily`**:`SSHEntry` 无 `address_family` 字段,故该指令**不落盘**;IPv6 寻址意图由 `HostName` 的 IPv6 字面量本身承载,spec 不声称「保留 AddressFamily 指令」。
@@ -123,6 +125,14 @@
 #### 场景:Include 绝对路径越界被拒
 - **当** ssh_config 含 `Include /etc/shadow`(home 树 ∪ ~/.ssh 树皆外)
 - **那么** raise `ConfigError(kind="include_path_escape")`(不论 `/etc/shadow` 是否存在),不回显内容
+
+#### 场景:Host * 提供全局默认、host 专属优先
+- **当** ssh_config 含 `Host *`(`User globaluser` / `Port 2200`)+ `Host foo`(仅 HostName)+ `Host bar`(HostName + `User specific`)
+- **那么** `foo` 取默认 `user=globaluser`/`port=2200`;`bar` 的 `user=specific`(host 专属优先)、`port=2200`(默认补缺)
+
+#### 场景:缺 User 缺省取本机用户名非空
+- **当** 一个 ssh 候选无 `User` 且无 `Host *` 默认
+- **那么** 提升出的 `SSHEntry.user` 为 `getpass.getuser()`(本机当前用户名),**非**空字符串
 
 ### 需求:`key_path` / `IdentityFile` 必须仅展开 `~`、对 `${VAR}` fail-closed 拒绝
 

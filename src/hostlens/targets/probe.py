@@ -26,6 +26,7 @@ Three things live here:
 from __future__ import annotations
 
 import asyncio
+import getpass
 from typing import TYPE_CHECKING, Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -180,11 +181,18 @@ def promote_candidate(candidate: CandidateTarget) -> LocalEntry | SSHEntry:
     if candidate.type == "local":
         return LocalEntry(name=candidate.name, type="local")
 
+    if candidate.host is None:
+        # Every source sets ``host`` for an ssh candidate; narrow the Optional
+        # and turn the (otherwise unreachable) malformed case into a clean
+        # invalid_candidate instead of an empty host string.
+        raise ValueError("ssh candidate is missing a host")
     return SSHEntry(
         name=candidate.name,
         type="ssh",
-        host=candidate.host if candidate.host is not None else "",
-        user=candidate.user if candidate.user is not None else "",
+        host=candidate.host,
+        # OpenSSH defaults ``User`` to the local username when unspecified;
+        # never an empty string (which would break the connection).
+        user=candidate.user if candidate.user else getpass.getuser(),
         port=candidate.port if candidate.port is not None else 22,
         key_path=candidate.key_path,
         # password / passphrase stay None — credentials are env references

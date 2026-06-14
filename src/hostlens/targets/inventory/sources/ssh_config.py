@@ -144,17 +144,22 @@ class SshConfigSource:
 
     def _parse_text(self, text: str, *, allow_include: bool) -> list[CandidateTarget]:
         candidates: list[CandidateTarget] = []
+        pending: list[tuple[list[str], dict[str, str]]] = []
+        defaults: dict[str, str] = {}  # directives under ``Host *``
         block: dict[str, str] | None = None
         aliases: list[str] = []
-        skip_block = False
+        mode = ""  # "host" | "default" | "skip"
 
         def flush() -> None:
-            nonlocal block, aliases, skip_block
-            if block is not None and not skip_block:
-                candidates.append(self._build_candidate(aliases, block))
+            nonlocal block, aliases, mode
+            if block is not None:
+                if mode == "host":
+                    pending.append((aliases, block))
+                elif mode == "default":
+                    defaults.update(block)
             block = None
             aliases = []
-            skip_block = False
+            mode = ""
 
         for raw_line in text.splitlines():
             directive = _split_directive(raw_line)
@@ -170,20 +175,27 @@ class SshConfigSource:
                         "ssh_config 'Host' line has no pattern",
                         kind="invalid_ssh_config",
                     )
-                if any(_is_wildcard_host(token) for token in tokens):
-                    _logger.debug("skipping wildcard Host pattern", host=value)
-                    skip_block = True
-                    block = {}
-                    continue
-                aliases = tokens
                 block = {}
+                if tokens == ["*"]:
+                    # ``Host *`` matches every host — its directives are global
+                    # defaults applied to each host (an explicit host-specific
+                    # directive wins; full first-match ordering is not modelled).
+                    mode = "default"
+                elif any(_is_wildcard_host(token) for token in tokens):
+                    # Other wildcard patterns (``*.x`` / ``?``) need pattern
+                    # matching we do not implement — skip + log.
+                    _logger.debug("skipping wildcard Host pattern", host=value)
+                    mode = "skip"
+                else:
+                    aliases = tokens
+                    mode = "host"
                 continue
 
             if keyword == "match":
                 flush()
                 _logger.debug("skipping Match block")
-                skip_block = True
                 block = {}
+                mode = "skip"
                 continue
 
             if keyword == "include":
@@ -194,10 +206,13 @@ class SshConfigSource:
                 candidates.extend(self._parse_text(included, allow_include=False))
                 continue
 
-            if block is not None and not skip_block:
+            if block is not None and mode in ("host", "default"):
                 block[keyword] = value
 
         flush()
+        for host_aliases, host_block in pending:
+            # ``Host *`` defaults fill directives the explicit block omits.
+            candidates.append(self._build_candidate(host_aliases, {**defaults, **host_block}))
         return candidates
 
     @staticmethod
