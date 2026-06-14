@@ -95,6 +95,12 @@ _DEFAULT_PROBE_TIMEOUT: Final[int] = 12
 # importing dozens of hosts does not trigger a connection storm.
 _DEFAULT_CONCURRENCY: Final[int] = 10
 
+# Hard upper bound on the semaphore — ``--concurrency`` is operator-supplied, so
+# clamp it (the cap above is the *intent*; without a ceiling ``--concurrency
+# 999999`` would build a 999999-permit semaphore and fan out that many
+# simultaneous handshakes — a self-inflicted connection storm / FD exhaustion).
+_MAX_CONCURRENCY: Final[int] = 100
+
 # Bytes/chars considered control characters to strip from fingerprint values.
 _CONTROL_CHARS: Final[frozenset[str]] = frozenset(chr(c) for c in range(0x20)) | {chr(0x7F)}
 
@@ -186,13 +192,25 @@ def promote_candidate(candidate: CandidateTarget) -> LocalEntry | SSHEntry:
         # and turn the (otherwise unreachable) malformed case into a clean
         # invalid_candidate instead of an empty host string.
         raise ValueError("ssh candidate is missing a host")
+    if candidate.user:
+        user = candidate.user
+    else:
+        # OpenSSH defaults ``User`` to the local username when unspecified;
+        # never an empty string (which would break the connection).
+        try:
+            user = getpass.getuser()
+        except (KeyError, OSError) as exc:
+            # getpass.getuser() raises when no USER/LOGNAME/LNAME/USERNAME env
+            # var is set AND the UID has no passwd entry (minimal containers /
+            # some CI sandboxes). Re-raise as the ValueError that the promote
+            # loop already buckets into ``invalid_candidate`` so one userless
+            # host is isolated instead of aborting the whole batch.
+            raise ValueError("cannot determine default ssh user") from exc
     return SSHEntry(
         name=candidate.name,
         type="ssh",
         host=candidate.host,
-        # OpenSSH defaults ``User`` to the local username when unspecified;
-        # never an empty string (which would break the connection).
-        user=candidate.user if candidate.user else getpass.getuser(),
+        user=user,
         port=candidate.port if candidate.port is not None else 22,
         key_path=candidate.key_path,
         # password / passphrase stay None — credentials are env references
@@ -285,7 +303,7 @@ class TargetProbe:
     ) -> None:
         self._settings = settings
         self._timeout = timeout
-        self._concurrency = max(1, concurrency)
+        self._concurrency = max(1, min(concurrency, _MAX_CONCURRENCY))
 
     async def probe(self, entry: LocalEntry | SSHEntry) -> ProbeResult:
         """Probe one promoted entry and return a redacted ``ProbeResult``.

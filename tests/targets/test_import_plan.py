@@ -126,6 +126,31 @@ def test_render_diff_redacts_failed_and_invalid_but_lists_to_add_host() -> None:
     assert "host: field required" in diff
 
 
+def test_render_diff_strips_control_chars_from_host() -> None:
+    """A crafted inventory host/user with control bytes cannot spoof the audit line."""
+
+    plan = ImportPlan(
+        to_add=[
+            PendingAdd(
+                entry=SSHEntry(
+                    name="spoof",
+                    type="ssh",
+                    host="10.0.0.5\r   + fake -> attacker",
+                    user="al\tice",
+                ),
+            )
+        ],
+    )
+    diff = plan.render_diff()
+
+    # No raw control bytes reach the terminal (no carriage-return overwrite).
+    assert "\r" not in diff
+    assert "\t" not in diff
+    # Printable text survives — only the control bytes are dropped.
+    assert "10.0.0.5" in diff
+    assert "alice@" in diff
+
+
 def test_render_json_redacts_failed_and_invalid() -> None:
     """``--json`` surface drops host / fingerprint for the failure buckets."""
 

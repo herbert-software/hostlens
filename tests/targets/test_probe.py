@@ -458,3 +458,30 @@ def test_promote_ssh_defaults_user_to_os_user() -> None:
 def test_promote_ssh_missing_host_raises() -> None:
     with pytest.raises(ValueError, match="host"):
         promote_candidate(CandidateTarget(name="x", type="ssh", host=None))
+
+
+def test_promote_ssh_getuser_failure_raises_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """getpass.getuser() failure → ValueError (so the promote loop isolates it).
+
+    ``getpass.getuser()`` raises ``KeyError`` when no USER/LOGNAME env var is set
+    and the UID has no passwd entry (minimal containers / some CI). It must be
+    re-raised as the ValueError the promote loop already buckets into
+    ``invalid_candidate`` — never an uncaught error that aborts the whole batch.
+    """
+    import hostlens.targets.probe as probe_mod
+
+    def _boom() -> str:
+        raise KeyError("getpwuid(): uid not found")
+
+    monkeypatch.setattr(probe_mod.getpass, "getuser", _boom)
+    with pytest.raises(ValueError, match="default ssh user"):
+        promote_candidate(CandidateTarget(name="x", type="ssh", host="1.1.1.1"))
+
+
+def test_target_probe_clamps_concurrency_to_bounds() -> None:
+    """``--concurrency`` is clamped to ``[1, _MAX_CONCURRENCY]`` (no storm)."""
+    import hostlens.targets.probe as probe_mod
+
+    assert TargetProbe(Settings(), concurrency=10**9)._concurrency == probe_mod._MAX_CONCURRENCY
+    assert TargetProbe(Settings(), concurrency=0)._concurrency == 1
+    assert TargetProbe(Settings(), concurrency=-5)._concurrency == 1

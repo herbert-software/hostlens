@@ -154,6 +154,31 @@ def test_include_in_tree_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert names == {"inc", "top"}
 
 
+def test_pre_host_directives_apply_as_global_defaults(tmp_path: Path) -> None:
+    """Directives before the first Host are OpenSSH globals (implicit Host *).
+
+    A host-specific directive still wins over the global default.
+    """
+    ref = _write(
+        tmp_path / "config",
+        "User globaluser\n"
+        "Port 2222\n"
+        "\n"
+        "Host alpha\n"
+        "  HostName 1.1.1.1\n"
+        "\n"
+        "Host beta\n"
+        "  HostName 2.2.2.2\n"
+        "  User betauser\n",
+    )
+    candidates = {c.name: c for c in SshConfigSource().parse(str(ref))}
+    assert candidates["alpha"].user == "globaluser"
+    assert candidates["alpha"].port == 2222
+    # beta's explicit User overrides the global default; Port is inherited.
+    assert candidates["beta"].user == "betauser"
+    assert candidates["beta"].port == 2222
+
+
 def test_include_absolute_outside_tree_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -162,8 +187,9 @@ def test_include_absolute_outside_tree_rejected(
     with pytest.raises(ConfigError) as excinfo:
         SshConfigSource().parse(str(ref))
     assert excinfo.value.kind == "include_path_escape"
-    # Exception text must not echo file content — only the path kind.
-    assert "shadow" not in str(excinfo.value).lower() or "include_path_escape" in str(excinfo.value)
+    # Exception text must not echo the escaping target's basename — only a
+    # fixed message + the path kind (no content / path leak in the audit trail).
+    assert "shadow" not in str(excinfo.value).lower()
 
 
 def test_include_symlink_escape_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

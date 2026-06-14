@@ -202,16 +202,31 @@ class ImportPlan(BaseModel):
         _atomic_write_yaml(path, raw)
 
 
+def _strip_control_chars(value: str) -> str:
+    """Drop C0 control characters + DEL from an operator-supplied string.
+
+    ``host`` / ``user`` come from the inventory (ssh_config ``HostName`` / yaml
+    ``host``) and are echoed verbatim in the dry-run audit diff. A crafted
+    inventory could embed ``\\r`` / ANSI bytes to overwrite or spoof the very
+    preview line the operator inspects before passing ``--yes``; stripping
+    controls makes the audit line unforgeable.
+    """
+
+    return "".join(ch for ch in value if ch >= " " and ch != "\x7f")
+
+
 def _pending_add_label(item: PendingAdd) -> str:
     """Render one ``to_add`` row including its connection address.
 
     SSH entries show ``name -> user@host:port`` so the operator can audit the
     final connection target before the write; local entries show the name only.
+    The host / user are control-char-stripped so a crafted inventory cannot
+    spoof the audit line.
     """
 
     entry = item.entry
     if isinstance(entry, SSHEntry):
         port = "" if entry.port == 22 else f":{entry.port}"
-        user = f"{entry.user}@" if entry.user else ""
-        return f"{entry.name} -> {user}{entry.host}{port}"
+        user = f"{_strip_control_chars(entry.user)}@" if entry.user else ""
+        return f"{entry.name} -> {user}{_strip_control_chars(entry.host)}{port}"
     return f"{entry.name} (local)"

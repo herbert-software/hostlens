@@ -18,10 +18,12 @@ write.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from hostlens.targets.config import LocalEntry, SSHEntry
 from hostlens.targets.import_plan import (
     FailedProbe,
     ImportPlan,
@@ -36,7 +38,6 @@ from hostlens.targets.probe import TargetProbe, promote_candidate
 
 if TYPE_CHECKING:
     from hostlens.core.config import Settings
-    from hostlens.targets.config import LocalEntry, SSHEntry
     from hostlens.targets.inventory.models import CandidateTarget
 
 __all__ = [
@@ -61,6 +62,38 @@ def default_source_registry() -> InventorySourceRegistry:
     registry = InventorySourceRegistry()
     register_default_sources(registry)
     return registry
+
+
+def _resolve_probe_entry(
+    candidate: CandidateTarget, entry: LocalEntry | SSHEntry
+) -> LocalEntry | SSHEntry:
+    """Return a transient, credential-resolved entry for the probe only.
+
+    The promoted (plan) entry keeps ``password`` / ``passphrase`` ``None`` so
+    the ``ImportPlan`` never carries a secret (it is rendered, JSON-dumped, and
+    optionally persisted). The probe, however, needs the *actual* credential to
+    determine reachability for a cred-ful host — without it asyncssh would fail
+    authentication and a perfectly reachable host would be misclassified into
+    ``failed_probe``. The ``${VAR}`` env reference is resolved here into a copy
+    that is built, probed, and discarded; it is never stored in the plan or
+    written to ``targets.yaml`` (the save path re-derives ``${VAR}`` from the
+    env name, never from ``entry.password``).
+    """
+
+    if not isinstance(entry, SSHEntry):
+        return entry
+    if candidate.password_env is None and candidate.passphrase_env is None:
+        return entry
+    return entry.model_copy(
+        update={
+            "password": (
+                os.environ.get(candidate.password_env) if candidate.password_env else None
+            ),
+            "passphrase": (
+                os.environ.get(candidate.passphrase_env) if candidate.passphrase_env else None
+            ),
+        }
+    )
 
 
 def _redact_validation_error(exc: ValidationError) -> str:
@@ -101,7 +134,9 @@ async def build_import_plan(
     2. **Promote** each ``CandidateTarget`` to a ``LocalEntry`` / ``SSHEntry``;
        a ``ValidationError`` buckets that one candidate as
        ``invalid_candidate`` (the batch continues).
-    3. **Probe** every promoted entry concurrently (semaphore-bounded).
+    3. **Probe** every promoted entry concurrently (semaphore-bounded), with
+       credential ``${VAR}`` env refs resolved into a transient probe entry so a
+       cred-ful host authenticates (the plan entries stay credential-free).
     4. **Classify** by probe outcome + name collision:
        - probe OK + name free → ``to_add`` (with credential env refs)
        - name already in ``existing_names`` → ``skipped``
@@ -138,7 +173,10 @@ async def build_import_plan(
         promoted.append((candidate, entry))
 
     probe = TargetProbe(settings, concurrency=concurrency)
-    results = await probe.probe_many([entry for _candidate, entry in promoted])
+    # Probe with credential env refs resolved (transient); the plan entries in
+    # ``promoted`` stay credential-free so the ImportPlan never carries a secret.
+    probe_entries = [_resolve_probe_entry(candidate, entry) for candidate, entry in promoted]
+    results = await probe.probe_many(probe_entries)
 
     to_add: list[PendingAdd] = []
     skipped: list[str] = []

@@ -22,6 +22,8 @@ Key invariants:
   any ``${VAR}`` fails closed (never ``expandvars``); the file is never
   opened / stat-ed at parse time.
 - ``Match`` blocks and wildcard ``Host`` patterns are skipped + logged.
+- Directives before the first ``Host`` / ``Match`` are OpenSSH globals — applied
+  as defaults to every host (an explicit host-specific directive still wins).
 """
 
 from __future__ import annotations
@@ -155,13 +157,18 @@ class SshConfigSource:
         Construction is deferred to ``parse`` so ``Host *`` defaults apply
         uniformly. An ``Include``'s blocks + defaults are merged into this
         file's, so the parent's ``Host *`` reaches Include'd hosts too.
+        Directives appearing before the first ``Host`` / ``Match`` are OpenSSH
+        globals (an implicit ``Host *``) — seeded into ``defaults`` here so they
+        are not silently dropped.
         """
 
         pending: list[tuple[list[str], dict[str, str]]] = []
-        defaults: dict[str, str] = {}  # directives under ``Host *``
-        block: dict[str, str] | None = None
+        defaults: dict[str, str] = {}  # directives under ``Host *`` / pre-Host globals
+        # Seed an open default block so directives before the first Host / Match
+        # accumulate as OpenSSH globals instead of being discarded.
+        block: dict[str, str] | None = {}
         aliases: list[str] = []
-        mode = ""  # "host" | "default" | "skip"
+        mode = "default"  # "host" | "default" | "skip"
 
         def flush() -> None:
             nonlocal block, aliases, mode
