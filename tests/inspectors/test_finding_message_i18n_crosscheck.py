@@ -52,15 +52,95 @@ from hostlens.inspectors.schema import InspectorManifest
 # assertions (a)/(c)/(d) apply ONLY to this set. Each各域长尾 PR appends the
 # canonical `name` of every inspector it migrates.
 #
-# `_BACKLOG` is "everything else" — computed at collection time as
-# `all_builtin_names - _MIGRATED_ALLOWLIST` so it can never drift out of sync.
-# It is NOT a hard-coded literal: that would require touching this file on every
-# new inspector AND on every migration, and the anti-drift test below already
-# guarantees the union == full builtin set.
+# `_BACKLOG` is the **explicit** literal of not-yet-migrated inspectors (English
+# messages, awaiting their domain PR). It is deliberately NOT computed as
+# `all - allowlist`: a derived backlog auto-classifies any new inspector and so
+# can never be "未分类", which would make the spec's drift guard ("新增 inspector
+# 若未分类则 crosscheck 失败,强制作者把它纳入其一", inspector-authoring-contract
+# §防漂移) vacuous. With both sets explicit, a newly-added inspector lands in
+# neither → the union==all assertion fails → the author is forced to classify it
+# (migrate to the allowlist with a 中文 message, or park it in the backlog). Each
+# domain PR moves names from `_BACKLOG` to `_MIGRATED_ALLOWLIST` as it migrates.
 
 _MIGRATED_ALLOWLIST: frozenset[str] = frozenset(
     {
         "linux.systemd.failed_units",
+    }
+)
+
+_BACKLOG: frozenset[str] = frozenset(
+    {
+        "docker.containers.restart_loop",
+        "docker.images.disk_usage",
+        "docker.networks",
+        "go.goroutines",
+        "go.heap",
+        "hello.echo",
+        "jvm.gc",
+        "jvm.heap",
+        "jvm.threads",
+        "k8s.events.warnings",
+        "k8s.nodes.conditions",
+        "k8s.pods.evicted",
+        "k8s.pods.oom_killed",
+        "k8s.pods.stuck_pending",
+        "linux.cpu.cpufreq",
+        "linux.cpu.throttling",
+        "linux.cpu.top_processes",
+        "linux.cron.failures",
+        "linux.cron.last_runs",
+        "linux.disk.io",
+        "linux.disk.smart",
+        "linux.disk.usage",
+        "linux.fs.inode_pressure",
+        "linux.fs.logrotate",
+        "linux.fs.mount_health",
+        "linux.kernel.messages",
+        "linux.kernel.oom_killer",
+        "linux.kernel.taint",
+        "linux.memory.hugepages",
+        "linux.memory.pressure",
+        "linux.memory.swap",
+        "linux.process.critical_alive",
+        "linux.process.fd_usage",
+        "linux.process.total",
+        "linux.process.zombies",
+        "linux.system.load_avg",
+        "linux.system.reboot_required",
+        "linux.systemd.masked",
+        "linux.systemd.timer_status",
+        "log.exception_burst",
+        "log.tail.error_burst",
+        "mysql.connection_usage",
+        "mysql.deadlocks",
+        "mysql.replication_lag",
+        "mysql.slow_queries",
+        "net.connections",
+        "net.dependency.tcp_check",
+        "net.dns.resolve",
+        "net.listening_ports",
+        "net.ntp.drift",
+        "net.tls.cert_expiry",
+        "net.tls.chain_validity",
+        "nginx.config_test",
+        "nginx.error_rate",
+        "nginx.health",
+        "nginx.upstream",
+        "pkg.held_back",
+        "pkg.pending_updates",
+        "pkg.security_patches",
+        "postgres.bloat_tables",
+        "postgres.connection_usage",
+        "postgres.long_queries",
+        "postgres.replication_lag",
+        "redis.memory_usage",
+        "redis.persistence",
+        "redis.replication_lag",
+        "redis.slowlog",
+        "security.failed_logins",
+        "security.sudo_history",
+        "security.world_writable_dirs",
+        "system.uptime",
     }
 )
 
@@ -147,21 +227,26 @@ class TestAntiDriftClassification:
         assert not unknown, f"allowlist references non-builtin inspector(s): {sorted(unknown)}"
 
     def test_every_builtin_inspector_is_classified(self) -> None:
-        # allowlist union backlog == 全部内置, and the two are disjoint. backlog is
-        # derived (all - allowlist), so the only way to "fall out" of
-        # classification is to leave allowlist stale — which this union check
-        # cannot mask because allowlist ⊆ all is verified above. The real
-        # purpose: prove the derived backlog is non-empty and the partition is
-        # total, so a future literal-backlog refactor would have to preserve it.
+        # The drift guard: BOTH tiers are explicit literals, so a newly-added
+        # builtin inspector lands in neither → `unclassified` is non-empty → this
+        # test fails and forces the author to classify it (migrate to the
+        # allowlist with a 中文 message, or park it in `_BACKLOG`). A *derived*
+        # backlog would auto-absorb new inspectors and make this guard vacuous.
         all_names = set(_builtin_registry_names())
-        backlog = all_names - _MIGRATED_ALLOWLIST
-        assert _MIGRATED_ALLOWLIST & backlog == set()
-        assert _MIGRATED_ALLOWLIST | backlog == all_names
-        # The backlog must be non-empty while the long-tail rewrite is ongoing —
-        # a guard that this two-tier crosscheck is meaningfully partitioned (not
-        # a vacuous "everything migrated" state that would silently drop the
-        # tiering). Remove/relax this only when the long tail is truly complete.
-        assert backlog, "backlog empty — every inspector migrated? update the tiering"
+        # allowlist and backlog are disjoint (no inspector in both tiers).
+        both = _MIGRATED_ALLOWLIST & _BACKLOG
+        assert not both, f"inspector(s) in both allowlist and backlog: {sorted(both)}"
+        # No tier references a non-existent inspector.
+        stale = (_MIGRATED_ALLOWLIST | _BACKLOG) - all_names
+        assert not stale, f"allowlist/backlog reference non-builtin inspector(s): {sorted(stale)}"
+        # Every builtin is classified — a new inspector in neither tier fails here.
+        unclassified = all_names - _MIGRATED_ALLOWLIST - _BACKLOG
+        assert not unclassified, (
+            f"unclassified builtin inspector(s): {sorted(unclassified)} — add each to "
+            f"_MIGRATED_ALLOWLIST (with a 中文 message) or _BACKLOG"
+        )
+        # The backlog must be non-empty while the long-tail rewrite is ongoing.
+        assert _BACKLOG, "backlog empty — every inspector migrated? update the tiering"
 
 
 # --------------------------------------------------------------------------- #
@@ -235,10 +320,8 @@ class TestBacklogIsExemptFromQualityAssertions:
     """
 
     def test_at_least_one_backlog_inspector_has_english_only_message(self) -> None:
-        all_names = set(_builtin_registry_names())
-        backlog = all_names - _MIGRATED_ALLOWLIST
         english_only = []
-        for name in sorted(backlog):
+        for name in sorted(_BACKLOG):
             manifest = _load_builtin(name)
             for rule in manifest.findings:
                 if rule.message and not _has_cjk(rule.message):

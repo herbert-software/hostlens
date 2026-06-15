@@ -41,6 +41,7 @@ __all__ = [
     "dedup_findings",
     "fmt_time",
     "group_by_target",
+    "section_severity",
     "sev_label",
     "sort_sev",
 ]
@@ -189,3 +190,16 @@ def group_by_target(findings: list[Finding]) -> list[tuple[str | None, list[Find
     for finding in findings:
         sections.setdefault(finding.target_name, []).append(finding)
     return list(sections.items())
+
+
+def section_severity(findings: list[Finding]) -> str:
+    """Return the highest-rank severity among a host section's findings
+    (critical > warning > info) for the per-host section header — the spec's
+    "每节主机名 + 该主机 severity" requirement. A section always carries ≥1
+    finding (empty groups are never produced); an empty list falls back to
+    ``info`` rather than raising.
+    """
+
+    if not findings:
+        return "info"
+    return max(findings, key=lambda f: _SEV_RANK.get(f.severity, 0)).severity

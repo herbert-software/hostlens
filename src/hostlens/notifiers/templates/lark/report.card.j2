@@ -71,7 +71,15 @@
         "tag": "div",
         "text": {
           "tag": "lark_md",
-          "content": {{ ("**" ~ target_name ~ "**") | tojson }}
+          "content": {{ ((group | section_severity | sev_icon) ~ " **" ~ target_name ~ " · " ~ (group | section_severity | sev_label) ~ "**") | tojson }}
+        }
+      }
+      {% elif sections | length > 1 %}
+      ,{
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ "**(未标注主机)**" | tojson }}
         }
       }
       {% endif %}

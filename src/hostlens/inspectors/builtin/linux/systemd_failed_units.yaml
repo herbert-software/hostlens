@@ -20,10 +20,22 @@ collect:
   # than `{failed}` — `str.format` on the array would render a Python repr.
   # The empty case still prints a valid top-level object
   # ({"failed":[],"failed_names":""}) so parse_json never crashes (trap b).
+  # Each unit name is JSON-string-escaped (backslash FIRST, then double-quote)
+  # because systemd unit names may legally carry backslashes (e.g. C-escaped
+  # `\x2d` in path/instance-derived names) — emitting them raw would produce
+  # invalid JSON and crash parse_json. `$1` is whitespace-split so it never
+  # contains tabs/newlines; backslash + quote are the only reachable specials.
   command: |
     systemctl list-units --type=service --state=failed --no-legend --plain 2>/dev/null \
       | awk '
-          { unit=$1; if (unit != "") { arr[n++]=unit } }
+          {
+            unit=$1
+            if (unit != "") {
+              gsub(/\\/, "\\\\", unit)
+              gsub(/"/, "\\\"", unit)
+              arr[n++]=unit
+            }
+          }
           END {
             printf "{\"failed\":[";
             for (i=0;i<n;i++) { printf "%s{\"unit\":\"%s\"}", (i?",":""), arr[i] }

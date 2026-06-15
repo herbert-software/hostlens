@@ -28,6 +28,7 @@ from hostlens.notifiers._filters import (
     dedup_findings,
     fmt_time,
     group_by_target,
+    section_severity,
     sev_label,
     sort_sev,
 )
@@ -105,6 +106,7 @@ def _build_environment() -> jinja2.Environment:
     env.filters["dedup"] = dedup_findings
     env.filters["sort_sev"] = sort_sev
     env.filters["group_by_target"] = group_by_target
+    env.filters["section_severity"] = section_severity
     return env
 
 

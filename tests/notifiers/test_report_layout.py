@@ -390,8 +390,10 @@ def test_telegram_multi_target_sections() -> None:
         ]
     )
     body = _tg_body(report, "critical")
-    assert "*hostA*" in body
-    assert "*hostB*" in body
+    # Each section header carries the host's own max severity (spec「每节主机名 +
+    # 该主机 severity」): hostA's finding is critical, hostB's is warning.
+    assert "*hostA · 严重*" in body
+    assert "*hostB · 警告*" in body
     # hostA section holds its finding; hostB section holds its own.
     assert body.index("hostA") < body.index("磁盘满")
     assert body.index("hostB") < body.index("CPU 高")
@@ -412,9 +414,33 @@ def test_lark_multi_target_sections() -> None:
             ),
         ]
     )
-    contents = _lark_contents(_lark_card(report, "critical"))
-    assert "**hostA**" in contents
-    assert "**hostB**" in contents
+    joined = "\n".join(_lark_contents(_lark_card(report, "critical")))
+    # Per-host section header carries the host's own max severity.
+    assert "**hostA · 严重**" in joined
+    assert "**hostB · 警告**" in joined
+
+
+def test_telegram_none_section_gets_header_when_sectioned() -> None:
+    # A sectioned fleet report where one finding is unstamped (target_name None,
+    # e.g. partial fleet stamping) renders an explicit "(未标注主机)" header for
+    # the None group rather than silently folding it under the previous host.
+    base = _fleet_report(
+        [_ir("linux.disk", target="hostA", findings=[Finding(severity="info", message="seed")])]
+    )
+    report = base.model_copy(
+        update={
+            "findings": [
+                Finding(severity="critical", message="磁盘满", target_name="hostA"),
+                Finding(severity="warning", message="CPU 高", target_name="hostB"),
+                Finding(severity="info", message="未知来源项", target_name=None),
+            ]
+        }
+    )
+    body = _tg_body(report, "critical")
+    assert "(未标注主机)" in body
+    # The unstamped finding renders under its own header, after the named hosts.
+    assert body.index("未标注主机") < body.index("未知来源项")
+    assert body.index("hostA") < body.index("未标注主机")
 
 
 # --------------------------------------------------------------------------- #
@@ -436,8 +462,9 @@ def test_telegram_dedup_x_section_cross_host_not_merged() -> None:
     body = _tg_body(report, "critical")
     # Cross-host: two sections, each one finding → message appears twice total.
     assert body.count("磁盘满") == 2
-    assert "*hostA*" in body
-    assert "*hostB*" in body
+    # Both hosts' findings are critical → each section header shows 严重.
+    assert "*hostA · 严重*" in body
+    assert "*hostB · 严重*" in body
 
 
 def test_lark_dedup_x_section_cross_host_not_merged() -> None:
@@ -451,8 +478,9 @@ def test_lark_dedup_x_section_cross_host_not_merged() -> None:
     contents = _lark_contents(_lark_card(report, "critical"))
     disk = [c for c in contents if "磁盘满" in c]
     assert len(disk) == 2
-    assert "**hostA**" in contents
-    assert "**hostB**" in contents
+    joined = "\n".join(contents)
+    assert "**hostA · 严重**" in joined
+    assert "**hostB · 严重**" in joined
 
 
 # --------------------------------------------------------------------------- #

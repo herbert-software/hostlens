@@ -19,7 +19,7 @@
       "duration_seconds": 0.0
     },
     {
-      "cmd": "systemctl list-units --type=service --state=failed --no-legend --plain 2>/dev/null \\\n  | awk '\n      { unit=$1; if (unit != \"\") { arr[n++]=unit } }\n      END {\n        printf \"{\\\"failed\\\":[\";\n        for (i=0;i<n;i++) { printf \"%s{\\\"unit\\\":\\\"%s\\\"}\", (i?\",\":\"\"), arr[i] }\n        printf \"],\\\"failed_names\\\":\\\"\";\n        for (i=0;i<n;i++) { printf \"%s%s\", (i?\", \":\"\"), arr[i] }\n        printf \"\\\"}\";\n      }'",
+      "cmd": "systemctl list-units --type=service --state=failed --no-legend --plain 2>/dev/null \\\n  | awk '\n      {\n        unit=$1\n        if (unit != \"\") {\n          gsub(/\\\\/, \"\\\\\\\\\", unit)\n          gsub(/\"/, \"\\\\\\\"\", unit)\n          arr[n++]=unit\n        }\n      }\n      END {\n        printf \"{\\\"failed\\\":[\";\n        for (i=0;i<n;i++) { printf \"%s{\\\"unit\\\":\\\"%s\\\"}\", (i?\",\":\"\"), arr[i] }\n        printf \"],\\\"failed_names\\\":\\\"\";\n        for (i=0;i<n;i++) { printf \"%s%s\", (i?\", \":\"\"), arr[i] }\n        printf \"\\\"}\";\n      }'",
       "stdout": "{\"failed\":[{\"unit\":\"nginx.service\"},{\"unit\":\"mysql.service\"}],\"failed_names\":\"nginx.service, mysql.service\"}",
       "stderr": "",
       "exit_code": 0,
