@@ -9,6 +9,7 @@ injected-registry contract is exercised end-to-end — no mock registry.
 
 from __future__ import annotations
 
+import functools
 import textwrap
 from pathlib import Path
 
@@ -38,11 +39,16 @@ def _registry(*names: str) -> TargetRegistry:
     return build_registry_from_config(config, Settings())
 
 
+@functools.cache
 def _ireg() -> InspectorRegistry:
     """Real builtin `InspectorRegistry` (carries `net.listening_ports` with its
     `allowed_processes` / `allowed_ports` parameters and the no-parameters
     health inspectors), so loader parameter validation runs against real
-    inspector schemas — no mock registry."""
+    inspector schemas — no mock registry.
+
+    Cached (module-scope) since the loader only reads it (``registry.get``);
+    rebuilding the full builtin registry per call across the ~30 call sites is
+    wasted work, and the read-only use makes a shared instance safe."""
 
     return build_registry_from_search_paths([], settings=Settings()).registry
 

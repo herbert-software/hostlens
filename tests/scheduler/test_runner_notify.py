@@ -487,9 +487,7 @@ def test_load_with_notify_does_not_require_notifiers_yaml(tmp_path: Path) -> Non
 
     # No notifiers.yaml is read, no channel-existence check — only the only_if
     # syntax is validated at load time. Loading must succeed.
-    manifests = load_schedules(
-        tmp_path, registry, build_registry_from_search_paths([], settings=Settings()).registry
-    )
+    manifests = load_schedules(tmp_path, registry, _make_inspector_registry())
     assert len(manifests) == 1
     assert manifests[0].notify[0].channel == "ops-telegram"
 
@@ -524,9 +522,7 @@ def test_load_rejects_invalid_only_if(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigError) as exc:
-        load_schedules(
-            tmp_path, registry, build_registry_from_search_paths([], settings=Settings()).registry
-        )
+        load_schedules(tmp_path, registry, _make_inspector_registry())
     assert "only_if" in str(exc.value)
 
 
