@@ -36,6 +36,7 @@ from hostlens.core.exceptions import TargetError, ToolError
 from hostlens.inspectors.health import DEFAULT_HEALTH_INSPECTORS
 from hostlens.inspectors.registry import InspectorRegistry
 from hostlens.inspectors.result import InspectorResult
+from hostlens.inspectors.runner import InspectorRunner
 from hostlens.inspectors.schema import (
     CollectSpec,
     FindingRule,
@@ -492,3 +493,175 @@ def test_collection_returns_inspector_results_only_no_backend() -> None:
     results = asyncio.run(run_deterministic_inspection(factory, ["a"], inspectors=["test.cpu"]))
     assert isinstance(results, list)
     assert all(isinstance(r, InspectorResult) for r in results)
+
+
+# --------------------------------------------------------------------------- #
+# inspector_parameters pass-through (spec §需求:deterministic 模式必须把
+# manifest.inspector_parameters 透传给匹配的 inspector)
+# --------------------------------------------------------------------------- #
+
+
+def _spy_runner_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, dict[str, Any] | None]:
+    """Record the ``parameters`` value each ``InspectorRunner.run`` is called
+    with, keyed by inspector name, while delegating to the real ``run``.
+
+    The runner is constructed inside ``run_deterministic_inspection``, so the
+    spy patches the class method (object-style ``setattr`` per MEMORY's
+    same-process-flake note) rather than an instance.
+    """
+    captured: dict[str, dict[str, Any] | None] = {}
+    original = InspectorRunner.run
+
+    async def _spy(
+        self: InspectorRunner,
+        manifest: InspectorManifest,
+        target: Any,
+        parameters: dict[str, Any] | None = None,
+        *,
+        allow_privileged: bool = False,
+        cancel: asyncio.Event | None = None,
+    ) -> InspectorResult:
+        captured[manifest.name] = parameters
+        return await original(
+            self,
+            manifest,
+            target,
+            parameters,
+            allow_privileged=allow_privileged,
+            cancel=cancel,
+        )
+
+    monkeypatch.setattr(InspectorRunner, "run", _spy)
+    return captured
+
+
+def test_inspector_parameters_hit_passes_declared_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §场景:命中 inspector 收到声明的参数 — a key present in inspector_parameters
+    # reaches InspectorRunner.run verbatim.
+    cpu = _manifest("test.cpu")
+    inspector_registry = _inspector_registry(cpu)
+    target_registry = _target_registry(_CaptureTarget("a"))
+    factory = _context_factory(target_registry, inspector_registry)
+
+    captured = _spy_runner_parameters(monkeypatch)
+    declared = {"allowed_processes": ["derper"]}
+
+    asyncio.run(
+        run_deterministic_inspection(
+            factory,
+            ["a"],
+            inspectors=["test.cpu"],
+            inspector_parameters={"test.cpu": declared},
+        )
+    )
+    assert captured["test.cpu"] == declared
+
+
+def test_inspector_parameters_miss_passes_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §场景:未命中 inspector 收到 None — an inspector absent from
+    # inspector_parameters runs with parameters=None (default params).
+    cpu = _manifest("test.cpu")
+    disk = _manifest("test.disk")
+    inspector_registry = _inspector_registry(cpu, disk)
+    target_registry = _target_registry(_CaptureTarget("a"))
+    factory = _context_factory(target_registry, inspector_registry)
+
+    captured = _spy_runner_parameters(monkeypatch)
+
+    asyncio.run(
+        run_deterministic_inspection(
+            factory,
+            ["a"],
+            inspectors=["test.cpu", "test.disk"],
+            inspector_parameters={"test.cpu": {"allowed_processes": ["derper"]}},
+        )
+    )
+    # test.cpu hit; test.disk missing → None.
+    assert captured["test.cpu"] == {"allowed_processes": ["derper"]}
+    assert captured["test.disk"] is None
+
+
+def test_inspector_parameters_present_but_empty_passes_empty_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §场景:命中但值为空 dict 收到空 dict — a present-but-{} entry is a hit and
+    # yields {} (not the miss-case None).
+    cpu = _manifest("test.cpu")
+    inspector_registry = _inspector_registry(cpu)
+    target_registry = _target_registry(_CaptureTarget("a"))
+    factory = _context_factory(target_registry, inspector_registry)
+
+    captured = _spy_runner_parameters(monkeypatch)
+
+    asyncio.run(
+        run_deterministic_inspection(
+            factory,
+            ["a"],
+            inspectors=["test.cpu"],
+            inspector_parameters={"test.cpu": {}},
+        )
+    )
+    received = captured["test.cpu"]
+    assert received == {}
+    assert received is not None  # a hit, not the miss-case None
+
+
+def test_inspector_parameters_empty_dict_on_paramless_inspector_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §场景:命中无参 inspector 且值为空 dict 无副作用 — test.cpu has no
+    # ``parameters`` block; receiving {} is a harmless no-op (runner skips the
+    # validate/defaults/coerce stage, {} never enters the finding DSL), and the
+    # inspector still produces its real result.
+    cpu = _manifest("test.cpu")
+    assert cpu.parameters is None  # the fixture inspector declares no parameters
+    inspector_registry = _inspector_registry(cpu)
+    target_registry = _target_registry(_CaptureTarget("a"))
+    factory = _context_factory(target_registry, inspector_registry)
+
+    captured = _spy_runner_parameters(monkeypatch)
+
+    results = asyncio.run(
+        run_deterministic_inspection(
+            factory,
+            ["a"],
+            inspectors=["test.cpu"],
+            inspector_parameters={"test.cpu": {}},
+        )
+    )
+    assert captured["test.cpu"] == {}
+    # Harmless no-op: the run still succeeds with its normal finding.
+    assert len(results) == 1
+    assert results[0].status == "ok"
+
+
+def test_inspector_parameters_empty_mapping_all_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §场景:空 inspector_parameters 行为不变 — None / {} both yield parameters=None
+    # for every inspector (byte-for-byte the pre-feature behaviour).
+    cpu = _manifest("test.cpu")
+    disk = _manifest("test.disk")
+    inspector_registry = _inspector_registry(cpu, disk)
+    target_registry = _target_registry(_CaptureTarget("a"))
+    factory = _context_factory(target_registry, inspector_registry)
+
+    empties: tuple[dict[str, dict[str, Any]] | None, ...] = (None, {})
+    for empty in empties:
+        captured = _spy_runner_parameters(monkeypatch)
+        asyncio.run(
+            run_deterministic_inspection(
+                factory,
+                ["a"],
+                inspectors=["test.cpu", "test.disk"],
+                inspector_parameters=empty,
+            )
+        )
+        assert captured["test.cpu"] is None
+        assert captured["test.disk"] is None

@@ -13,7 +13,7 @@ removed, this test fails loudly instead of letting a deterministic run hit
 from __future__ import annotations
 
 from hostlens.core.config import Settings
-from hostlens.inspectors.health import DEFAULT_HEALTH_INSPECTORS
+from hostlens.inspectors.health import DEFAULT_HEALTH_INSPECTORS, resolve_inspector_set
 from hostlens.inspectors.registry import build_registry_from_search_paths
 
 
@@ -53,3 +53,24 @@ def test_default_health_inspectors_covers_core_domains() -> None:
         "net.listening_ports",
     }
     assert required <= set(DEFAULT_HEALTH_INSPECTORS)
+
+
+def test_resolve_inspector_set_reexport_is_same_object() -> None:
+    # `resolve_inspector_set` lives in `inspectors.health` (next to
+    # DEFAULT_HEALTH_INSPECTORS); `orchestration.deterministic` re-exports it
+    # so the legacy import path still works. Asserting object *identity* (not
+    # just behaviour) is the guard: a future "remove unused import" cleanup of
+    # the re-export would silently break the deterministic-path import in
+    # tests/orchestration/test_deterministic_collection.py — identity catches it.
+    from hostlens.orchestration.deterministic import (
+        resolve_inspector_set as reexported,
+    )
+
+    assert reexported is resolve_inspector_set
+
+
+def test_resolve_inspector_set_behaviour() -> None:
+    assert resolve_inspector_set(None) == DEFAULT_HEALTH_INSPECTORS
+    assert resolve_inspector_set(["x"]) == ("x",)
+    # Non-None is verbatim, never unioned with the default set.
+    assert resolve_inspector_set([]) == ()

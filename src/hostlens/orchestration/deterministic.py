@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from hostlens.agent.diagnostician import (
     DiagnosticianAgent,
@@ -59,7 +59,7 @@ from hostlens.agent.diagnostician import (
 )
 from hostlens.agent.loop import LoopUsage
 from hostlens.core.exceptions import InspectorError, ToolError
-from hostlens.inspectors.health import DEFAULT_HEALTH_INSPECTORS
+from hostlens.inspectors.health import resolve_inspector_set
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.reporting.models import Finding, Report, TokenUsage
 from hostlens.tools.diagnostician_tools import register_narrate_only_diagnostician_tools
@@ -99,29 +99,12 @@ _DIAGNOSIS_NARRATIVE_KEY = "diagnosis_narrative"
 DEFAULT_DETERMINISTIC_CONCURRENCY = 8
 
 
-def resolve_inspector_set(inspectors: Sequence[str] | None) -> tuple[str, ...]:
-    """Resolve the authoritative inspector set for a deterministic run.
-
-    `inspectors is None` (manifest declared no `inspectors:`) → the curated
-    `DEFAULT_HEALTH_INSPECTORS`. A non-None list → that list verbatim, as
-    the **authoritative** set (deterministic mode does not treat
-    `manifest.inspectors` as a soft hint and never unions it with the
-    default set — spec §场景:显式 inspectors 变权威集). An explicitly empty
-    list is honoured as "run nothing" (the caller / loader is responsible
-    for rejecting an empty list if that is undesirable; this resolver does
-    not silently fall back to the default for `[]`, which would resurrect
-    the soft-hint behaviour the spec forbids).
-    """
-    if inspectors is None:
-        return DEFAULT_HEALTH_INSPECTORS
-    return tuple(inspectors)
-
-
 async def run_deterministic_inspection(
     context_factory: Callable[[], ToolContext],
     targets: Sequence[str],
     *,
     inspectors: Sequence[str] | None = None,
+    inspector_parameters: dict[str, dict[str, Any]] | None = None,
     concurrency: int = DEFAULT_DETERMINISTIC_CONCURRENCY,
 ) -> list[InspectorResult]:
     """Run the resolved inspector set against every target; return all results.
@@ -207,11 +190,14 @@ async def run_deterministic_inspection(
     semaphore = asyncio.Semaphore(concurrency)
 
     async def _bounded(manifest: InspectorManifest, target: ExecutionTarget) -> InspectorResult:
+        # Missing key -> None (default params); a present-but-{} entry is a hit
+        # and yields {} (semantically "matched, empty params"), not None.
+        params = (inspector_parameters or {}).get(manifest.name)
         async with semaphore:
             return await runner.run(
                 manifest,
                 target,
-                parameters=None,
+                parameters=params,
                 allow_privileged=False,
                 cancel=ctx.cancel,
             )
@@ -253,6 +239,7 @@ async def run_deterministic_pipeline(
     targets: list[str],
     inspectors: list[str] | None,
     intent: str,
+    inspector_parameters: dict[str, dict[str, Any]] | None = None,
     schedule_name: str | None = None,
     observer: LoopObserver | None = None,
 ) -> Report | None:
@@ -308,6 +295,7 @@ async def run_deterministic_pipeline(
         context_factory,
         targets,
         inspectors=inspectors,
+        inspector_parameters=inspector_parameters,
     )
 
     if not inspector_results:

@@ -498,6 +498,7 @@ class SchedulerRunner:
                 targets=list(manifest.targets),
                 inspectors=manifest.inspectors,
                 intent=manifest.intent,
+                inspector_parameters=manifest.inspector_parameters,
                 schedule_name=manifest.name,
             )
 

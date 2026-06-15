@@ -208,6 +208,7 @@ def _patch_collection(monkeypatch: pytest.MonkeyPatch, results: list[InspectorRe
         targets: Any,
         *,
         inspectors: Any = None,
+        inspector_parameters: Any = None,
         concurrency: int = det.DEFAULT_DETERMINISTIC_CONCURRENCY,
     ) -> list[InspectorResult]:
         return results

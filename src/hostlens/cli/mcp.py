@@ -146,6 +146,7 @@ def _build_channels(settings: Settings) -> dict[str, Notifier]:
 def _build_management_deps(
     settings: Settings,
     target_registry: TargetRegistry,
+    inspector_registry: InspectorRegistry,
     logger: structlog.stdlib.BoundLogger,
     backend_factory: _Callable[[], LLMBackend],
 ) -> ManagementToolDeps:
@@ -169,7 +170,7 @@ def _build_management_deps(
         logger=logger,
     )
     return ManagementToolDeps(
-        load_manifests=lambda: load_schedules(_SCHEDULES_DIR, target_registry),
+        load_manifests=lambda: load_schedules(_SCHEDULES_DIR, target_registry, inspector_registry),
         run_store=run_store,
         report_store=report_store,
         load_channel_summaries=make_load_channel_summaries(settings),
@@ -217,7 +218,9 @@ def serve_cmd() -> None:
     # running state — map it to a clean exit 2 (config error), never a raw
     # traceback (exit 1 stays reserved for SDK / policy / backend rejections).
     try:
-        deps = _build_management_deps(settings, target_registry, logger, backend_factory)
+        deps = _build_management_deps(
+            settings, target_registry, inspector_registry, logger, backend_factory
+        )
     except ConfigError as exc:
         typer.echo(
             f"hostlens mcp serve: configuration error: {redact_text(str(exc))}",

@@ -39,15 +39,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import jsonschema
 import simpleeval
 import yaml
 from pydantic import ValidationError
 
-from hostlens.core.exceptions import ConfigError
+from hostlens.core.exceptions import ConfigError, InspectorError
+from hostlens.inspectors.health import resolve_inspector_set
+from hostlens.inspectors.runner import coerce_and_validate_parameters
 from hostlens.notifiers.routing import validate_only_if
 from hostlens.scheduler.schema import ScheduleManifest
 
 if TYPE_CHECKING:
+    from hostlens.inspectors.registry import InspectorRegistry
     from hostlens.targets.registry import TargetRegistry
 
 __all__ = ["load_schedules"]
@@ -56,13 +60,18 @@ __all__ = ["load_schedules"]
 def load_schedules(
     schedules_dir: Path,
     target_registry: TargetRegistry,
+    inspector_registry: InspectorRegistry,
 ) -> list[ScheduleManifest]:
     """Load + validate every ``*.yaml`` under ``schedules_dir``.
 
-    ``target_registry`` is **injected** (not pulled from a module-level
-    singleton) so test fixtures can drive validation with a custom / empty
-    registry. A missing or empty directory yields an empty list (no error —
-    "no schedules configured" is a valid state).
+    ``target_registry`` / ``inspector_registry`` are **injected** (not pulled
+    from module-level singletons) so test fixtures can drive validation with a
+    custom / empty registry. A missing or empty directory yields an empty list
+    (no error — "no schedules configured" is a valid state). The inspector
+    registry mirrors the target registry: ``targets`` membership is checked
+    against the target registry, ``inspector_parameters`` against the inspector
+    registry (parameter keys must name a registered, parameterised inspector
+    inside the deterministic run set).
 
     Raises ``ConfigError`` (with ``kind`` + ``file`` + ``field`` + reason)
     on the first invalid manifest. Files are processed in sorted order so
@@ -160,9 +169,122 @@ def load_schedules(
             )
         seen_names[manifest.name] = path.name
 
+        # (f) inspector_parameters: deterministic-only, key in the run set,
+        # registered + parameterised inspector, values valid by the inspector's
+        # own schema. Every failure is translated to ConfigError (no InspectorError
+        # / SchemaError / ValidationError leaks out of the loader contract).
+        _validate_inspector_parameters(manifest, inspector_registry, path.name)
+
         manifests.append(manifest)
 
     return manifests
+
+
+def _validate_inspector_parameters(
+    manifest: ScheduleManifest,
+    inspector_registry: InspectorRegistry,
+    file: str,
+) -> None:
+    """Fail-loud validation of ``inspector_parameters`` (design decision 2).
+
+    Five ordered steps, all mapped to ``ConfigError`` so the loader contract
+    only ever surfaces that one type (a bare ``InspectorError`` / ``SchemaError``
+    / ``ValidationError`` would crash ``schedule`` CLI / ``doctor`` whose except
+    tuples do not accept them):
+
+    1. mode applicability — non-empty parameters under a non-deterministic mode.
+    2. key membership — key must be in ``resolve_inspector_set(inspectors)``
+       (the explicit ``inspectors:`` set is authoritative, never unioned with
+       the default health set).
+    3. inspector registered — ``registry.get(key)`` may raise ``InspectorError``
+       for a typo'd / unloaded inspector name that passed step 2 (explicit sets
+       are returned verbatim, not membership-checked against the registry).
+    4. inspector parameterised — a no-``parameters:`` inspector silently drops
+       non-empty params at runtime, so the loader rejects them outright.
+    5. values valid — the same coerce+validate helper the runner uses, so the
+       loader and runner accept the identical parameter set.
+    """
+
+    params_by_key = manifest.inspector_parameters
+    if not params_by_key:
+        return
+
+    # Step 1: agent (or omitted) mode never consumes inspector_parameters;
+    # silently accepting them would mislead the user into thinking they apply.
+    if manifest.mode != "deterministic":
+        raise ConfigError(
+            "inspector_parameters only applies to mode: deterministic; "
+            "agent mode does not consume per-inspector parameters",
+            kind="schedule_inspector_parameters_mode_unsupported",
+            file=file,
+            field="inspector_parameters",
+            mode=manifest.mode,
+        )
+
+    run_set = set(resolve_inspector_set(manifest.inspectors))
+
+    for key, params in params_by_key.items():
+        # Step 2: key must be in the authoritative deterministic run set.
+        if key not in run_set:
+            raise ConfigError(
+                "inspector_parameters key is not in the deterministic run set; "
+                "the explicit inspectors list (or the default health set) is "
+                "authoritative",
+                kind="schedule_inspector_parameters_key_not_in_set",
+                file=file,
+                field="inspector_parameters",
+                key=key,
+            )
+
+        # Step 3: the inspector named by the key must be registered. An explicit
+        # inspectors set is returned verbatim by resolve_inspector_set, so a
+        # member can be a typo / unloaded user inspector — registry.get raises
+        # InspectorError which we translate (never leak).
+        try:
+            inspector = inspector_registry.get(key)
+        except InspectorError as exc:
+            raise ConfigError(
+                "inspector_parameters key names an inspector that is not "
+                "registered (unknown name, or a user inspector that failed to "
+                "load)",
+                kind="schedule_inspector_parameters_inspector_not_registered",
+                file=file,
+                field="inspector_parameters",
+                key=key,
+            ) from exc
+
+        # Step 4: a no-parameters inspector drops params silently at runtime;
+        # loader-only production gate rejects them. An empty {} is a no-op.
+        if inspector.parameters is None:
+            if params:
+                raise ConfigError(
+                    "inspector_parameters target inspector does not accept "
+                    "parameters (its manifest declares no parameters: block)",
+                    kind="schedule_inspector_parameters_not_accepted",
+                    file=file,
+                    field="inspector_parameters",
+                    key=key,
+                )
+            continue
+
+        # Step 5: values valid by the inspector's own schema, via the same
+        # helper the runner uses (accept sets identical). Both jsonschema
+        # exception classes are caught: ValidationError (bad value / typo'd /
+        # pattern-rejected key) and SchemaError (the inspector's own parameters
+        # schema is malformed) — only catching the former would let SchemaError
+        # escape the loader contract.
+        try:
+            coerce_and_validate_parameters(params, inspector)
+        except (jsonschema.ValidationError, jsonschema.exceptions.SchemaError) as exc:
+            raise ConfigError(
+                "inspector_parameters value failed validation against the "
+                "inspector's parameters schema",
+                kind="schedule_inspector_parameters_invalid",
+                file=file,
+                field="inspector_parameters",
+                key=key,
+                reason=str(exc).splitlines()[0],
+            ) from exc
 
 
 def _load_one(path: Path) -> ScheduleManifest:

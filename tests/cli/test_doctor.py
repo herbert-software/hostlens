@@ -958,3 +958,41 @@ def test_doctor_schedules_json_top_schema_unchanged(
         "unreadable",
         "error",
     }
+
+
+def test_doctor_schedules_inspector_registry_build_error_does_not_crash(
+    schedules_dir: Path,
+    targets_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fatal inspector-registry build (bad builtin) → ``error``, no crash.
+
+    The loader validates ``inspector_parameters`` against the inspector
+    registry, so ``_check_schedules`` builds one. When that build raises a
+    fatal ``InspectorError`` (e.g. a malformed builtin manifest), doctor must
+    catch it and report ``status="error"`` rather than crash — the M4
+    "doctor must not crash on a bad manifest" invariant extended to the
+    inspector-registry build.
+    """
+
+    from hostlens.cli.doctor import _check_schedules
+    from hostlens.core.config import Settings
+    from hostlens.core.exceptions import InspectorError
+
+    _write_yaml(
+        targets_yaml,
+        {"version": "1", "targets": [{"name": "local-host", "type": "local"}]},
+    )
+    _write_schedule(schedules_dir / "demo.yaml", name="demo", target="local-host")
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise InspectorError(kind="duplicate_inspector", inspector="x")
+
+    monkeypatch.setattr("hostlens.cli.doctor.build_registry_from_search_paths", _boom)
+
+    settings = Settings(targets_config_path=targets_yaml)
+    check = _check_schedules(settings)
+
+    assert check.status == "error"
+    assert check.detail is not None
+    assert "duplicate_inspector" in check.detail

@@ -185,6 +185,7 @@ def _patch_collection(monkeypatch: pytest.MonkeyPatch, results: list[InspectorRe
         targets: Any,
         *,
         inspectors: Any = None,
+        inspector_parameters: dict[str, dict[str, Any]] | None = None,
         concurrency: int = det.DEFAULT_DETERMINISTIC_CONCURRENCY,
     ) -> list[InspectorResult]:
         return results
@@ -355,6 +356,42 @@ async def test_pipeline_no_backend_in_tool_context(
     assert report is not None
     ctx = _ctx_factory()
     assert not hasattr(ctx, "llm_backend")
+
+
+async def test_pipeline_forwards_inspector_parameters_to_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # §场景:透传链 pipeline→inspection 不丢 — run_deterministic_pipeline forwards
+    # its inspector_parameters kwarg straight into run_deterministic_inspection.
+    seen: dict[str, dict[str, dict[str, Any]] | None] = {}
+
+    async def _capture_collect(
+        context_factory: Any,
+        targets: Any,
+        *,
+        inspectors: Any = None,
+        inspector_parameters: dict[str, dict[str, Any]] | None = None,
+        concurrency: int = det.DEFAULT_DETERMINISTIC_CONCURRENCY,
+    ) -> list[InspectorResult]:
+        seen["inspector_parameters"] = inspector_parameters
+        return [_result(target_name="host-a", findings=[_finding("warm", "warning")])]
+
+    monkeypatch.setattr(det, "run_deterministic_inspection", _capture_collect)
+    backend = FakeBackend(responses=[_end_turn("done")])
+
+    declared = {"net.listening_ports": {"allowed_processes": ["derper"]}}
+    report = await run_deterministic_pipeline(
+        cast(LLMBackend, backend),
+        _settings(),
+        _ctx_factory,
+        targets=["host-a"],
+        inspectors=["net.listening_ports"],
+        intent="daily health",
+        inspector_parameters=declared,
+        schedule_name="daily-health-fleet",
+    )
+    assert report is not None
+    assert seen["inspector_parameters"] == declared
 
 
 def test_compute_finding_id_anchor_matches_fleet_findings() -> None:

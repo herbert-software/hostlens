@@ -29,6 +29,7 @@ import structlog
 
 from hostlens.core.config import Settings
 from hostlens.inspectors.loader import load_manifest
+from hostlens.inspectors.registry import build_registry_from_search_paths
 from hostlens.inspectors.result import InspectorResult
 from hostlens.inspectors.runner import InspectorRunner
 from hostlens.targets.base import Capability, ExecResult
@@ -135,6 +136,113 @@ async def test_listening_ports_ok_no_findings() -> None:
     assert replay.misses == []
     assert result.status == "ok"
     assert result.findings == []
+
+
+# --- allowed_processes exemption (add-schedule-inspector-parameters group C) - #
+#
+# The collector command is parameter-independent (`allowed_processes` is a
+# Finding DSL membership term, never interpolated into the shell), so the same
+# recorded `listening_ports_unexpected.json` fixture (wildcard sshd:22 and
+# redis-server:6379) serves every `allowed_processes` variant — only the
+# parameters passed to `runner.run` change. These tests are the explicit
+# security-semantics anchors from design decision 4 / 5: process exemption,
+# port exemption (original path, unchanged), and the empty-process conservative
+# boundary.
+
+
+def test_listening_ports_manifest_builds_with_string_array_pattern() -> None:
+    """The string-typed `allowed_processes` array must carry an items `pattern`.
+
+    The inspector-authoring-contract makes a string-typed array WITHOUT a
+    `pattern`/`enum` a fatal load error for a builtin (`registry.build` would
+    collect it / crash). Building the builtin registry and asserting
+    `errors == []` proves the new `^[A-Za-z0-9._@-]+$` pattern satisfies the
+    contract and `net.listening_ports` still loads.
+    """
+
+    result = build_registry_from_search_paths([], settings=Settings())
+    assert result.errors == []
+    assert "net.listening_ports" in result.registry.names()
+
+
+async def test_listening_ports_process_exempt_no_finding() -> None:
+    """A wildcard listener whose process is in `allowed_processes` is exempt."""
+
+    replay, result = await _run(
+        "listening_ports",
+        "listening_ports_unexpected.json",
+        parameters={"allowed_ports": [], "allowed_processes": ["sshd", "redis-server"]},
+    )
+
+    assert replay.misses == []
+    assert result.status == "ok"
+    # Both wildcard listeners (sshd:22, redis-server:6379) are process-exempt;
+    # the non-wildcard postgres:5432 never qualified.
+    assert result.findings == []
+
+
+async def test_listening_ports_process_not_exempt_warns() -> None:
+    """A wildcard listener whose process is NOT in `allowed_processes` warns."""
+
+    replay, result = await _run(
+        "listening_ports",
+        "listening_ports_unexpected.json",
+        parameters={"allowed_ports": [], "allowed_processes": ["sshd"]},
+    )
+
+    assert replay.misses == []
+    assert result.status == "ok"
+    # sshd:22 is process-exempt; redis-server:6379 is not → single warning.
+    assert [(f.severity, f.message) for f in result.findings] == [
+        (
+            "warning",
+            "Unexpected public listener on port 6379 (0.0.0.0, process=redis-server)",
+        ),
+    ]
+
+
+async def test_listening_ports_port_exempt_still_no_finding() -> None:
+    """The original `allowed_ports` path still exempts a wildcard port.
+
+    With an empty `allowed_processes`, exempting both wildcard ports by number
+    must still produce zero findings (the new `when` conjunct does not regress
+    the port-allowlist path).
+    """
+
+    replay, result = await _run(
+        "listening_ports",
+        "listening_ports_unexpected.json",
+        parameters={"allowed_ports": [22, 6379], "allowed_processes": []},
+    )
+
+    assert replay.misses == []
+    assert result.status == "ok"
+    assert result.findings == []
+
+
+async def test_listening_ports_empty_process_conservative_warns() -> None:
+    """An empty process name is conservatively treated as UNexempt.
+
+    A non-privileged probe cannot read another user's socket identity, so the
+    `process` field can come back empty. `"" not in <non-empty allowlist>` is
+    true, so the wildcard listener still warns — unattributable wildcard
+    listeners must stay visible (design decision 4 boundary).
+    """
+
+    replay, result = await _run(
+        "listening_ports",
+        "listening_ports_empty_process.json",
+        parameters={"allowed_ports": [], "allowed_processes": ["node-exporter"]},
+    )
+
+    assert replay.misses == []
+    assert result.status == "ok"
+    assert [(f.severity, f.message) for f in result.findings] == [
+        (
+            "warning",
+            "Unexpected public listener on port 9100 (0.0.0.0, process=)",
+        ),
+    ]
 
 
 # --------------------------------------------------------------------------- #

@@ -191,12 +191,14 @@ def _build_inspector_registry(settings: Settings) -> InspectorRegistry:
 
 
 def _load_manifests_or_exit(
-    settings: Settings, target_registry: TargetRegistry
+    settings: Settings,
+    target_registry: TargetRegistry,
+    inspector_registry: InspectorRegistry,
 ) -> list[ScheduleManifest]:
     """Load + validate every manifest; fail-loud (exit 2) on the first invalid one."""
 
     try:
-        return load_schedules(_SCHEDULES_DIR, target_registry)
+        return load_schedules(_SCHEDULES_DIR, target_registry, inspector_registry)
     except ConfigError as exc:
         file = getattr(exc, "file", None)
         prefix = f"{file}: " if file else ""
@@ -325,7 +327,8 @@ def list_cmd() -> None:
     settings = _load_settings_or_exit()
     configure_logging(settings.log_mode)
     target_registry = _build_target_registry(settings)
-    manifests = _load_manifests_or_exit(settings, target_registry)
+    inspector_registry = _build_inspector_registry(settings)
+    manifests = _load_manifests_or_exit(settings, target_registry, inspector_registry)
 
     if not manifests:
         typer.echo("no schedules configured; add a manifest under schedules/*.yaml")
@@ -359,7 +362,7 @@ def trigger_cmd(
     logger = structlog.get_logger("hostlens.schedule.trigger")
     target_registry = _build_target_registry(settings)
     inspector_registry = _build_inspector_registry(settings)
-    manifests = _load_manifests_or_exit(settings, target_registry)
+    manifests = _load_manifests_or_exit(settings, target_registry, inspector_registry)
 
     if name not in {m.name for m in manifests}:
         _fail(f"unknown schedule name: {name!r} (not in loaded manifests)")
@@ -431,7 +434,7 @@ def _serve(*, daemon: bool, log_file: Path | None) -> None:
 
     target_registry = _build_target_registry(daemon_settings)
     inspector_registry = _build_inspector_registry(daemon_settings)
-    manifests = _load_manifests_or_exit(daemon_settings, target_registry)
+    manifests = _load_manifests_or_exit(daemon_settings, target_registry, inspector_registry)
 
     try:
         # Eager backend construction at boot so the daemon-safety gate fails
@@ -523,7 +526,8 @@ def status_cmd(
     settings = _load_settings_or_exit()
     configure_logging(settings.log_mode)
     target_registry = _build_target_registry(settings)
-    manifests = _load_manifests_or_exit(settings, target_registry)
+    inspector_registry = _build_inspector_registry(settings)
+    manifests = _load_manifests_or_exit(settings, target_registry, inspector_registry)
 
     if name is not None and name not in {m.name for m in manifests}:
         _fail(f"unknown schedule name: {name!r} (not in loaded manifests)")

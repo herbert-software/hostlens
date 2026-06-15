@@ -294,6 +294,25 @@ _SCENARIOS: tuple[_Scenario, ...] = (
         expect_findings=False,
         parameters={"allowed_ports": [22, 443]},
     ),
+    _Scenario(
+        # add-schedule-inspector-parameters group C: a wildcard listener whose
+        # owning process came back empty (non-privileged probe cannot read
+        # another user's socket identity). With the default empty
+        # `allowed_processes`, the conservative boundary (`"" not in []` is
+        # true) still flags it. Used by the empty-process / non-empty-allowlist
+        # finding test (the collector command is parameter-independent, so this
+        # one recorded fixture serves every `allowed_processes` variant of the
+        # empty-process row).
+        inspector="listening_ports",
+        out_name="listening_ports_empty_process.json",
+        main_stdout=(
+            '{"results":['
+            '{"address":"0.0.0.0","port":9100,"wildcard":true,"process":""},'
+            '{"address":"127.0.0.1","port":5432,"wildcard":false,"process":"postgres"}'
+            "]}"
+        ),
+        expect_findings=True,
+    ),
     # ---- net.dns.resolve ------------------------------------------------ #
     _Scenario(
         inspector="dns_resolve",

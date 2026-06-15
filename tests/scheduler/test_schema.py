@@ -229,3 +229,34 @@ def test_valid_job_id_name_accepted() -> None:
     manifest = ScheduleManifest.model_validate(data)
 
     assert manifest.name == "demo-local-health"
+
+
+def test_inspector_parameters_defaults_to_empty_dict() -> None:
+    # Omitting inspector_parameters yields {} — behaviour identical to before
+    # the field existed (deterministic pass-through gets no per-inspector
+    # overrides). See schedule-manifest spec §场景:省略 inspector_parameters.
+    manifest = ScheduleManifest.model_validate(_valid_interval_manifest())
+
+    assert manifest.inspector_parameters == {}
+
+
+def test_inspector_parameters_parses_dict_of_dict() -> None:
+    data = _valid_interval_manifest()
+    data["inspector_parameters"] = {"net.listening_ports": {"allowed_processes": ["derper"]}}
+    manifest = ScheduleManifest.model_validate(data)
+
+    assert manifest.inspector_parameters["net.listening_ports"]["allowed_processes"] == ["derper"]
+
+
+def test_inspector_parameters_scalar_value_rejected() -> None:
+    # The OUTER shape (value must be a mapping) is enforced by Pydantic; a
+    # scalar value is rejected. This does NOT assert the inner schema is
+    # validated here — inner validity is judged by the loader against the
+    # inspector's own `parameters` schema.
+    data = _valid_interval_manifest()
+    data["inspector_parameters"] = {"net.listening_ports": "derper"}
+
+    with pytest.raises(ValidationError) as exc:
+        ScheduleManifest.model_validate(data)
+
+    assert "inspector_parameters" in str(exc.value)

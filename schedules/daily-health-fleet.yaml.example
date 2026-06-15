@@ -1,0 +1,46 @@
+# daily-health-fleet —— deterministic fleet 巡检 + 按进程名豁免（示例）
+#
+# 这是一个 *.yaml.example 模板，**不被 `schedules/*.yaml` 扫描**（loader 只 glob `*.yaml`），
+# 所以放在仓内不会让 fresh checkout 的 `schedule list` / `doctor checks.schedules` 因
+# `ts-*` target 未注册而 fail-loud 报错。
+#
+# 落地步骤：
+#   1) 先用 `hostlens target add ...`（或 CLI 批量导入）注册下面 targets: 里的每台机器，
+#      否则 loader 的 target-membership 校验会拒绝（target 未注册 → schedule list / doctor 报错）。
+#   2) 把本文件复制 / 改名为 `schedules/daily-health-fleet.yaml`（去掉 .example 后缀）。
+#   3) `hostlens schedule trigger daily-health-fleet` 逐台确定性覆盖。
+
+name: daily-health-fleet
+schedule:
+  cron: "0 8 * * *"
+  timezone: Asia/Shanghai
+mode: deterministic
+# deterministic 允许多 target（fleet）；逐台跑同一固定健康集。落地前把这些占位名替换为
+# 你 `target add` 注册的真实 target 名。
+targets: [ts-1, ts-2, ts-3, ts-4, ts-5, ts-6]
+intent: "做一次全队日常健康巡检"
+# 省略 inspectors: → 跑内置 DEFAULT_HEALTH_INSPECTORS（cpu / 内存 / 磁盘 / inode /
+# 负载 / systemd / 错误日志 / 网络监听口）。
+
+# inspector_parameters —— deterministic-only，给固定集按队传参。
+# 外层 key 是 inspector canonical name、必须在上面解析出的 inspector 集内、且是已注册的
+# 有参 inspector；参数值在加载期按该 inspector 自己的 parameters schema 校验
+# （与 `hostlens inspect --param` 同一套）。
+inspector_parameters:
+  net.listening_ports:
+    # 已知业务进程（代理 / 组网 / 中继）放行：这些服务多用动态 / 随机端口，端口白名单兜不住，
+    # 稳定身份是进程名。陌生进程的通配监听口仍报 warning（不是把整条检查关掉）。
+    allowed_processes:
+      - easytier-core
+      - derper
+      - hbbr
+      - hbbs
+      - snell-server
+      - sing-box
+      - hysteria-server
+      - bark-server
+      - rustdesk
+
+notify:
+  - channel: lark_ops_group
+    only_if: "severity >= warning"   # 全队聚合 severity >= warning 才发

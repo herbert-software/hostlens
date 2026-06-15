@@ -57,7 +57,7 @@ from hostlens.inspectors.schema import (
 from hostlens.targets.base import ExecutionTarget
 from hostlens.targets.registry import TargetRegistry
 
-__all__ = ["InspectorRunner"]
+__all__ = ["InspectorRunner", "coerce_and_validate_parameters"]
 
 
 # --------------------------------------------------------------------------- #
@@ -241,10 +241,8 @@ class InspectorRunner:
         _check_cancel(cancel)
         effective_parameters: dict[str, Any] = dict(parameters or {})
         if manifest.parameters is not None:
-            effective_parameters = _apply_schema_defaults(effective_parameters, manifest.parameters)
-            effective_parameters = _coerce_parameters(effective_parameters, manifest.parameters)
             try:
-                jsonschema.validate(effective_parameters, manifest.parameters)
+                effective_parameters = coerce_and_validate_parameters(parameters, manifest)
             except jsonschema.ValidationError as exc:
                 return self._finish(
                     manifest=manifest,
@@ -862,6 +860,34 @@ def _check_cancel(cancel: asyncio.Event | None) -> None:
 
     if cancel is not None and cancel.is_set():
         raise asyncio.CancelledError()
+
+
+def coerce_and_validate_parameters(
+    params: dict[str, Any] | None, manifest: InspectorManifest
+) -> dict[str, Any]:
+    """Apply schema defaults, coerce caller values, then ``jsonschema.validate``.
+
+    Shared by ``InspectorRunner.run`` (runtime gate) and the schedule loader
+    (load-time gate) so both surfaces accept the *same* parameter set. A
+    raw-validate-only loader would reject configs the runner accepts whenever a
+    field is both ``required`` and carries a ``default`` (defaults are injected
+    before validation here, not by raw ``jsonschema.validate``).
+
+    Callers gate this on ``manifest.parameters is not None``; the body assumes a
+    non-None schema. Exceptions propagate to the caller unchanged — the contract
+    is ``(jsonschema.ValidationError, jsonschema.exceptions.SchemaError)``: a
+    malformed inspector schema raises ``SchemaError``, a non-conforming value
+    raises ``ValidationError``. The runner wraps both into ``status="exception"``
+    results; the loader wraps both into ``ConfigError``.
+    """
+
+    params = dict(params or {})
+    schema = manifest.parameters
+    assert schema is not None  # caller gates on `manifest.parameters is not None`
+    params = _apply_schema_defaults(params, schema)
+    params = _coerce_parameters(params, schema)
+    jsonschema.validate(params, schema)
+    return params
 
 
 def _apply_schema_defaults(params: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:

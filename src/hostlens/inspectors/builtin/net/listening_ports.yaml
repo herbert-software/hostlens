@@ -1,13 +1,26 @@
 name: net.listening_ports
-version: 1.0.0
+version: 1.1.0
 description: >-
   Enumerate listening TCP ports from `ss -tlnp` (local address, port, owning
   process) and flag any port bound to a public-facing wildcard address that is
-  NOT in the caller-supplied `allowed_ports` whitelist. Linux-only (needs
+  NOT in the caller-supplied `allowed_ports` whitelist AND whose owning process
+  is NOT in the caller-supplied `allowed_processes` whitelist. Process-name
+  exemption lets a known daemon (e.g. `tailscaled`, `derper`) bind a wildcard
+  port on any number without per-port allowlisting. Membership is exact
+  (`snell-server` does not exempt `snell-server-evil`). Linux-only (needs
   iproute2 `ss`); process-name resolution needs the `-p` column, which on a
   non-privileged user may show empty for other users' sockets (documented
-  limitation, not an error). All extraction happens in awk; the Finding DSL
-  only does membership/threshold comparison on the ready `results` array.
+  limitation, not an error). A wildcard listener whose process name comes back
+  empty (no identity, e.g. another user's socket under a non-privileged probe)
+  is conservatively treated as UNexempt — `"" not in allowed_processes` is true,
+  so it still warns; unattributable wildcard listeners must stay visible.
+  `allowed_processes` members are constrained to the charset
+  `^[A-Za-z0-9._@-]+$`, so a rare `comm` name containing `:` or parentheses
+  (e.g. `postgres:main`) cannot be added to the allowlist — by design, the
+  pattern keeps the allowlist domain tight (this only constrains allowlist
+  members the caller supplies, not the `process` values the inspector collects).
+  All extraction happens in awk; the Finding DSL only does membership/threshold
+  comparison on the ready `results` array.
 tags: [linux, network, listening-ports, tcp, iproute2]
 targets: [local, ssh, docker, k8s]
 requires_capabilities: [shell]
@@ -26,6 +39,19 @@ parameters:
     allowed_ports:
       type: array
       items: { type: integer }
+      default: []
+    # `allowed_processes` is a whitelist of owning-process names (the `comm`
+    # field `ss -tlnp` exposes). Like `allowed_ports` it is NOT interpolated
+    # into the shell command — the comparison is a Finding DSL `not in`
+    # membership test — so it needs no `| sh`. The per-element `pattern` is
+    # MANDATORY (inspector-authoring-contract: a string-typed array MUST carry
+    # `pattern` or `enum` or the manifest fails to load). `^[A-Za-z0-9._@-]+$`
+    # covers real daemon names and, via `+` (>= 1 char), rejects the empty
+    # string so `allowed_processes: [""]` cannot silently exempt every
+    # unattributable wildcard listener.
+    allowed_processes:
+      type: array
+      items: { type: string, pattern: "^[A-Za-z0-9._@-]+$" }
       default: []
   additionalProperties: false
 
@@ -90,6 +116,6 @@ findings:
   # Single for_each binding over the already-built results array; the DSL only
   # does membership (`port not in allowed_ports`) + boolean comparison (wall 1).
   - for_each: "results as p"
-    when: "p.wildcard == True and p.port not in allowed_ports"
+    when: "p.wildcard == True and p.port not in allowed_ports and p.process not in allowed_processes"
     severity: warning
     message: "Unexpected public listener on port {p[port]} ({p[address]}, process={p[process]})"

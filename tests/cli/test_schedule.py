@@ -616,7 +616,7 @@ def _cli_build_runner(env: Path) -> SchedulerRunner:
     settings = schedule_cli._load_settings_or_exit()
     target_registry = schedule_cli._build_target_registry(settings)
     inspector_registry = schedule_cli._build_inspector_registry(settings)
-    manifests = schedule_cli._load_manifests_or_exit(settings, target_registry)
+    manifests = schedule_cli._load_manifests_or_exit(settings, target_registry, inspector_registry)
     logger = structlog.get_logger("test_cli_build_runner")
     return schedule_cli._build_runner(
         settings, manifests, target_registry, inspector_registry, logger

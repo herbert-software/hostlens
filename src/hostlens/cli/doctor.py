@@ -776,8 +776,17 @@ def _check_schedules(settings: Settings) -> CheckResult:
             else TargetsConfig(version="1", targets=[])
         )
         registry = build_registry_from_config(config, settings)
-        manifests = load_schedules(schedules_dir, registry)
-    except (ConfigError, TargetError, ValidationError, yaml.YAMLError) as exc:
+        # The loader validates ``inspector_parameters`` against the inspector
+        # registry. A broken builtin makes ``build_registry_from_search_paths``
+        # raise a fatal ``InspectorError`` — caught below so doctor reports an
+        # error CheckResult instead of crashing ("doctor must not crash on a
+        # bad manifest / registry").
+        inspector_registry = build_registry_from_search_paths(
+            settings.inspectors_search_paths,
+            settings=settings,
+        ).registry
+        manifests = load_schedules(schedules_dir, registry, inspector_registry)
+    except (ConfigError, TargetError, ValidationError, InspectorError, yaml.YAMLError) as exc:
         kind = getattr(exc, "kind", type(exc).__name__)
         return CheckResult(status="error", detail=f"{kind}: {exc}")
 

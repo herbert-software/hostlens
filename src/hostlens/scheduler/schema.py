@@ -21,7 +21,7 @@ routes/sends per channel at fire time. See design D-9 / add-notifier-channels.
 
 from __future__ import annotations
 
-from typing import Literal, Self
+from typing import Any, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.triggers.cron import CronTrigger
@@ -191,6 +191,17 @@ class ScheduleManifest(BaseModel):
     inspectors: list[str] | None = None
     report: ReportConfig = Field(default_factory=ReportConfig)
     notify: list[NotifyConfig] = Field(default_factory=list)
+    # Per-inspector parameter overrides for deterministic mode: outer key is an
+    # inspector canonical name, value is the parameter object passed through to
+    # that inspector. The inner dict is deliberately NOT strongly typed here:
+    # each inspector's parameter schema is its own manifest's `parameters` JSON
+    # schema (runtime data, not a Python type), and the loader judges validity
+    # against that schema. Enumerating every inspector's parameter model in the
+    # scheduling layer would leak the inspector SOT into this schema and could
+    # never hold for external / community inspectors. The `Any` is the
+    # intentional, documented exemption CLAUDE.md §6 allows; Pydantic still
+    # enforces the OUTER shape (each value must be a mapping, not a scalar).
+    inspector_parameters: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     @field_validator("name", mode="after")
     @classmethod

@@ -811,8 +811,27 @@ notify:
 - **内置默认健康集 `DEFAULT_HEALTH_INSPECTORS`**（`src/hostlens/inspectors/health.py`）：覆盖核心健康域（cpu / 内存 / 磁盘容量 / inode / 系统负载 / systemd 服务 / 近期错误日志 / 网络连通性）。`mode: deterministic` 且 manifest **无** `inspectors:` 时跑这一集；想进默认集要**显式**改这个 curated 常量（新增 inspector 不会自动进集——显式可控 > 自动全跑）。每个 inspector 对每个 target 跑前过 capability 门，不适用的台视为预期跳过（status 仍 `requires_unmet`、**不**降级报告、不计 severity），跨异构机跑统一健康集是正常情形。
 - **fleet Report 是 notify 导向**：`Report.target_name` 是确定性 fleet 标签（有序 target 名 join），`meta.target_id` 是带 `fleet:` 前缀的确定性 fleet id（避免单成员 fleet 撞同机的 per-target store key）；每条 finding 盖来源 `Finding.target_name`。notify 路由的 `aggregate_severity` 对**全队 findings** 聚合，`only_if` 在全队聚合 severity 上判定。fleet Report **不**支持 per-target regression diff（per-target diff 仍只在 agent 模式 per-target report 上做）。
 
+### `inspector_parameters` —— 给 deterministic 固定集按 inspector 传参（deterministic-only）
+
+`inspector_parameters: dict[inspector名 → 参数对象]`（默认 `{}`）让 deterministic 调度给固定 inspector 集**按队声明参数**（不同 fleet 跑不同业务，豁免名单是部署相关的、不该硬编码进 inspector 默认值）。它与 `inspectors` / `mode` / `notify` 等并列，写在 manifest 顶层：
+
 ```yaml
-# schedules/daily-health-fleet.yaml —— deterministic fleet 示例
+mode: deterministic
+inspector_parameters:
+  net.listening_ports:
+    allowed_processes: [easytier-core, derper, hbbr, hbbs, snell-server, sing-box, hysteria-server, bark-server, rustdesk]
+```
+
+语义与约束（**全在加载期 fail-loud 校验**，错误一律 `ConfigError`、含文件名 + 违规 key + 原因，不拖到次日触发）：
+
+- **仅 `mode: deterministic` 生效**：agent 模式由 Planner 自主选 inspector 并决定参数，不读 schedule 静态参数；agent（或省略 `mode`）的 manifest 写了**非空** `inspector_parameters` → loader 直接拒绝（不静默忽略，避免误以为参数生效）。
+- **外层 key 是 inspector canonical name**（如 `net.listening_ports`），value 是该 inspector 的参数对象（任意 dict）。key 必须 ∈ 该 schedule 解析出的 inspector 集——无 `inspectors:` 时是内置默认健康集，有则该**显式集是权威集**（不与默认集取并）；越界 key → 拒绝并列出。
+- **key 必须是已注册的有参 inspector**：未注册名（typo）→ 拒绝；inspector 无 `parameters:` block（给无参 inspector 传参是静默无效）→ 拒绝（8 个默认健康 inspector 里只有 `net.listening_ports` 有参，其余 7 个无参）。空 dict `{}` 不触发「无参」拒绝（无副作用、等价于不传）。
+- **参数值在加载期按该 inspector 自己的 `parameters` schema 校验**——与 `hostlens inspect --param` **同一套**校验管线（注默认值 + 类型 coerce + `jsonschema.validate`）。typo 参数键（`additionalProperties:false` → 未知键）、非法值、被 `pattern` 拒的空串、以及 inspector 自身 schema 畸形都在加载期暴露，不拖到触发。
+- **向后兼容**：默认 `{}` → 既有 deterministic manifest 行为不变，无迁移。
+
+```yaml
+# schedules/daily-health-fleet.yaml.example —— deterministic fleet 示例（.example 不被扫描）
 name: daily-health-fleet
 schedule:
   cron: "0 8 * * *"
@@ -821,18 +840,28 @@ mode: deterministic
 targets: [ts-1, ts-2, ts-3, ts-4, ts-5, ts-6]   # 跨 6 台逐台跑同一固定集
 intent: "做一次全队日常健康巡检"
 # 省略 inspectors: → 跑内置 DEFAULT_HEALTH_INSPECTORS
+inspector_parameters:                            # deterministic-only; 给固定集按队传参
+  net.listening_ports:
+    # 已知业务进程（代理 / 组网 / 中继）放行: 它们多用动态端口, 端口白名单兜不住,
+    # 稳定身份是进程名; 陌生进程的通配监听口仍报 warning.
+    allowed_processes: [easytier-core, derper, hbbr, hbbs, snell-server, sing-box, hysteria-server, bark-server, rustdesk]
 notify:
   - channel: lark_ops_group
     only_if: "severity >= warning"                # 全队聚合 severity >= warning 才发
 ```
 
-**Demo Path（deterministic fleet 跨多台）**：
+**Demo Path（deterministic fleet 跨多台 + 按进程名豁免）**：
+
+> 上面的 manifest 以 **docs 示例**呈现，仓内对应 `schedules/daily-health-fleet.yaml.example`（`.example` 后缀**不被 `schedules/*.yaml` 扫描**，故 fresh checkout 的 `schedule list` / `doctor checks.schedules` 不会因 `ts-*` 未注册而崩）。真正落地前需先 `hostlens target add` 注册这些 target、再去掉 `.example` 后缀（或另存为 `schedules/<name>.yaml`）才能 `schedule trigger`。
 
 ```bash
-# 把上面的 fleet manifest 放进 schedules/ 后, 一次触发逐台确定性覆盖:
+# 1) 先注册 fleet 里的 target（示例: 经 CLI 批量导入或逐台 add），否则 loader 的 target-membership
+#    校验会 fail-loud（target 未注册 → schedule list / doctor 报错）。
+# 2) 把示例 manifest 去掉 .example 后缀放进 schedules/, 再一次触发逐台确定性覆盖:
 hostlens schedule trigger daily-health-fleet
 hostlens schedule status --name daily-health-fleet   # 看本次 Run: targets 列出全 6 台, status ok/partial
 # Run 的 targets 列覆盖整个 fleet; 一份 fleet Report 含全 6 台 findings, 每条带来源 target_name.
+# 报告不再为 allowed_processes 里的进程的通配监听口报 warning; 陌生进程的通配监听口仍报 warning.
 ```
 
 ### 运行模型
