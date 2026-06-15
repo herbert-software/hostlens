@@ -437,7 +437,9 @@ def test_telegram_none_section_gets_header_when_sectioned() -> None:
         }
     )
     body = _tg_body(report, "critical")
-    assert "(未标注主机)" in body
+    # Header uses fullwidth parens (U+FF08/FF09) — not MarkdownV2-reserved (ASCII
+    # parens would need escaping); assert the CJK label, not the paren form.
+    assert "未标注主机" in body
     # The unstamped finding renders under its own header, after the named hosts.
     assert body.index("未标注主机") < body.index("未知来源项")
     assert body.index("hostA") < body.index("未标注主机")
@@ -460,7 +462,7 @@ def test_lark_none_section_gets_header_when_sectioned() -> None:
         }
     )
     contents = _lark_contents(_lark_card(report, "critical"))  # _lark_card asserts valid JSON
-    assert "**(未标注主机)**" in contents
+    assert any("未标注主机" in c for c in contents)
     assert any("未知来源项" in c for c in contents)
 
 

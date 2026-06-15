@@ -30,7 +30,7 @@
 {{ (group | section_severity) | sev_icon }} *{{ target_name | mdv2_escape }} · {{ (group | section_severity) | sev_label | mdv2_escape }}*
 {% elif sections | length > 1 %}
 
-*(未标注主机)*
+*（未标注主机）*
 {% endif %}
 {% for f in group | sort_sev %}
 {{ f.severity | sev_icon }} {{ f.message | mdv2_escape }} \({{ f.inspector_name | mdv2_escape }}\)
