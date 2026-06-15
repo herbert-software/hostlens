@@ -186,10 +186,21 @@ def group_by_target(findings: list[Finding]) -> list[tuple[str | None, list[Find
     if len(distinct_named) <= 1:
         return [(None, list(findings))]
 
-    sections: dict[str | None, list[Finding]] = {}
+    # Named sections in first-seen order; the unstamped (None) group is held
+    # aside and appended **last** regardless of where its findings appear in the
+    # incoming list — a None finding that happens to come first must not push
+    # the unlabeled section ahead of the named hosts (the documented order).
+    named: dict[str, list[Finding]] = {}
+    none_group: list[Finding] = []
     for finding in findings:
-        sections.setdefault(finding.target_name, []).append(finding)
-    return list(sections.items())
+        if finding.target_name is None:
+            none_group.append(finding)
+        else:
+            named.setdefault(finding.target_name, []).append(finding)
+    sections: list[tuple[str | None, list[Finding]]] = list(named.items())
+    if none_group:
+        sections.append((None, none_group))
+    return sections
 
 
 def section_severity(findings: list[Finding]) -> str:

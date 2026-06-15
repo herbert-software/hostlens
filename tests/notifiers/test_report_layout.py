@@ -464,6 +464,28 @@ def test_lark_none_section_gets_header_when_sectioned() -> None:
     assert any("未知来源项" in c for c in contents)
 
 
+def test_none_section_stays_last_even_when_unstamped_finding_is_first() -> None:
+    # Regression: a None-target finding appearing FIRST in the flattened list
+    # must NOT push the unlabeled section ahead of the named hosts —
+    # group_by_target holds the None group aside and appends it last, so the
+    # documented order ("None section after named hosts") holds for any input order.
+    base = _fleet_report(
+        [_ir("linux.disk", target="hostA", findings=[Finding(severity="info", message="seed")])]
+    )
+    report = base.model_copy(
+        update={
+            "findings": [
+                Finding(severity="info", message="未知来源项", target_name=None),  # FIRST
+                Finding(severity="critical", message="磁盘满", target_name="hostA"),
+                Finding(severity="warning", message="CPU 高", target_name="hostB"),
+            ]
+        }
+    )
+    body = _tg_body(report, "critical")
+    assert body.index("hostA") < body.index("未标注主机")
+    assert body.index("hostB") < body.index("未标注主机")
+
+
 # --------------------------------------------------------------------------- #
 # 去重 x 分节组合
 # --------------------------------------------------------------------------- #
