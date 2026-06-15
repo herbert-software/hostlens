@@ -1,11 +1,30 @@
 name: linux.system.load_avg
-version: 1.0.0
-description: Compare 1-minute load average against CPU count to detect CPU saturation.
+version: 1.1.0
+description: Compare sustained load averages (load5/load15) against CPU count to detect CPU saturation.
 tags: [cpu, linux, performance]
 targets: [local, ssh]
 requires_capabilities: [shell]
 requires_binaries: [awk, nproc]
 privilege: none
+
+parameters:
+  type: object
+  properties:
+    # Per-core load thresholds. The DSL gates on load5/load15 divided by the
+    # core count, so these are dimensionless per-core ratios. Numeric
+    # parameters cannot be shell-evaluated as text, so no `pattern` is needed.
+    # A threshold must be strictly positive — `exclusiveMinimum: 0` rejects a
+    # negative or zero schedule override, either of which would make
+    # `>= threshold` fire on every non-negative load and defeat the gate.
+    warn_per_core:
+      type: number
+      exclusiveMinimum: 0
+      default: 1.0
+    crit_per_core:
+      type: number
+      exclusiveMinimum: 0
+      default: 2.0
+  additionalProperties: false
 
 collect:
   # Emit kv lines so parse_kv yields {load1, load5, load15, ncpu}; nproc
@@ -29,9 +48,17 @@ output_schema:
   additionalProperties: false
 
 findings:
-  - when: "load1 and ncpu and int(ncpu) > 0 and float(load1) / int(ncpu) >= 2.0"
+  # Gate on the SUSTAINED signals (load5 AND load15), never the single-sample
+  # load1. load1 is a 1-minute EMA that a one-off process burst (cron/build/GC)
+  # spikes past 2x cores on a single-core box that is otherwise idle — using it
+  # for severity produces false "critical" alerts. Requiring BOTH load5 and
+  # load15 per-core ratios to cross the threshold means "overloaded for >=5min
+  # and still overloaded now" (AND, not OR: if load5 has fallen back the box is
+  # recovering and should not be critical). load1 is kept in output for display
+  # but participates in NO finding `when`.
+  - when: "load5 and load15 and ncpu and int(ncpu) > 0 and float(load5) / int(ncpu) >= crit_per_core and float(load15) / int(ncpu) >= crit_per_core"
     severity: critical
-    message: "1-min load {load1} is >= 2x the {ncpu} available cores"
-  - when: "load1 and ncpu and int(ncpu) > 0 and float(load1) / int(ncpu) >= 1.0 and float(load1) / int(ncpu) < 2.0"
+    message: "sustained load (5-min {load5}, 15-min {load15}) is critically high for {ncpu} cores"
+  - when: "load5 and load15 and ncpu and int(ncpu) > 0 and float(load5) / int(ncpu) >= warn_per_core and float(load15) / int(ncpu) >= warn_per_core and (float(load5) / int(ncpu) < crit_per_core or float(load15) / int(ncpu) < crit_per_core)"
     severity: warning
-    message: "1-min load {load1} exceeds the {ncpu} available cores"
+    message: "sustained load (5-min {load5}, 15-min {load15}) exceeds the {ncpu} available cores"

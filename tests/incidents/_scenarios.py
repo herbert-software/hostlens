@@ -57,12 +57,20 @@ class IncidentScenario:
     inspectors: tuple[InspectorCall, ...]
     # Diagnosis-phase authored content (design D-3 / D-3.5): the single root-cause
     # hypothesis the scripted Diagnostician records via ``correlate_findings``
-    # (referencing ordinal label ``F1``), its suggested remediation actions, and
-    # the diagnosis loop's finalize narrative. Synthetic-data discipline applies
+    # (referencing ordinal labels), its suggested remediation actions, and the
+    # diagnosis loop's finalize narrative. Synthetic-data discipline applies
     # (no IPv4 / real paths / FQDNs; ASCII punctuation only).
     hypothesis: str
     suggested_actions: tuple[str, ...]
     diagnosis_narrative: str
+    # Authored ``confidence`` + ``supporting_findings`` for the single
+    # ``correlate_findings`` call. Defaults reproduce the historical global
+    # constants (``high`` + ``("F1",)``) so the other 7 scenarios stay
+    # byte-identical; a scenario overrides them to satisfy diagnostician rule 5
+    # (independent failures with no mechanism evidence must NOT be ``high``, and
+    # a hypothesis must cite every finding label it discusses).
+    diag_confidence: str = "high"
+    diag_supporting: tuple[str, ...] = ("F1",)
 
 
 SCENARIOS: tuple[IncidentScenario, ...] = (
@@ -72,7 +80,8 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
         intent=_intent("cpu_saturation"),
         narrative=(
             "这台主机 CPU 处于饱和状态: mysqld (pid 4242) 正占用 97.5% CPU, "
-            "且 1 分钟负载 16.40 已达 4 核的约 4 倍. 建议排查 mysqld 的慢查询或失控线程."
+            "且持续负载 (5 分钟 12.10, 15 分钟 8.00) 已达 4 核容量的 2 倍以上, "
+            "说明过载已持续数分钟而非瞬时尖峰. 建议排查 mysqld 的慢查询或失控线程."
         ),
         inspectors=(
             InspectorCall(
@@ -88,14 +97,15 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
         ),
         hypothesis=(
             "mysqld (pid 4242) 失控占用 CPU 是本次饱和的根因: 单进程 97.5% CPU "
-            "叠加 1 分钟负载 16.40 远超 4 核容量."
+            "叠加持续负载 (5 分钟 12.10, 15 分钟 8.00) 远超 4 核容量, 过载已持续数分钟."
         ),
         suggested_actions=(
             "排查 mysqld 慢查询日志, 定位失控线程或全表扫描.",
             "必要时限流或重启 mysqld, 并观察负载是否回落.",
         ),
         diagnosis_narrative=(
-            "综合 top 进程与系统负载两个信号, 根因指向 mysqld 失控占用 CPU. 建议优先排查其慢查询."
+            "综合 top 进程与持续负载两个信号, 根因指向 mysqld 失控占用 CPU. "
+            "持续负载 (5/15 分钟均值) 高于核心数, 排除了瞬时尖峰的可能. 建议优先排查其慢查询."
         ),
     ),
     # 2. Memory pressure / OOM ---------------------------------------------
@@ -171,31 +181,42 @@ SCENARIOS: tuple[IncidentScenario, ...] = (
         key="systemd_failed",
         intent=_intent("systemd_failed"),
         narrative=(
-            "有 2 个 systemd 单元处于 failed 状态: nginx.service 与 mysql.service. "
-            "建议查看各自的 journal 日志定位启动失败原因."
+            "有 2 个常驻服务单元 (Type=simple) 处于 failed 状态: nginx.service 与 mysql.service. "
+            "二者各自挂掉, 没有共享依赖或同一时间窗的证据, 应视为两条彼此独立的故障. "
+            "建议分别查看各自的 journal 日志定位启动失败原因, 不要臆断为同一根因."
         ),
         inspectors=(
             InspectorCall(
                 name="linux.systemd.failed_units",
                 params={},
                 main_stdout=(
-                    '{"failed":[{"unit":"nginx.service"},{"unit":"mysql.service"}],'
-                    '"failed_names":"nginx.service, mysql.service"}'
+                    '{"uptime_seconds": 3110400, "results": ['
+                    '{"unit": "nginx.service", "type": "simple", '
+                    '"inactive_monotonic_us": 2400000000}, '
+                    '{"unit": "mysql.service", "type": "simple", '
+                    '"inactive_monotonic_us": 2600000000}]}'
                 ),
             ),
         ),
         hypothesis=(
-            "nginx.service 与 mysql.service 同时 failed 是根因: 两个核心服务单元均未拉起, "
-            "对外服务能力受影响."
+            "nginx.service 与 mysql.service 均为常驻服务 (Type=simple) 且各自 failed, "
+            "在没有共享依赖或同一时间窗证据的情况下应视为两条独立故障, 各自需结合自身 journal 排查, "
+            "不可臆断为出自同一根因."
         ),
         suggested_actions=(
-            "查看 nginx.service 与 mysql.service 各自的 journal 日志定位启动失败原因.",
-            "修复配置或依赖后重启两个单元并确认状态恢复.",
+            "分别查看 nginx.service 与 mysql.service 各自的 journal 日志, 独立定位各自的启动失败原因.",
+            "对每个单元单独修复配置或依赖后重启并确认状态恢复, 不要假设二者互为因果.",
         ),
         diagnosis_narrative=(
-            "failed 单元清单显示两个核心服务同时挂掉, 根因需结合各自 journal 日志进一步定位. "
-            "建议逐一查看."
+            "两个常驻服务各自处于 failed 状态, 但二者之间没有共享依赖或同一时间窗的证据, "
+            "因此判定为两条彼此独立的 critical 故障, 而非出自同一共同根因. 建议对各单元独立排查其 journal 日志."
         ),
+        # rule 5: independent failures with no per-service mechanism evidence must
+        # NOT be ``high`` (the "彼此独立" judgment is sound but neither unit's root
+        # cause is established) — author ``medium``; the hypothesis discusses both
+        # nginx and mysql, so it must cite both labels.
+        diag_confidence="medium",
+        diag_supporting=("F1", "F2"),
     ),
     # 5. Recent error burst (sampling_window) ------------------------------
     IncidentScenario(

@@ -201,12 +201,13 @@ def build_incident_pipeline_inputs(
     return backend, context_factory, replay_target, settings
 
 
-# The ordinal label the diagnosis-phase ``correlate_findings`` references. F1 is
-# the first label ``FindingStore.seed`` assigns under the D-7 stable sort, so it
-# is guaranteed present for every scenario (each scenario seeds ≥1 finding). The
-# recording generator prints the full D-7-sorted seeded list so a maintainer can
-# verify F1 points at a real finding (design D-3.5 / tasks 3.1).
-_DIAG_SUPPORTING_LABEL = "F1"
+# ``IncidentScenario.diag_supporting`` defaults to ``("F1",)``: F1 is the first
+# label ``FindingStore.seed`` assigns under the D-7 stable sort, so it is
+# guaranteed present for every scenario (each scenario seeds ≥1 finding). A
+# scenario whose hypothesis spans multiple findings overrides ``diag_supporting``
+# (and ``diag_confidence``) per diagnostician rule 5. The recording generator
+# prints the full D-7-sorted seeded list so a maintainer can verify each authored
+# ``F#`` label points at a real finding (design D-3.5 / tasks 3.1).
 
 
 def build_planner_responses(scenario: IncidentScenario) -> list[MessageResponse]:
@@ -253,12 +254,15 @@ def build_diagnostician_responses(scenario: IncidentScenario) -> list[MessageRes
     """The two scripted Diagnostician-phase turns (one ``correlate_findings`` + finalize).
 
     Turn 1 records exactly one root-cause hypothesis via ``correlate_findings``,
-    referencing the ordinal label ``F1`` (the first D-7-sorted seeded finding,
-    always present) — NOT a ``finding.id`` (``diagnostician_tools.py``: the model
-    references ordinal labels). It deliberately never calls
-    ``request_more_inspection`` so the diagnosis phase adds zero target commands
-    and the fixture stays untouched (design D-3). Turn 2 finalizes the diagnosis
-    loop with a short narrative. Usage numbers are fixed for determinism.
+    referencing the scenario's authored ordinal labels (``scenario.diag_supporting``,
+    default ``("F1",)`` — the first D-7-sorted seeded finding, always present) —
+    NOT a ``finding.id`` (``diagnostician_tools.py``: the model references ordinal
+    labels). ``confidence`` is the scenario's authored ``diag_confidence``
+    (default ``high``) so a scenario can satisfy diagnostician rule 5. It
+    deliberately never calls ``request_more_inspection`` so the diagnosis phase
+    adds zero target commands and the fixture stays untouched (design D-3). Turn 2
+    finalizes the diagnosis loop with a short narrative. Usage numbers are fixed
+    for determinism.
     """
     correlate = MessageResponse(
         id="msg_incident_diag_turn1",
@@ -271,8 +275,8 @@ def build_diagnostician_responses(scenario: IncidentScenario) -> list[MessageRes
                 name="correlate_findings",
                 input={
                     "description": scenario.hypothesis,
-                    "confidence": "high",
-                    "supporting_findings": [_DIAG_SUPPORTING_LABEL],
+                    "confidence": scenario.diag_confidence,
+                    "supporting_findings": list(scenario.diag_supporting),
                     "suggested_actions": list(scenario.suggested_actions),
                 },
             )

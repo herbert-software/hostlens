@@ -1,6 +1,6 @@
 name: linux.systemd.failed_units
-version: 1.0.0
-description: List systemd units in the failed state.
+version: 1.1.0
+description: List systemd units in the failed state with a per-unit time anchor.
 tags: [linux, systemd]
 targets: [local, ssh]
 # Gate on the `systemctl` binary (preflight-probed), NOT the `systemd`
@@ -12,38 +12,90 @@ requires_capabilities: [shell]
 requires_binaries: [systemctl, awk]
 privilege: none
 
+parameters:
+  type: object
+  properties:
+    # A failed `oneshot` whose failure landed within this many seconds of boot
+    # is treated as a boot-time provisioning artefact (cloud-init et al.). Numeric
+    # parameters flow only into the Finding DSL (never `| sh`), so no `pattern`.
+    boot_window_seconds:
+      type: integer
+      minimum: 0
+      default: 180
+    # The system must have been up at least this long before a boot-window
+    # oneshot failure is downgraded to `warning` — on a freshly-rebooted box the
+    # same boot-relative anchor cannot distinguish "historical residue" from
+    # "just crashed", so we keep it `critical` until the box has run a while.
+    # `minimum: 0` rejects a negative override, which would make
+    # `uptime_seconds >= min_uptime_seconds` trivially true and silently defeat
+    # this fresh-reboot guard.
+    min_uptime_seconds:
+      type: integer
+      minimum: 0
+      default: 3600
+  additionalProperties: false
+
 collect:
-  # `systemctl --failed` lists failed units; a single awk pass collects each
-  # unit name (first column) and emits BOTH a `failed` array-of-objects AND a
-  # `failed_names` join string ("foo.service, bar.service"). The finding
-  # message injects `{failed_names}` (a clean human-readable string) rather
-  # than `{failed}` — `str.format` on the array would render a Python repr.
-  # The empty case still prints a valid top-level object
-  # ({"failed":[],"failed_names":""}) so parse_json never crashes (trap b).
-  # Each unit name is JSON-string-escaped (backslash FIRST, then double-quote)
-  # because systemd unit names may legally carry backslashes (e.g. C-escaped
-  # `\x2d` in path/instance-derived names) — emitting them raw would produce
-  # invalid JSON and crash parse_json. `$1` is whitespace-split so it never
-  # contains tabs/newlines; backslash + quote are the only reachable specials.
+  # Three host facts per run: the system uptime (boot-relative time base), the
+  # list of failed service units, and per-unit `Type` + `InactiveEnterTimestamp-
+  # Monotonic` (microseconds since boot — no wall-clock/timezone parsing). The
+  # Finding DSL needs all three to tell a long-running box's boot-time oneshot
+  # residue apart from a recent / resident-service failure.
+  #
+  # PORTABILITY: boot/uptime is read with the POSIX shell builtin
+  # `read -r uptime_seconds _ < /proc/uptime` — NOT gawk `systime()`/`strftime()`
+  # (gawk-only; this inspector's `targets:[local,ssh]` hits mawk/busywbox/BSD awk
+  # where those abort the collector). `requires_binaries` stays `[systemctl, awk]`
+  # — no `cut`/`date` is introduced.
+  #
+  # FAIL-LOUD (Authoring Contract rule 8): if `/proc/uptime` is unreadable the
+  # `read` fails and we `exit 1` with empty stdout → parse exception →
+  # `status=exception` (honest), NOT a fabricated `{"results":[]}` blessed as ok.
+  #
+  # PER-UNIT ITERATION uses newline-delimited `while IFS= read -r unit` — NOT
+  # `for unit in $(...)`, whose whitespace split would shred a unit name that
+  # legally carries a space or a C-escaped `\x2d`. Each unit's name + Type +
+  # monotonic are emitted as a TAB-delimited record; awk then assembles the JSON:
+  # the unit string is quoted + JSON-escaped (backslash FIRST, then double-quote
+  # — systemd path/instance names may carry `\`), while `uptime_seconds` and
+  # `inactive_monotonic_us` are printed as BARE numbers (no quotes) so jsonschema
+  # accepts them as number/int (a quoted "123" would fail validation →
+  # `status=exception` before findings run). The empty failed-set still prints a
+  # valid top-level OBJECT `{"uptime_seconds":N,"results":[]}` — `parse_json`
+  # rejects a top-level array.
   command: |
-    systemctl list-units --type=service --state=failed --no-legend --plain 2>/dev/null \
-      | awk '
-          {
-            unit=$1
-            if (unit != "") {
-              gsub(/\\/, "\\\\", unit)
-              gsub(/"/, "\\\"", unit)
-              arr[n++]=unit
-            }
+    read -r uptime_seconds _ < /proc/uptime || { echo "read /proc/uptime failed" >&2; exit 1; }
+    {
+      printf '%s\n' "$uptime_seconds"
+      systemctl list-units --type=service --state=failed --no-legend --plain 2>/dev/null \
+        | awk '{ if ($1 != "") print $1 }' \
+        | while IFS= read -r unit; do
+            type=$(systemctl show "$unit" -p Type --value 2>/dev/null)
+            mono=$(systemctl show "$unit" -p InactiveEnterTimestampMonotonic --value 2>/dev/null)
+            case "$mono" in (*[!0-9]*|"") mono=0 ;; esac
+            printf '%s\t%s\t%s\n' "$unit" "$type" "$mono"
+          done
+    } | awk -F '\t' '
+        BEGIN { n = 0 }
+        NR == 1 { uptime = $0; next }
+        {
+          unit = $1
+          gsub(/\\/, "\\\\", unit)
+          gsub(/"/, "\\\"", unit)
+          units[n] = unit
+          types[n] = $2
+          monos[n] = ($3 == "" ? 0 : $3)
+          n++
+        }
+        END {
+          printf "{\"uptime_seconds\":%s,\"results\":[", (uptime == "" ? 0 : uptime)
+          for (i = 0; i < n; i++) {
+            printf "%s{\"unit\":\"%s\",\"type\":\"%s\",\"inactive_monotonic_us\":%d}", \
+              (i ? "," : ""), units[i], types[i], monos[i]
           }
-          END {
-            printf "{\"failed\":[";
-            for (i=0;i<n;i++) { printf "%s{\"unit\":\"%s\"}", (i?",":""), arr[i] }
-            printf "],\"failed_names\":\"";
-            for (i=0;i<n;i++) { printf "%s%s", (i?", ":""), arr[i] }
-            printf "\"}";
-          }'
-  timeout_seconds: 10
+          printf "]}"
+        }'
+  timeout_seconds: 15
 
 parse:
   format: json
@@ -51,22 +103,48 @@ parse:
 output_schema:
   type: object
   properties:
-    failed:
+    # Seconds since boot (first `/proc/uptime` field). The Finding DSL gates the
+    # oneshot downgrade on `uptime_seconds >= min_uptime_seconds`.
+    uptime_seconds: { type: number }
+    results:
       type: array
       items:
         type: object
         properties:
           unit: { type: string }
-    # `failed_names` is the clean join string the finding message injects.
-    failed_names: { type: string }
-  required: [failed, failed_names]
+          # systemd unit `Type` (oneshot / simple / notify / forking / ...).
+          type: { type: string }
+          # `InactiveEnterTimestampMonotonic` — microseconds since boot of the
+          # last inactive transition (0 when systemd reports none).
+          inactive_monotonic_us: { type: integer }
+        required: [unit, type, inactive_monotonic_us]
+        additionalProperties: false
+  required: [uptime_seconds, results]
   additionalProperties: false
 
 findings:
-  # The message uses no `{len(...)}` — Python str.format cannot call
-  # functions inside `{}` (it would raise KeyError and skip the rule), so
-  # the count stays in the `when` expression only. `{failed_names}` injects
-  # the clean comma-joined unit list (e.g. "nginx.service, mysql.service").
-  - when: "len(failed) > 0"
+  # Severity is calibrated per-unit (`for_each`). A long-running box's boot-time
+  # `oneshot` residue (cloud-init et al.) is a `warning`, not a fleet-wide
+  # `critical` — but only once BOTH (a) the failure landed inside the boot window
+  # AND (b) the box has been up long enough that a fresh reboot is ruled out.
+  # `inactive_monotonic_us > 0` guards systemd's degenerate "never inactive" 0.
+  #
+  # `when` uses attribute access (`u.type`) — the DSL evaluates it; `message`
+  # uses subscript (`{u[unit]}`) — `str.format` cannot do attribute access. Only
+  # `u[...]` and declared output fields are injected into `message`; parameter
+  # names (`boot_window_seconds`/`min_uptime_seconds`) are NOT injected (they are
+  # not in output_schema → would trip the i18n if-inject-then-declared guard).
+  - for_each: "results as u"
+    when: >-
+      u.type == 'oneshot' and u.inactive_monotonic_us > 0
+      and u.inactive_monotonic_us <= boot_window_seconds * 1000000
+      and uptime_seconds >= min_uptime_seconds
+    severity: warning
+    message: "systemd 开机一次性失败（历史残留）：{u[unit]}（Type={u[type]}）"
+  - for_each: "results as u"
+    when: >-
+      not (u.type == 'oneshot' and u.inactive_monotonic_us > 0
+      and u.inactive_monotonic_us <= boot_window_seconds * 1000000
+      and uptime_seconds >= min_uptime_seconds)
     severity: critical
-    message: "systemd 失败服务：{failed_names}"
+    message: "systemd 失败服务：{u[unit]}（Type={u[type]}）"
