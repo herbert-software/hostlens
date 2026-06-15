@@ -37,7 +37,7 @@ import json
 import sqlite3
 import sys
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -45,9 +45,10 @@ import yaml
 
 import hostlens.inspectors.result  # noqa: F401  (triggers Report.model_rebuild)
 from hostlens.cli import main
+from hostlens.cli.reports import _format_row
 from hostlens.inspectors.result import InspectorResult
 from hostlens.reporting.models import Finding, Report, ReportStatus
-from hostlens.reporting.store import ReportStore, SaveResult
+from hostlens.reporting.store import ReportStore, RunIndexRow, SaveResult
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -631,3 +632,19 @@ def test_demo_run_does_not_expose_persist(
     assert code == 3
     assert stdout == ""
     assert "Traceback" not in stderr
+
+
+def test_reports_list_row_renders_host_local_tz(shanghai_tz: None) -> None:
+    # The `reports list` row time renders in the host's local timezone (storage
+    # stays UTC). Anchors `_format_row`'s to_host_local conversion directly so a
+    # revert to a raw `row.timestamp.isoformat()` is caught. shanghai_tz pins TZ
+    # for determinism across a UTC CI runner and a local CST box.
+    row = RunIndexRow(
+        run_id="11111111-1111-1111-1111-111111111111",
+        timestamp=datetime(2026, 6, 15, 8, 55, 0, tzinfo=UTC),
+        status=ReportStatus.OK,
+        finding_count=0,
+    )
+    out = _format_row(row)
+    assert "2026-06-15T16:55:00+08:00" in out  # UTC 08:55 → CST 16:55
+    assert "08:55" not in out  # the UTC wall clock must not leak through

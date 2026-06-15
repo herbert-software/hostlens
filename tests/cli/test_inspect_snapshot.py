@@ -75,13 +75,15 @@ def _build_report() -> Report:
     )
 
 
-def test_render_markdown_snapshot(snapshot: SnapshotAssertion) -> None:
+def test_render_markdown_snapshot(snapshot: SnapshotAssertion, shanghai_tz: None) -> None:
     """Byte-level snapshot of ``render_markdown.render`` output.
 
     Spec §场景:syrupy snapshot 测试通过. The snapshot pins the entire
     markdown body; any drift (escaping, ordering, header text) fails this
-    assertion. To update intentionally, re-run with
-    ``pytest --snapshot-update`` after spec/design approval.
+    assertion. The ``shanghai_tz`` fixture pins ``TZ`` so the host-local
+    timestamp rendering (UTC storage → local display) is deterministic
+    across a UTC CI runner and a local dev box. To update intentionally,
+    re-run with ``pytest --snapshot-update`` after spec/design approval.
     """
 
     rendered = render(_build_report())

@@ -30,6 +30,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hostlens.core.timefmt import to_host_local
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -124,9 +126,13 @@ def coverage_line(inspectors_used: list[InspectorRun]) -> str:
 
 
 def fmt_time(value: datetime) -> str:
-    """Format a ``datetime`` as ``YYYY-MM-DD HH:MM`` (minute resolution)."""
+    """Format a ``datetime`` as host-local ``YYYY-MM-DD HH:MM`` (minute resolution).
 
-    return value.strftime("%Y-%m-%d %H:%M")
+    The report timestamp is stored UTC; render it in the host's local
+    timezone so the daily push matches the operator's wall clock.
+    """
+
+    return to_host_local(value).strftime("%Y-%m-%d %H:%M")
 
 
 def dedup_findings(findings: list[Finding]) -> list[Finding]:
