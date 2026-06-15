@@ -620,7 +620,9 @@ def test_deterministic_param_key_typo_fail_loud(tmp_path: Path) -> None:
 def test_deterministic_malformed_param_schema_fail_loud(tmp_path: Path) -> None:
     # an inspector whose own parameters schema is malformed → ConfigError, NOT a
     # bare SchemaError (step 5 catches jsonschema.exceptions.SchemaError too).
-    registry = _ireg()
+    # Fresh (uncached) registry — this test register()s a fake, so it must not
+    # mutate the @functools.cache'd _ireg() instance shared with other tests.
+    registry = build_registry_from_search_paths([], settings=Settings()).registry
     registry.register(_malformed_param_inspector("fake.bad_schema"), source_path=None)
     _write_deterministic(
         tmp_path,
@@ -643,7 +645,8 @@ def test_deterministic_no_param_inspector_empty_dict_passes(tmp_path: Path) -> N
         inspectors_line="inspectors: [fake.noparam]",
         inspector_parameters_block="  fake.noparam: {}",
     )
-    registry = _ireg()
+    # Fresh (uncached) registry — register()s a fake, must not mutate _ireg().
+    registry = build_registry_from_search_paths([], settings=Settings()).registry
     registry.register(_no_param_inspector("fake.noparam"), source_path=None)
     manifests = load_schedules(tmp_path, _registry("web-1"), registry)
 
