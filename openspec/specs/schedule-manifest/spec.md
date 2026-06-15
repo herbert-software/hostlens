@@ -3,7 +3,6 @@
 ## 目的
 
 定义调度任务 manifest 契约——`ScheduleManifest` 为 Pydantic v2 强类型 manifest、`schedule` 为 cron / interval 二选一并携带 timezone、加载器扫描 `schedules/*.yaml` 并在加载时 fail-loud 校验、M4 每 manifest 恰好一个 target(多 target fan-out 为非目标)、`notify` 配置在 M5 被消费用于路由发送。
-
 ## 需求
 ### 需求:`ScheduleManifest` 必须是 Pydantic v2 强类型 manifest
 
@@ -84,20 +83,6 @@
 - **当** `schedules/` 下所有 manifest 均合法且 targets 都已注册
 - **那么** 加载必须返回全部 `ScheduleManifest`（数量与文件数一致），无报错
 
-### 需求:M4 每个 manifest 必须恰好一个 target（多 target fan-out 为非目标）
-
-`ScheduleManifest.targets` 字段类型为 `list[str]`（为未来 fan-out 保留列表形态），但 **M4 加载器必须校验其恰好含 1 个成员**——多于 1 个时 fail-loud 拒绝加载。理由：复用的 `run_diagnosis_pipeline` 是**单 target** 编排（`report_target_name` / `target_lookup_name` 单值，`cli/_intent.py:454-455`），且 ARCHITECTURE §7「一次触发产 0 或 1 个 Report」隐含一 Run↔单 target。多 target fan-out（一次触发跑多 target → Run/Report 基数、状态聚合、report_id 生成规则）涉及未定的设计决策，**显式列为 M4 非目标**，留后续提案。`Run.targets` 在 M4 因此恒为 1 元素列表（字段保留 list 形态以便 fan-out 落地时不破 schema）。
-
-#### 场景:多 target manifest 被拒
-
-- **当** 某 manifest 的 `targets` 含 2 个或更多 target id（即便都已注册），执行加载
-- **那么** 加载必须 fail-loud raise，错误指出该文件 + "M4 仅支持单 target，多 target fan-out 未实现"语义
-
-#### 场景:单 target manifest 正常加载
-
-- **当** 某 manifest 的 `targets` 恰含 1 个已注册 target id
-- **那么** 必须正常加载，`manifest.targets` 为该 1 元素列表
-
 ### 需求:`notify` 配置在 M5 被消费用于路由发送
 
 `ScheduleManifest.notify` 必须解析为类型化结构（每条含 `channel: str` 与可选 `only_if: str`），且 M5 的加载与调度路径**必须**消费它。**校验分两个时机，互不耦合**：
@@ -126,3 +111,24 @@
 
 - **当** manifest 的 `only_if` 含被 AST 闸门拒绝的构造，或为空串
 - **那么** manifest 加载期必须 raise，禁止留到运行期
+
+### 需求:manifest 的 target 基数必须按 mode 决定（agent 单 target，deterministic 多 target）
+
+`ScheduleManifest.targets` 是 `list[str]`。加载器**必须**按 `mode` 校验其成员数:
+
+- **`mode == "agent"`**:**必须恰好 1 个成员**——多于 1 个时 fail-loud 拒绝加载。理由不变:agent 复用的 `run_diagnosis_pipeline` 是单 target 编排（`report_target_name` / `target_lookup_name` 单值），多 target fan-out 的 Run/Report 基数对 agent 仍是非目标。
+- **`mode == "deterministic"`**:**允许 ≥1 个成员**——deterministic 模式逐 target 跑固定集、组装一份多 target 报告（见 `deterministic-inspection-mode` 能力），多 target 是其核心用途。
+
+任一成员未在 `TargetRegistry` 注册时仍 fail-loud（不变）。
+
+#### 场景:agent 模式多 target 仍 fail-loud
+- **当** `mode: agent`（或省略 mode）的 manifest `targets` 含 2 个或更多 id（即便都已注册），执行加载
+- **那么** 加载**必须** fail-loud raise，错误指出该文件 + "agent 模式仅支持单 target"语义
+
+#### 场景:deterministic 模式多 target 正常加载
+- **当** `mode: deterministic` 的 manifest `targets` 含 ≥1 个均已注册的 id，执行加载
+- **那么** **必须**正常加载（不因多 target 被拒）
+
+#### 场景:单 target manifest 在两种 mode 均正常加载
+- **当** 任一 mode 的 manifest `targets` 恰好 1 个已注册成员
+- **那么** **必须**正常加载

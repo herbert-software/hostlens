@@ -108,44 +108,6 @@
 - **当** 某次触发因超过 `misfire_grace_time` 被 APScheduler 判为 misfire
 - **那么** 必须落 `Run(status=missed, report_id=None)`；积压的多次触发因 `coalesce=True` 只合并跑一次而非补跑 N 次
 
-### 需求:job 执行必须复用诊断 pipeline 并按结果映射 RunStatus
-
-job 执行体必须调用交付层无关的编排函数 `run_diagnosis_pipeline`（Planner→Diagnostician→忠实 `Report`，签名 `-> Report | None`），并按其结果落 Run。**`run_diagnosis_pipeline` 返回裸 `None` 时不携带原因**（两条语义路径都返回 `None`：后端不可用、与「Planner ok 但模型从未调 `run_inspector`」的空采集），故 runner **必须注入 pipeline 的既有可选形参 `planner_result_sink` 捕获 `planner_result.loop_result.terminal_status` 作为判别信号**（该形参既有、默认 no-op，不改 pipeline 行为）。映射规则：
-
-- pipeline 返回 `Report` 且 `Report.meta.status == ok` → `ReportStore.save(report)` 后落 `Run(status=ok, report_id=<saved run_id>, report_hash=<指纹>)`
-- pipeline 返回 `Report` 且 `Report.meta.status` 为降级类（`partial` / `degraded_no_planner` / `degraded_rate_limited` / `degraded_token_budget` / `degraded_max_turns` / `empty_response` / `stored_as_orphan`）→ 落 `Run(status=partial, report_id=<saved>, report_hash=<指纹>)`。**特别地：token / turns 预算耗尽产出的是 `degraded_token_budget` / `degraded_max_turns` 的 Report，映射为 `partial`（有 Report），禁止映射为无-Report 的 `budget_exhausted`**
-- pipeline 返回 `None` 且 sink 捕获 `terminal_status == "failed_api_unavailable"` → `Run(status=failed_api_unavailable, report_id=None)`
-- pipeline 返回 `None` 且 `terminal_status` 非 `failed_api_unavailable`（空采集：模型从未调 `run_inspector`）→ `Run(status=failed, error="pipeline produced no inspector results", report_id=None)`，**禁止**误记为 `failed_api_unavailable` 污染异常率统计
-
-`budget_exhausted`（无 Report）是 §7 定义的「API quota 排队 5 分钟未拿到、早期失败」语义；M2/M3 pipeline **当前不产生此信号**（`agent/loop.py` 的 `_TerminalStatus` 闭集不含 `budget_exhausted`），故 M4 runner 的 pipeline-结果映射**永不构造** `budget_exhausted`——它保留在 8 值枚举里对齐 §7、供未来 quota-queue 路径由调度层产出。
-
-Report 持久化必须复用既有 `reporting.store.ReportStore`，**禁止** scheduler 另造 Report 存储。`Run.report_id` 是指向 reports.db 的软引用；必须在 `ReportStore.save` 成功之后才写带 `report_id` 的 Run。正常入库的 Run 必须 `report_storage="db"`。**orphan 边界**：`ReportStore.save` 在 SQLite 写失败时返回 `SaveResult(stored_as_orphan=True, orphan_path=...)`（report 落 JSON 文件、不在 reports.db、`get_run` 取不到）；runner 必须显式处理——落 `Run(status=partial, report_id=<run_id>, report_hash=<指纹>, report_storage="orphan")`（用确定的 `report_storage` 字段而非塞 `error`），**禁止**当 `ok`/`report_storage="db"` 静默写出一条 `get_run` 取不到的 Run。
-
-#### 场景:正常巡检产 Report 并留痕
-
-- **当** 一次触发的 pipeline 正常产出 ok 的 `Report` 且 `ReportStore.save` 正常入库（非 orphan）
-- **那么** 该 Report 必须经 `ReportStore.save` 持久化；必须落 `Run(status=ok, report_id=<save 返回的 run_id>, report_hash, report_storage="db", targets, inspectors, started_at, finished_at)`，且 `report_id` 可经 `ReportStore.get_run` 取回
-
-#### 场景:后端不可用不产 Report
-
-- **当** pipeline 因 Agent loop 后端重试耗尽返回 `None` 且 sink 捕获 `terminal_status == "failed_api_unavailable"`
-- **那么** 必须落 `Run(status=failed_api_unavailable, report_id=None)`；**禁止**写任何 Report
-
-#### 场景:空采集与后端不可用区分
-
-- **当** pipeline 返回 `None` 但 `terminal_status` 非 `failed_api_unavailable`（Planner ok、模型从未调 `run_inspector`，collector 空）
-- **那么** 必须落 `Run(status=failed, error="pipeline produced no inspector results", report_id=None)`；**禁止**误记为 `failed_api_unavailable`
-
-#### 场景:token 预算耗尽产 partial Report 而非 budget_exhausted
-
-- **当** pipeline 因 token / turns 预算耗尽产出 `Report.meta.status == degraded_token_budget`（或 `degraded_max_turns`）的 Report
-- **那么** 必须 `ReportStore.save` 后落 `Run(status=partial, report_id=<saved>)`；**禁止**丢弃该 Report 或落无-Report 的 `budget_exhausted`
-
-#### 场景:save 降级 orphan 时不当 ok 静默写
-
-- **当** pipeline 产出 ok Report 但 `ReportStore.save` 返回 `stored_as_orphan=True`（SQLite 写失败降级 JSON）
-- **那么** 必须落 `Run(status=partial, report_id=<run_id>, report_storage="orphan", ...)`；**禁止**落 `status=ok` 或 `report_storage="db"` 后让 `report_id` 经 `get_run` 取回为 `None` 而无任何标注
-
 ### 需求:Run 记录必须持久化到独立 store 并可查询
 
 `hostlens.scheduler.store` 必须提供 `RunStore`，把 `Run` 持久化到独立的本地 SQLite 库（默认 `~/.local/share/hostlens/runs.db`，`db_path` 必须可注入以便测试用临时库），**禁止**与 `reports.db` 混表。`RunStore` 必须提供按 `schedule_name` / 时间倒序列出最近 N 条 Run 的查询，供 `schedule status` 与 doctor 消费。store 必须 async、无 module-level 连接（与 `ReportStore` 形态一致）。
@@ -196,3 +158,33 @@ notify 阶段必须**失败隔离**：任何通道在**路由（`only_if` 求值
 
 - **当** 以 `trigger(name, dispatch_notify=False)` 触发一个**配了 notify 通道**且 job 体产出 `ok` Report 的 schedule
 - **那么** Report 必须照常持久化、`Run.report_id` 非空、`Run.status` 为 `ok`，且 `Run.notify_results == []`；测试必须以 spy/mock 断言该通道的 `only_if` 求值与 `send` **调用计数均为 0**（仅凭 `notify_results == []` 不足以证明抑制真生效——空列表在「无通道配置」时也成立；故场景刻意要求**配了通道**且断言 send 从未被调，避免 vacuous 验收）
+
+### 需求:job 执行必须按 mode 路由（agent 复用诊断 pipeline / deterministic 走确定性采集）并按结果映射 RunStatus
+
+job 执行体**必须**按 `manifest.mode` 路由，两条路径都产出 `Report | None` 并按**同一套** RunStatus 映射落 Run:
+
+**`mode == "agent"`（不变）**:调用交付层无关的编排函数 `run_diagnosis_pipeline`（Planner→Diagnostician→`Report | None`），注入既有 `planner_result_sink` 捕获 `terminal_status` 判别 `None` 原因（后端不可用 vs 空采集）。
+
+**`mode == "deterministic"`（新增）**:调用 `run_deterministic_inspection`（见 `deterministic-inspection-mode` 能力):逐 target 跑固定 inspector 集（不走 Planner、不注入 LLMBackend 到采集阶段）→ 组装多 target `Report` → narrate-only Diagnostician 写根因。返回 `Report`（采集到 ≥1 个 inspector 结果）或 `None`（全部 target × inspector 均无结果可组装）。
+
+**共享映射规则**（两 mode 一致）:
+
+- 返回 `Report` 且 `meta.status == ok` → `ReportStore.save` 后落 `Run(status=ok, report_id=<saved>, report_hash)`
+- 返回 `Report` 且 `meta.status` 为降级类——既有显式枚举**逐字保留不削**：`partial` / `degraded_no_planner` / `degraded_rate_limited` / `degraded_token_budget` / `degraded_max_turns` / `empty_response` / `stored_as_orphan`——→ `Run(status=partial, report_id=<saved>, report_hash)`;**token/turns 预算耗尽（仅 agent 可触发）产 `degraded_token_budget`/`degraded_max_turns` 的 Report 仍映射 `partial`、禁止映射无-Report 的 `budget_exhausted`**
+- agent 返回 `None` 且 sink `terminal_status == "failed_api_unavailable"` → `Run(status=failed_api_unavailable, report_id=None)`
+- agent 返回 `None` 且非上述（空采集）→ `Run(status=failed, error="pipeline produced no inspector results", report_id=None)`
+- **deterministic 返回 `None`（全 inspector 无结果）→ `Run(status=failed, error="deterministic inspection produced no inspector results", report_id=None)`**;deterministic **不经** LLM 采集，故**不产** `failed_api_unavailable`（narrate 阶段后端不可用按 `degraded` Report 处理、不丢已采集结果）
+
+Report 持久化、orphan 边界、`report_storage` 字段语义不变（复用 `ReportStore`）。
+
+#### 场景:agent 模式行为不变
+- **当** 一个 `mode: agent`（或省略 mode）manifest 触发、pipeline 正常产 ok Report 入库
+- **那么** 行为与变更前**完全一致**:`run_diagnosis_pipeline` + sink + 落 `Run(status=ok, report_id=<saved>, report_storage="db")`
+
+#### 场景:deterministic 模式逐 target 跑固定集产多 target Report
+- **当** 一个 `mode: deterministic`、`targets: [a, b]` 的 manifest 触发
+- **那么** **必须**走 `run_deterministic_inspection`（不实例化 Planner、采集阶段不注入 LLMBackend），逐 target 跑固定集、组装一份含 a/b 的 Report、narrate-only 写根因，并按共享规则落 `Run`（ok/partial）
+
+#### 场景:deterministic 全无结果落 failed
+- **当** deterministic 模式下全部 target × inspector 均无可组装结果
+- **那么** **必须**落 `Run(status=failed, error="deterministic inspection produced no inspector results", report_id=None)`,**禁止**误记为 `failed_api_unavailable`
