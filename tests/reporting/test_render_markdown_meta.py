@@ -7,7 +7,7 @@ timestamps + 2-decimal duration.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from hostlens.inspectors.result import InspectorResult
@@ -18,8 +18,8 @@ from hostlens.reporting.render_markdown import render
 def _make_report(
     *,
     intent: str | None = None,
-    started_at: datetime = datetime(2026, 5, 26, 12, 0, 0),
-    finished_at: datetime = datetime(2026, 5, 26, 12, 0, 1, 250000),
+    started_at: datetime = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC),
+    finished_at: datetime = datetime(2026, 5, 26, 12, 0, 1, 250000, tzinfo=UTC),
 ) -> Report:
     ir = InspectorResult(
         name="hello.echo",
@@ -83,10 +83,14 @@ def test_intent_string_passes_through() -> None:
     assert "| intent | check db latency |" in out
 
 
-def test_timestamps_use_iso8601() -> None:
+def test_timestamps_render_in_host_local_tz(shanghai_tz: None) -> None:
+    # UTC-stored timestamps render in the host's local timezone (shanghai_tz
+    # pins TZ so the assertion is deterministic across CI/UTC and a CST box).
     out = render(_make_report())
-    assert "| started_at | 2026-05-26T12:00:00 |" in out
-    assert "| finished_at | 2026-05-26T12:00:01.250000 |" in out
+    # UTC 12:00 → Asia/Shanghai (+08:00) 20:00 — converted, not raw UTC.
+    assert "| started_at | 2026-05-26T20:00:00+08:00 |" in out
+    assert "| finished_at | 2026-05-26T20:00:01.250000+08:00 |" in out
+    assert "T12:00:00" not in out  # the UTC wall clock must NOT leak through
 
 
 def test_duration_seconds_two_decimal() -> None:

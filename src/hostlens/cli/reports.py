@@ -40,6 +40,7 @@ import typer
 from pydantic import ValidationError
 
 import hostlens.inspectors.result  # noqa: F401  (triggers Report.model_rebuild)
+from hostlens.core.timefmt import to_host_local
 from hostlens.reporting import render_json, render_markdown
 from hostlens.reporting.diff import RegressionDiff, compute_diff
 from hostlens.reporting.models import Report
@@ -122,7 +123,9 @@ def list_cmd(
 
 
 def _format_row(row: RunIndexRow) -> str:
-    return f"{row.run_id}\t{row.timestamp.isoformat()}\t{row.status}\tfindings={row.finding_count}"
+    # Human-readable run index → host-local timezone (storage stays UTC).
+    local_ts = to_host_local(row.timestamp).isoformat()
+    return f"{row.run_id}\t{local_ts}\t{row.status}\tfindings={row.finding_count}"
 
 
 def _dumps(payload: object) -> str:

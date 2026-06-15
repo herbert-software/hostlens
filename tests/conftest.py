@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -147,6 +149,37 @@ def _isolate_structlog_config() -> Iterator[None]:
     """
     yield
     structlog.reset_defaults()
+
+
+@pytest.fixture
+def shanghai_tz() -> Iterator[None]:
+    """Pin the process timezone to ``Asia/Shanghai`` for deterministic
+    host-local timestamp rendering, then restore the **original** ``TZ``
+    (env var + libc cache) on teardown.
+
+    Used by the ``render-report-time-in-host-local-tz`` tests: report times
+    render in the host's local TZ (``astimezone()``), so the output depends
+    on the process TZ — pinning makes assertions stable across a UTC CI
+    runner and a local CST box. Restoring the *original* value (not just
+    deleting ``TZ`` → system default) keeps the libc cache consistent with
+    the env var even when the process started with a non-default ``TZ``.
+
+    POSIX-only: ``time.tzset()`` does not exist on Windows.
+    """
+
+    if sys.platform == "win32":
+        pytest.skip("TZ pinning via time.tzset() is POSIX-only")
+    original = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Shanghai"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time.tzset()
 
 
 @pytest.fixture

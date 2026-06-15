@@ -19,6 +19,7 @@ from datetime import datetime
 from io import StringIO
 from typing import TYPE_CHECKING
 
+from hostlens.core.timefmt import to_host_local
 from hostlens.reporting._redact import redact_report_for_render
 from hostlens.reporting.models import (
     Evidence,
@@ -68,7 +69,8 @@ def _escape_control_chars(s: str) -> str:
 
 
 def _fmt_dt(dt: datetime) -> str:
-    return dt.isoformat()
+    # Human-readable render → host-local timezone (storage stays UTC).
+    return to_host_local(dt).isoformat()
 
 
 def _fmt_duration(report: Report) -> str:
