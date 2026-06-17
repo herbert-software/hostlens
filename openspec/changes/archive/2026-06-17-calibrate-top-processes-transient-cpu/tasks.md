@@ -26,4 +26,4 @@
 - [x] 4.1 `openspec-cn validate calibrate-top-processes-transient-cpu --strict` 通过;并在 temp 副本实测 `openspec-cn archive`(rebuild 校验,ADDED 需求中文标题)不中止。
 - [x] 4.2 **全量** `pytest -q`(非子集——遵 memory:scoped 改动靠编排者全量兜 ripple)+ `mypy --strict` + `ruff` 全绿。
 - [ ] 4.3 真机 Demo Path(procps Linux / local target):`hostlens inspect linux.cpu.top_processes --json` 核对输出含 `etimes` 列;`yes > /dev/null &` 后立即采集验 `etimes<10` 不告警、存活 >10s 后告警。
-- [ ] 4.4 commit 到 `feat/calibrate-top-processes-transient-cpu`,跑对抗性 review-loop,APPROVE/CLEAR 后开 PR → CI 绿 → squash merge。
+- [x] 4.4 commit 到 `feat/calibrate-top-processes-transient-cpu`,跑对抗性 review-loop,APPROVE/CLEAR 后开 PR → CI 绿 → squash merge。(实现 review-loop 2 轮 APPROVE-DEGRADED;PR #116 已 squash merge)
