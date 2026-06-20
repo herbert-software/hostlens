@@ -26,16 +26,17 @@
 ## 决策
 
 1. **加载点 = `hostlens.cli` 根 `@app.callback()`**（所有子命令 body 之前、`load_settings()` 之前）。一处加载、所有命令受益；与「CLI 是唯一应用入口」一致。
-2. **`load_dotenv(dotenv_path=Path(".env"), override=False)`**（`python-dotenv`）：
+2. **`dotenv_values(dotenv_path=Path(".env"))` + `os.environ.setdefault`**（`python-dotenv`，不用 `load_dotenv`）：
    - **cwd-relative `.env`**，与 `Settings(env_file=".env")` 的 cwd 语义一致（不向上递归 `find_dotenv`，避免「父目录的 .env 意外生效」这类 `Settings` 同款不一致）。
-   - **`override=False`**：已存在的 `os.environ`（显式 `export`）**优先**，`.env` 只填补缺失项 —— `export` 仍是覆盖手段。
-   - **缺文件静默**：`load_dotenv` 对不存在的路径返回 `False`、不抛；无 `.env` 的环境零影响。
+   - **`setdefault` ≡ override=False**：已存在的 `os.environ`（显式 `export`）**优先**，`.env` 只填补缺失项 —— `export` 仍是覆盖手段。
+   - **不用 `load_dotenv`**：① `load_dotenv(override=False)` 以 os.environ 优先解析 `${VAR}` 插值，与 pydantic `dotenv_values`（文件优先）不同序，会让插值型 Settings 字段取值漂移；`dotenv_values` 同序，保证决策 4 的取值不变性。② `load_dotenv` 在 `PYTHON_DOTENV_DISABLED` 置位时静默变 no-op，`dotenv_values` 不受影响。
+   - **缺失 / 不可读 / 目录静默**：缺文件 `dotenv_values` 返回空 dict；不可读抛 `OSError`、目录在 python-dotenv ≥1.0.1 返回空 dict（旧版抛 `OSError`），均被 `try/except OSError` 捕获静默跳过——否则一个权限错的 `.env` 会让 `hostlens doctor` 等所有走根回调的命令崩（`--help` 短路在回调前，恰好不崩）。无 `.env` 的环境零影响。
 3. **依赖 `python-dotenv`**：标准库无 `.env` 解析；pydantic-settings 的 dotenv 解析不导出 `os.environ`（正是本问题根因），无法复用；`python-dotenv` 是最小且事实标准。
-4. **`Settings` 行为不变性论证**：pydantic-settings 取值优先级 `init > os.environ > .env file > default`。`load_dotenv(override=False)` 后 `os.environ` 含 `.env` 值，`Settings` 从 `os.environ`（而非 `.env file` 层）取到**同一个值** —— 取值结果不变，仅命中层级前移。`Settings` 自身的 `env_file=".env"` 保留（对无 export 的字段是冗余但无害的二次来源）。
+4. **`Settings` 行为不变性论证**：pydantic-settings 取值优先级 `init > os.environ > .env file > default`。`dotenv_values` + `setdefault` 后 `os.environ` 含 `.env` 值，`Settings` 从 `os.environ`（而非 `.env file` 层）取到**同一个值** —— 取值结果不变，仅命中层级前移。关键：`dotenv_values` 以「文件优先」解析 `${VAR}` 插值，与 pydantic 同序，故连插值型字段也取到同一值；若改用 `load_dotenv(override=False)`（os.environ 优先插值）反而会破坏此不变性。`Settings` 自身的 `env_file=".env"` 保留（对无 export 的字段是冗余但无害的二次来源）。
 
 ## 风险 / 权衡
 
-- **cwd 依赖**：`load_dotenv(".env")` 与 `Settings` 一样 cwd-relative。从无 `.env` 的目录运行 hostlens 则不加载 —— 与现状一致（`Settings` 本就如此），daemon 从 `~/hostlens`（含 `.env`）运行。文档需明确「从含 `.env` 的目录运行，或用 export」。
+- **cwd 依赖**：`dotenv_values(Path(".env"))` 与 `Settings` 一样 cwd-relative。从无 `.env` 的目录运行 hostlens 则不加载 —— 与现状一致（`Settings` 本就如此），daemon 从 `~/hostlens`（含 `.env`）运行。文档需明确「从含 `.env` 的目录运行，或用 export」。
 - **`.env` 落盘密钥**：`.env` 现已存密钥（`Settings` 读它），本变更不新增暴露面；权限仍由用户维护（建议 0600）。
 - **override=False 语义**：若同一变量既 `export` 又在 `.env`，`export` 胜。这是有意的覆盖语义，须在文档点明（防「改了 .env 没生效，其实被 export 覆盖了」的困惑）。
 - **测试隔离**：CLI 测试若在含 dev `.env` 的仓根运行，新加载会注入 dev 值污染断言 —— 复用既有 `_isolate_env`（chdir tmp + delenv）模式（CLAUDE.md 红线 [[project_tests_must_isolate_dev_env_or_ci_red]]）。

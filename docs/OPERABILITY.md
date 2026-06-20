@@ -160,6 +160,28 @@
 3. SOPS + age 加密文件（M10 后路线）
 4. 明文 yaml（**仅开发用**，doctor 会警告）
 
+### 7.1.1 `.env` 是 env 配置的唯一来源
+
+CLI 根回调启动时会把 **当前工作目录的 `.env`** 一次性加载进 `os.environ`，
+故 **所有** env-based 配置共享 `.env` 这一来源——`HOSTLENS_*` 强类型字段
+（pydantic `Settings`）、yaml 里的 `${VAR}` 占位（notifiers.yaml / targets.yaml）、
+inspector secrets 都能从同一个 `.env` 读到。**所有密钥 / env 统一放 `.env`**，
+不必再区分「这个走 `.env` 还是走 `export`」。模板见仓根 `.env.example`。
+
+- **`export` 是覆盖手段**：加载语义是 `override=False`（`os.environ.setdefault` 实现）——已经 `export` 进 shell 的同名
+  变量**优先**，`.env` 只填补缺失项。要临时覆盖某个值，`export VAR=...` 即可；
+  反之若「改了 `.env` 没生效」，先查是不是被一个残留的 `export` 盖住了。
+- **cwd 语义**：`.env` 是 cwd-relative（与 `Settings(env_file=".env")` 一致，
+  **不**向上递归查找父目录）。必须**从含 `.env` 的目录运行** `hostlens`
+  （daemon 即从 `~/hostlens` 启动），否则该目录无 `.env` 时按真实进程环境运行。
+- **不做 key 过滤**：若你在 `.env` 里显式放平台 key（如 `XDG_DATA_HOME`），它会
+  被注入并被既有代码读到——这是预期行为，但**别误放**平台 key，除非有意覆盖。
+- **缺文件静默**：无 `.env` 的环境零影响（不抛、不打印）。
+- **权限**：`.env` 落盘明文密钥，建议 `chmod 0600`。
+- **部署收尾**：以前在 daemon wrapper 里 `source .notifier-secrets.env` 把 notifier
+  密钥桥接进 `os.environ` 的做法**不再需要**——直接把那些密钥写进 `~/hostlens/.env`，
+  删掉 wrapper 里的 `source` 那行即可。
+
 ### 7.2 报告与日志脱敏
 
 - 任何写入 SQLite / 日志 / Notifier payload 的字符串都过 `core/redact.py`

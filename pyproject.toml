@@ -32,6 +32,7 @@ dependencies = [
     "rich>=13.7",
     "pydantic>=2.6",
     "pydantic-settings>=2.2",
+    "python-dotenv>=1.0",
     "structlog>=24.1",
     "asyncssh>=2.18,<3",
     "aiofiles>=23.0",

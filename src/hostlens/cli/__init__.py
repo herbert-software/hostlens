@@ -10,10 +10,13 @@ hold uniformly across every subcommand.
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
 import click
 import typer
+from dotenv import dotenv_values
 
 from hostlens.cli.demo import app as demo_app
 from hostlens.cli.doctor import run_doctor
@@ -40,13 +43,33 @@ app = typer.Typer(
 
 @app.callback()
 def _root() -> None:
-    """Force Typer into multi-command mode.
+    """Force Typer into multi-command mode and load `.env` into `os.environ`.
 
     Without an explicit callback, a Typer app with exactly one registered
     `@app.command` collapses into single-command mode and the subcommand
     name disappears from `--help`. This callback keeps `doctor` addressable
     as `hostlens doctor` (which the cli-foundation spec requires).
+
+    Loading `.env` here makes it the single source for every env-based config
+    surface: pydantic `Settings` already read `.env`, but `${VAR}` placeholder
+    expansion (notifiers.yaml / targets.yaml) and inspector secrets read bare
+    `os.environ` and never saw it. We read via `dotenv_values` + `setdefault`,
+    not `load_dotenv`: `dotenv_values` resolves `${VAR}` interpolation with the
+    same file-wins precedence pydantic uses, so a `Settings` value never
+    changes (only its hit layer moves to `os.environ`), and it is immune to the
+    `PYTHON_DOTENV_DISABLED` env var that silently turns `load_dotenv` into a
+    no-op. `setdefault` keeps an explicit `export` authoritative; the explicit
+    cwd-relative path (no `find_dotenv`) matches `Settings(env_file=".env")`. A
+    missing — or unreadable / is-a-directory — `.env` is skipped silently.
     """
+
+    try:
+        values = dotenv_values(dotenv_path=Path(".env"))
+    except OSError:
+        return
+    for key, value in values.items():
+        if value is not None:
+            os.environ.setdefault(key, value)
 
 
 @app.command("doctor")
