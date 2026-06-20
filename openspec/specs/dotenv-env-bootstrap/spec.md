@@ -1,7 +1,9 @@
 # dotenv-env-bootstrap 规范
 
 ## 目的
-待定 - 由归档变更 add-dotenv-env-loading 创建。归档后请更新目的。
+
+统一 hostlens 的 env 配置来源：CLI 启动时把工作目录的 `.env` 加载进 `os.environ`，使 pydantic `Settings`、yaml 的 `${VAR}` 占位解析、inspector secrets 三套 env-based 配置共享 `.env` 这一唯一来源；保留显式 `export` 作为覆盖手段，对缺失 / 不可读 / 目录形态的 `.env` 静默零影响，且不改变 `Settings` 的既有取值。
+
 ## 需求
 ### 需求:CLI 启动必须把 `.env` 加载进 `os.environ` 以统一 env 配置源
 
