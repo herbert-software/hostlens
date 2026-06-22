@@ -7,7 +7,7 @@ is the **only** sanctioned bridge between a host-agnostic `ToolSpec` (Layer
 - `list_for_agent()` projects all `surfaces ∋ "agent"` specs into a list of
   Anthropic-compatible `{name, description, input_schema}` dicts.
 - `dispatch(name, args_json, ctx)` performs the untrusted-dict → typed
-  Pydantic model boundary check, then runs the M2 policy gate (surface /
+  Pydantic model boundary check, then runs the policy gate (surface /
   side_effects / requires_approval), invokes the handler with optional
   timeout, and wraps any non-policy / non-lookup handler exception into a
   structured `tool_error` envelope (with all string values scrubbed by
@@ -147,14 +147,16 @@ class ToolsAdapter:
         args_json: dict[str, Any],
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
-        """Run the full M2 policy gate then invoke the handler.
+        """Run the full policy gate then invoke the handler.
 
         Steps (any failure raises before invoking the handler):
 
         1. `registry.get(name)` — `KeyError` propagates if missing.
         2. Surface gate: spec must include `"agent"` in `surfaces`.
-        3. Side-effects gate: M2 forbids `write` / `destructive`.
-        4. Approval gate: M2 forbids `requires_approval=True`.
+        3. Side-effects gate: agent surface permanently forbids `write` /
+           `destructive`.
+        4. Approval gate: agent surface permanently forbids
+           `requires_approval=True`.
         5. Input schema validation: dict → typed Pydantic model. Failure
            raises `TypeError` (it's a type error, not a policy refusal).
         6. Resolve `ctx` (default = `self._context_factory()`), then
@@ -179,7 +181,7 @@ class ToolsAdapter:
                 reason="not_exposed_to_surface",
             )
 
-        # 3. Side-effects gate (M2 read-only).
+        # 3. Side-effects gate (agent surface permanently read-only).
         if spec.side_effects in {"write", "destructive"}:
             raise ToolPolicyViolation(
                 tool_name=name,
@@ -188,13 +190,13 @@ class ToolsAdapter:
                 reason="side_effects_not_permitted",
             )
 
-        # 4. Approval gate (M2 has no approval flow).
+        # 4. Approval gate (agent surface has no approval flow — permanent invariant).
         if spec.requires_approval is True:
             raise ToolPolicyViolation(
                 tool_name=name,
                 surface="agent",
                 violated_field="requires_approval",
-                reason="approval_flow_not_supported_in_m2",
+                reason="approval_flow_not_supported",
             )
 
         # 5. Untrusted dict → typed Pydantic model boundary.

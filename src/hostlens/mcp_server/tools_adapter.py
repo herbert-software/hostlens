@@ -135,13 +135,13 @@ class McpToolsAdapter:
                 reason="side_effects_not_permitted",
             )
 
-        # 5. Approval gate (MCP has no approval flow in M2).
+        # 5. Approval gate (MCP has no approval flow — permanent invariant).
         if spec.requires_approval is True:
             raise ToolPolicyViolation(
                 tool_name=name,
                 surface="mcp",
                 violated_field="requires_approval",
-                reason="approval_flow_not_supported_in_m2",
+                reason="approval_flow_not_supported",
             )
 
         # 6. Untrusted dict → typed Pydantic model boundary.

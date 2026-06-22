@@ -9,7 +9,7 @@ Five scenarios:
    **Covered with BOTH "write" and "destructive" cases.**
 3. `requires_approval=True` raises `ToolPolicyViolation`
    (violated_field="requires_approval",
-   reason="approval_flow_not_supported_in_m2").
+   reason="approval_flow_not_supported").
 4. Invalid args_json raises `TypeError` (NOT `ToolPolicyViolation`).
 5. Success path returns `result.model_dump()`.
 """
@@ -91,7 +91,7 @@ def test_dispatch_raises_when_requires_approval_is_true() -> None:
             await adapter.dispatch("approval_tool", {}, make_ctx())
         err = ei.value
         assert err.violated_field == "requires_approval"
-        assert err.reason == "approval_flow_not_supported_in_m2"
+        assert err.reason == "approval_flow_not_supported"
 
     asyncio.run(go())
 

@@ -73,6 +73,6 @@ async def test_approval_gate_consistent_across_adapters() -> None:
     mcp_err = mcp_ei.value
     assert agent_err.tool_name == mcp_err.tool_name == "dual_surface_approval"
     assert agent_err.violated_field == mcp_err.violated_field == "requires_approval"
-    assert agent_err.reason == mcp_err.reason == "approval_flow_not_supported_in_m2"
+    assert agent_err.reason == mcp_err.reason == "approval_flow_not_supported"
     assert agent_err.surface == "agent"
     assert mcp_err.surface == "mcp"

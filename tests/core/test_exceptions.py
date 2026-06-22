@@ -482,7 +482,7 @@ def test_tool_policy_violation_repr_never_leaks_sensitive_substrings() -> None:
     legal_reasons = [
         "not_exposed_to_surface",
         "side_effects_not_permitted",
-        "approval_flow_not_supported_in_m2",
+        "approval_flow_not_supported",
         "sensitive_output_not_declared",
         "missing_required_permission",
         "target_constraint_violated",
