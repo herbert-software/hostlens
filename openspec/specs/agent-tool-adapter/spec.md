@@ -3,9 +3,7 @@
 ## 目的
 
 定义 Hostlens 双层 Capability Registry 的 Agent surface adapter（Layer 2）：`hostlens.agent.tools_adapter.ToolsAdapter` 把 `surfaces ∋ "agent"` 的 ToolSpec 投成 Anthropic Messages API `tool_use` schema，在 dispatch 前强制 policy gate 校验，包装 handler 异常为 tool_error dict，并保证投影结构稳定性以匹配 Anthropic 服务端的 prompt cache。本规范不覆盖 M7 MCP adapter 与 CLI adapter（由各自 spec 描述）。
-
 ## 需求
-
 ### 需求:`ToolsAdapter` 必须把 ToolSpec 投成 Anthropic `tool_use` schema
 
 `hostlens.agent.tools_adapter.ToolsAdapter(registry: ToolRegistry, context_factory: Callable[[], ToolContext])` 必须提供 `list_for_agent() -> list[dict[str, Any]]` 方法，把 `registry.list_for("agent")` 返回的每个 ToolSpec 投成符合 Anthropic Messages API `tool_use` 协议的 dict：
@@ -45,8 +43,8 @@
 `async def ToolsAdapter.dispatch(self, name: str, args_json: dict, ctx: ToolContext | None = None) -> dict` 必须在调用 handler 前执行下列 policy gate 校验，**任一失败必须 raise `ToolPolicyViolation`**：
 
 1. **surface gate**：被请求的 ToolSpec 必须 `surfaces ∋ "agent"`，否则 `reason="not_exposed_to_surface"`
-2. **side_effects gate**：M2 阶段如果 `spec.side_effects ∈ {"write", "destructive"}`，必须 raise `reason="side_effects_not_permitted"`（M2 不支持写操作 ToolSpec；写操作 ToolSpec 推到 M9 同时 enable approval flow）
-3. **approval gate**：M2 阶段如果 `spec.requires_approval is True`，必须 raise `reason="approval_flow_not_supported_in_m2"`
+2. **side_effects gate**：如果 `spec.side_effects ∈ {"write", "destructive"}`，必须 raise `reason="side_effects_not_permitted"`（Agent 表面**永久只读**——写类 ToolSpec 在 agent surface 永久被拒，不是临时墙；M9 受控修复不以 agent-surface ToolSpec 形式存在，写路径自成 Remediation 子系统）
+3. **approval gate**：如果 `spec.requires_approval is True`，必须 raise `reason="approval_flow_not_supported"`（agent surface **永久**无 approval flow；真审批属 Remediation 子系统的独立 `ApprovalGate`，不经 `ToolContext`）
 4. **input schema validation**：`args_json` 必须能被 `spec.input_schema.model_validate(args_json)` 解析；失败时 raise `TypeError`（**不是** `ToolPolicyViolation` —— 类型错误不是 policy 拒绝）
 
 成功通过 gate 后：
@@ -62,16 +60,16 @@
 - **当** registry 含 spec `mcp_only(surfaces={"mcp"})`；调用 `await adapter.dispatch("mcp_only", {}, ctx)`
 - **那么** 必须 raise `ToolPolicyViolation`，属性 `tool_name=="mcp_only"` / `surface=="agent"` / `violated_field=="surfaces"` / `reason=="not_exposed_to_surface"`
 
-#### 场景:side_effects ∈ {write, destructive} 在 M2 raise
+#### 场景:side_effects ∈ {write, destructive} 永久 raise
 
 - **当** 某 ToolSpec `side_effects="write"` 且 `surfaces={"agent"}` 且 `requires_approval=False`；调用 `await adapter.dispatch("...", {}, ctx)`
 - **那么** 必须 raise `ToolPolicyViolation`，`violated_field=="side_effects"` / `reason=="side_effects_not_permitted"`
 - **且** 同样情况下 `side_effects="destructive"` 也必须 raise 同样的 reason
 
-#### 场景:requires_approval=True 在 M2 raise
+#### 场景:requires_approval=True 永久 raise
 
 - **当** 某 ToolSpec `requires_approval=True` 且 `surfaces={"agent"}` 且 `side_effects ∈ {"none", "read"}`；调用 `await adapter.dispatch("...", {}, ctx)`
-- **那么** 必须 raise `ToolPolicyViolation`，`violated_field=="requires_approval"` / `reason=="approval_flow_not_supported_in_m2"`
+- **那么** 必须 raise `ToolPolicyViolation`，`violated_field=="requires_approval"` / `reason=="approval_flow_not_supported"`
 
 #### 场景:args 不符合 input_schema raise TypeError
 

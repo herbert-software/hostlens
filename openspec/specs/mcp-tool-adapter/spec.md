@@ -3,7 +3,6 @@
 ## 目的
 
 定义 Hostlens 双层 Capability Registry 的 MCP surface adapter（Layer 2，M7）：`hostlens.mcp_server.tools_adapter.McpToolsAdapter` 把 `surfaces ∋ "mcp"` 的 ToolSpec 投影成官方 `mcp` SDK 的 tool definition（`description` 取 `mcp_description`、`inputSchema` 由 Pydantic 投影生成），在投影与 dispatch 两侧对称强制 fail-closed `sensitive_output` 门（None 即拒绝暴露给远程 LLM），dispatch 复刻 agent adapter 的九步 policy gate 并复用 `scrub_exception_message` 脱敏 handler 异常。本规范不覆盖 MCP server 入口与 CLI（由各自 spec 描述）。
-
 ## 需求
 ### 需求:`McpToolsAdapter` 必须把 `surfaces ∋ "mcp"` 的 ToolSpec 投影成 mcp SDK tool definition
 
@@ -45,8 +44,8 @@
 (1) `registry.get(name)`，`KeyError` 传播不包装；
 (2) surface 门 —— `"mcp" not in spec.surfaces` 则 raise `ToolPolicyViolation(tool_name=name, surface="mcp", violated_field="surfaces", reason="not_exposed_to_surface")`；
 (3) **sensitive_output 门（fail-closed 的 dispatch 侧对称门）** —— `spec.sensitive_output is None` 则 raise `ToolPolicyViolation(tool_name=name, surface="mcp", violated_field="sensitive_output", reason="sensitive_output_not_declared")`。此门与 `list_for_mcp()` 投影侧的 fail-closed 检查**两条路径对称**，专门挡住「远程 LLM 不先调 list_tools、直接 call_tool 一个 `surfaces ∋ "mcp"` 且 `sensitive_output is None` 的工具」的绕过路径（§4.10 规则 6 缺省禁止暴露，必须在 dispatch 路径同样成立）；
-(4) side_effects 门 —— `spec.side_effects ∈ {"write","destructive"}` 则 raise `ToolPolicyViolation(tool_name=name, surface="mcp", violated_field="side_effects", reason="side_effects_not_permitted")`；
-(5) approval 门 —— `spec.requires_approval is True` 则 raise `ToolPolicyViolation(tool_name=name, surface="mcp", violated_field="requires_approval", reason="approval_flow_not_supported_in_m2")`；
+(4) side_effects 门 —— `spec.side_effects ∈ {"write","destructive"}` 则 raise `ToolPolicyViolation(tool_name=name, surface="mcp", violated_field="side_effects", reason="side_effects_not_permitted")`（MCP 表面**永久只读**，写类 ToolSpec 永久被拒）；
+(5) approval 门 —— `spec.requires_approval is True` 则 raise `ToolPolicyViolation(tool_name=name, surface="mcp", violated_field="requires_approval", reason="approval_flow_not_supported")`（MCP 表面**永久**无 approval flow；真审批属 Remediation 子系统）；
 (6) 输入 schema 校验 dict→typed model，失败 raise `TypeError`；
 (7) 解析 ctx（默认走 context 工厂）并调 handler，`spec.timeout` 非空时包 `asyncio.wait_for`；
 (8) 输出 schema sanity 检查（`isinstance`，不符 raise `ToolError`）；
@@ -76,7 +75,7 @@ handler 抛出的异常（除 `ToolPolicyViolation` / `KeyError` / `asyncio.Canc
 #### 场景:dispatch requires_approval 工具触发 approval 策略门
 
 - **当** spec 的 surfaces 含 "mcp"、side_effects="read"、sensitive_output=False 但 requires_approval=True
-- **那么** 必须 raise `ToolPolicyViolation`，`surface == "mcp"`、`violated_field == "requires_approval"`、`reason == "approval_flow_not_supported_in_m2"`，handler 不被调用
+- **那么** 必须 raise `ToolPolicyViolation`，`surface == "mcp"`、`violated_field == "requires_approval"`、`reason == "approval_flow_not_supported"`，handler 不被调用
 
 #### 场景:dispatch 输入 args_json 非法触发 TypeError
 

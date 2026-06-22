@@ -191,13 +191,13 @@
   - `reason: Literal[
         "not_exposed_to_surface",
         "side_effects_not_permitted",
-        "approval_flow_not_supported_in_m2",
+        "approval_flow_not_supported",
         "sensitive_output_not_declared",
         "missing_required_permission",
         "target_constraint_violated",
-    ]`（M2 阶段合法 reason 码集合；**禁止**接受自由文本字符串以防上层调用方把路径/凭据/用户输入塞进 reason 字段）
+    ]`（合法 reason 码集合；**禁止**接受自由文本字符串以防上层调用方把路径/凭据/用户输入塞进 reason 字段）
 
-`__init__` 必须用 keyword-only args：`def __init__(self, *, tool_name, surface, violated_field, reason)`；运行时如收到不在 `reason` Literal 集合内的值，必须 raise `ValueError`（M2 实现时可用 `assert reason in get_args(REASON_LITERAL)`）。
+`__init__` 必须用 keyword-only args：`def __init__(self, *, tool_name, surface, violated_field, reason)`；运行时如收到不在 `reason` Literal 集合内的值，必须 raise `ValueError`（实现时可用 `assert reason in get_args(REASON_LITERAL)`）。
 
 **M0 兼容性：** M0 `core-services` spec §需求:异常基类层次明确 §场景:M0 子类列表完整且最小 限定"恰好 4 个"是 **M0 阶段范围约束**。本 spec 在 M2 范围内声明扩展：M2 落地后 `hostlens.core.exceptions` 公共导出从 4 增加到 6（新增 `ToolError` / `ToolPolicyViolation`）。**M0 子类完整性测试**（`tests/core/test_exceptions.py::test_module_exports_exactly_four_exception_classes`）必须在本变更同 PR 内被更新为断言"恰好 6 个"，否则 M0 测试与 M2 实现会冲突。
 
@@ -373,7 +373,7 @@
 `hostlens.tools.schemas.list_targets.CAPABILITY_ALLOWLIST` 必须定义为 `frozenset({c.value for c in Capability})`（**M1 落地后**——`Capability` Enum 由 `execution-target` spec 定义并 import）。**禁止**：
 
 - 静态硬编码字面量（如 `frozenset({"shell", "file_read", ...})`）—— 易与 Enum 漂移
-- 含 Enum 尚未定义的 placeholder 值（如 M2 stub 阶段的 `file_write` / `docker` / `k8s_exec` 是预留 placeholder；M1 落地后**必须**删除，到 M8/M9 才回填）
+- 含 Enum 尚未定义的 placeholder 值（如 M2 stub 阶段的 `file_write` / `docker` / `k8s_exec` 是预留 placeholder；M1 落地后**必须**删除——其中 `file_write` / `k8s_exec` 经评审**不**回填（M9 经评审决定不新增写类 Capability、`add-kubernetes-target` 不引入 `k8s_exec`），`docker` 已由 M1 既有 `docker_cli` 覆盖）
 
 #### 场景:TargetSummary 字段集恰好
 

@@ -49,7 +49,7 @@ Protocol 必须支持 mypy `--strict` 静态校验。
 - `SYSTEMD = "systemd"`：远端有 systemd（运行时探测）
 - `DOCKER_CLI = "docker_cli"`：远端能跑 `docker` CLI（运行时探测）
 
-未来扩展由对应里程碑提案负责（**禁止**本提案预留 M9 才用的 placeholder）：M9 加 `FILE_WRITE` 等。**`add-kubernetes-target`（M8 K8s 半边）经评审决定 NOT 新增 Capability**——KubernetesTarget 提供既有 `{SHELL, FILE_READ}` 并懒探测既有 `SYSTEMD`/`DOCKER_CLI`（与 DockerTarget 同模型），inspector 声明的是 target-agnostic 能力（如 `SHELL`）而非 `K8S_EXEC`，故**无 `K8S_EXEC` 成员**；早期文档/注释里「M8 加 K8S_EXEC」的前向引用已 stale，由本提案订正（含 `base.py` / `list_targets.py` / `test_capability.py` 注释）。
+未来扩展由对应里程碑提案负责（**禁止**预留尚未落地里程碑才用的 placeholder）。**M9 受控修复经评审决定 NOT 新增写类 Capability**——撤回早期「M9 加 `FILE_WRITE`」的承诺：写操作走既有 `SHELL`（`target.exec`）+ 审批/audit/rollback 的 shell 串，不引入受限写 API（受限写 API 必然逼出 `exec_raw` 逃生舱、反降低审批人警觉，详见 M9 架构不变量）。**`add-kubernetes-target`（M8 K8s 半边）经评审决定 NOT 新增 Capability**——KubernetesTarget 提供既有 `{SHELL, FILE_READ}` 并懒探测既有 `SYSTEMD`/`DOCKER_CLI`（与 DockerTarget 同模型），inspector 声明的是 target-agnostic 能力（如 `SHELL`）而非 `K8S_EXEC`，故**无 `K8S_EXEC` 成员**；早期文档/注释里「M8 加 K8S_EXEC」「M9 加 FILE_WRITE」的前向引用已 stale，由对应提案订正（含 `base.py` / `list_targets.py` / `test_capability.py` 注释）。
 
 Enum 成员名必须**全大写**，值必须**全小写**（与 docs/ARCHITECTURE.md §5 一致）。**禁止**在加载 Inspector manifest 时接受 Enum 之外的 capability token —— 未知 capability 必须在 manifest 加载时 raise（防止 silent skip）。
 
@@ -66,7 +66,7 @@ Enum 成员名必须**全大写**，值必须**全小写**（与 docs/ARCHITECTU
 #### 场景:capabilities 与 `CAPABILITY_ALLOWLIST` 严格相等
 
 - **当** 同时检查 `frozenset({c.value for c in Capability})` 与 `hostlens.tools.schemas.list_targets.CAPABILITY_ALLOWLIST`
-- **那么** 两者**必须严格相等**（M1 Capability Enum 是 SOT；M1 落地后 allowlist 必须更新为 `frozenset({c.value for c in Capability})`；原 M2 占位值 `file_write` / `docker` 必须删除，到对应 milestone 才回填——`k8s_exec` **不**回填，`add-kubernetes-target` 不引入该 capability）
+- **那么** 两者**必须严格相等**（M1 Capability Enum 是 SOT；M1 落地后 allowlist 必须更新为 `frozenset({c.value for c in Capability})`；原 M2 占位值 `file_write` / `docker` 必须删除——`file_write` **不**回填（M9 经评审不新增写类 capability）、`k8s_exec` 同样**不**回填（`add-kubernetes-target` 不引入该 capability））
 
 ### 需求:`ExecResult` 必须把 `timed_out` 与 `exit_code` 字段分离，超时时 `exit_code=None`
 
