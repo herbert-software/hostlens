@@ -115,7 +115,7 @@ async def test_dispatch_raises_when_requires_approval_is_true() -> None:
     assert err.tool_name == "approval_tool"
     assert err.surface == "mcp"
     assert err.violated_field == "requires_approval"
-    assert err.reason == "approval_flow_not_supported_in_m2"
+    assert err.reason == "approval_flow_not_supported"
     assert _handler_called is False
 
 

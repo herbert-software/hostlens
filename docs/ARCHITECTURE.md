@@ -201,7 +201,7 @@ class ToolSpec(BaseModel):
 graph TD
     spec1["ToolSpec: run_inspector<br/>跑一个 Inspector"]
     spec2["ToolSpec: list_inspectors<br/>列出可用 Inspector"]
-    spec3["ToolSpec: apply_remediation_step<br/>执行修复步骤<br/>(side_effects=destructive,<br/>requires_approval=True)"]
+    spec3["ToolSpec: diff_reports<br/>跑 regression diff<br/>(side_effects=read,<br/>即便『做点事』也永远只读)"]
     spec4["ToolSpec: get_report<br/>查询历史报告"]
 
     registry["Tool Registry / 工具注册中心<br/>(Layer 1: capability specs · 能力规范层)"]
@@ -264,44 +264,51 @@ async def run_inspector(args: RunInspectorInput, ctx: ToolContext) -> InspectorR
 
 ### 实战场景：Policy Gate 防止意外暴露
 
-举一个具体的 before/after，说明为什么 `surfaces` 必须是 policy gate 而非 hint：
+举一个具体的 before/after，说明为什么 `surfaces` 必须是 policy gate 而非 hint。注意：Agent / MCP 表面**永久只读**（写路径根本不以 ToolSpec 形式存在，见 §4.10 与 ADR-008），所以这里的场景**不**是「把写工具挡在 MCP 外面」，而是「把一个**只读但 verbose** 的工具挡在 MCP 外面」。
 
-**场景**：M9 实现"清理过期 docker 镜像"工具时，本意是允许 CLI 直接调用、Agent 也能在审批后用，但**不想让远程 MCP 客户端在没有审批信号的情况下调用**。
+**场景**：实现一个只读的内部状态诊断工具 `dump_internal_state`（`side_effects="read"`，但会吐出大量配置 / 内部状态、含敏感片段，故 `sensitive_output=True`），本意是允许 CLI 直接调用、Agent 也能用，但**不想让远程 MCP 客户端调用**（不希望把 verbose 内部状态送进远程 LLM 上下文）。
 
 ```python
 @tool(
-    name="docker_prune_images",
+    name="dump_internal_state",
     version="1.0.0",
-    input_schema=PruneImagesInput,
-    output_schema=PruneImagesResult,
-    handler=docker_prune_images_handler,
+    input_schema=DumpInternalStateInput,
+    output_schema=DumpInternalStateResult,
 
-    agent_description="Remove dangling docker images older than N days. Requires approval.",
+    agent_description="Dump verbose internal state for diagnosis (read-only).",
     mcp_description="Not exposed via MCP.",
-    cli_help="Prune dangling docker images on a target.",
+    cli_help="Dump verbose internal state on a target.",
 
     surfaces={"agent", "cli"},               # policy gate: 没有 "mcp"
-    side_effects="destructive",
-    requires_approval=True,
-    permissions={"docker.images.delete"},
-    sensitive_output=False,
+    side_effects="read",
+    requires_approval=False,
+    sensitive_output=True,
 )
+async def dump_internal_state(args: DumpInternalStateInput, ctx: ToolContext) -> DumpInternalStateResult:
+    ...  # @tool 把被装饰的 async 函数包成 handler（不接 handler= kwarg）
 ```
 
-**MCP adapter 在投影时强制校验**：
+**排除机制 = surface gate**：因为 `surfaces` 不含 `"mcp"`，它**根本不进** `registry.list_for("mcp")`，`mcp_server/tools_adapter.py` 的 `list_for_mcp()` 压根不会遍历到它——不是 `sensitive_output` 把它挡在外面。要暴露给 MCP 必须**显式**把 `"mcp"` 加进 `surfaces`，这个显式动作随即逼你过**投影期**的 `sensitive_output` 门（fail-closed，`None` 即拒），以及 **dispatch 期**的 side_effects / approval 两道门（见下方 `project_to_mcp` 与 dispatch 说明）。
+
+**MCP adapter 在投影时强制校验**（与真实 `list_for_mcp` 对齐）：
 
 ```python
 def project_to_mcp(spec: ToolSpec) -> MCPToolDefinition | None:
     if "mcp" not in spec.surfaces:
-        return None                           # 直接不暴露
-    if spec.side_effects == "destructive" and not spec.requires_approval:
-        raise PolicyError(f"{spec.name}: destructive tool without requires_approval cannot be MCP-exposed")
-    if spec.sensitive_output is None:
-        raise PolicyError(f"{spec.name}: sensitive_output must be explicitly declared for MCP")
+        return None                           # surface gate: 根本不投影, 不再往下看
+    if spec.sensitive_output is None:         # 仅对已 opt-in mcp 的工具生效的 fail-closed 门
+        raise ToolPolicyViolation(            # 与真实 list_for_mcp 一致的异常类型
+            tool_name=spec.name, surface="mcp",
+            violated_field="sensitive_output", reason="sensitive_output_not_declared",
+        )
     return MCPToolDefinition(...)
 ```
 
-**对比"软分类"反例**：如果 `surfaces` 只是个 hint（例如一个字符串 list 用来标记），有人想加 MCP 暴露时只需要在 list 里加 `"mcp"`，没有任何 gate 提醒 ta "你正在把一个 destructive 工具暴露给远程客户端"。policy gate 把每一个 surface 决定都变成"必须经过 adapter 校验的显式动作"。
+dispatch 路径另有 side_effects / approval 两道门（MCP 拒绝 `write`/`destructive` 与 `requires_approval=True`，见 `mcp-tool-adapter` spec），与投影门对称——但本只读示例的 `dump_internal_state` 压根没进 MCP 表面，那两道门对它永不触发。
+
+> **与 §4.10 规则 5 的关系**：规则 5（危险操作必须 `write`/`destructive` + `requires_approval=True`，adapter 在 dispatch 前强制校验）是**跨表面声明规则**；在 agent / mcp 表面，该「强制校验」表现为**拒绝**（`write`/`destructive` 与 `requires_approval=True` 永久 raise，见 agent / mcp tool-adapter spec），写路径根本不以 agent / mcp ToolSpec 形式存在。本只读示例演示的是 **surface gate + sensitive_output gate**，与规则 5 不冲突。
+
+**对比"软分类"反例**：如果 `surfaces` 只是个 hint（例如一个字符串 list 用来标记），有人想加 MCP 暴露时只需要在 list 里加 `"mcp"`，没有任何 gate 提醒 ta「你正在把一个 verbose / 敏感输出的工具暴露给远程客户端」。policy gate 把每一个 surface 决定都变成"必须经过 adapter 校验的显式动作"——而且一旦 opt-in `"mcp"`，`sensitive_output is None` 会 fail-closed 拦下你。
 
 ### 实施节奏
 

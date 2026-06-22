@@ -76,9 +76,10 @@ def test_tool_context_is_frozen() -> None:
 
 
 def test_tool_context_approval_service_is_not_optional_in_type_hints() -> None:
-    """`approval_service` is typed as `ApprovalService` (not `ApprovalService | None`).
-    M2 forces callers to pass `NoopApprovalService` as the real placeholder so
-    write-side handlers never need a `None` guard.
+    """`approval_service` is permanently typed as `ApprovalService` (never
+    `ApprovalService | None`); callers always pass `NoopApprovalService`, so
+    agent-surface handlers never need a `None` guard. Real approval lives in
+    the Remediation subsystem's `ApprovalGate`, separate from `ToolContext`.
     """
     hints = get_type_hints(ToolContext)
     assert hints["approval_service"] is ApprovalService
@@ -125,7 +126,7 @@ def test_noop_approval_service_always_refuses() -> None:
         assert err.tool_name == "noop_approval_service"
         assert err.surface == "agent"
         assert err.violated_field == "requires_approval"
-        assert err.reason == "approval_flow_not_supported_in_m2"
+        assert err.reason == "approval_flow_not_supported"
 
     asyncio.run(go())
 

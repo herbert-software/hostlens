@@ -4,8 +4,10 @@ This module exposes the host-agnostic Layer 1 abstractions that every
 surface adapter (agent / mcp / cli) consumes:
 
 - `ToolHandler` Protocol — async callable contract for tool handlers.
-- `ApprovalService` Protocol — minimal contract for write-side approval.
-- `NoopApprovalService` — M2 stub that always refuses (M9 will replace).
+- `ApprovalService` Protocol — permanent-noop agent-surface approval
+  contract; the real approval gate is the Remediation subsystem's `ApprovalGate`.
+- `NoopApprovalService` — permanent noop that always refuses; real approval
+  lives in the Remediation subsystem's `ApprovalGate`.
 - `ToolContext` — frozen dataclass DI container, fields locked to the M2
   set (forbid LLMBackend per ADR-008).
 - `ToolSpec` — frozen Pydantic v2 model carrying full policy metadata.
@@ -63,17 +65,26 @@ class ToolHandler(Protocol):
 
 @runtime_checkable
 class ApprovalService(Protocol):
-    """Minimal approval gate contract (M2 stub; M9 ships the real flow)."""
+    """Permanent-noop agent-surface approval contract.
+
+    The agent surface never triggers approval; the real approval gate is the
+    Remediation subsystem's `ApprovalGate`, which is not wired through
+    `ToolContext`.
+    """
 
     async def request_approval(self, action: str, reason: str) -> bool: ...  # pragma: no cover
 
 
 class NoopApprovalService:
-    """M2 stub: every approval request is rejected with a structured policy
-    violation. Concrete implementations land with the M9 remediation flow.
+    """Permanent noop: every approval request is rejected with a structured
+    policy violation.
+
+    The agent surface never triggers approval. The real approval gate for M9
+    controlled remediation is the separate `ApprovalGate` under `remediation/`;
+    it does **not** replace this class.
 
     `tool_name` is a placeholder snake_case identifier (`noop_approval_service`)
-    so it satisfies the ToolSpec name regex even though this stub is not a
+    so it satisfies the ToolSpec name regex even though this noop is not a
     real tool.
     """
 
@@ -82,7 +93,7 @@ class NoopApprovalService:
             tool_name="noop_approval_service",
             surface="agent",
             violated_field="requires_approval",
-            reason="approval_flow_not_supported_in_m2",
+            reason="approval_flow_not_supported",
         )
 
 
@@ -105,9 +116,10 @@ class ToolContext:
       `add-inspector-plugin-system` proposal).
     - `config` — `Settings` instance (M0).
     - `logger` — bound structlog logger.
-    - `approval_service` — concrete `ApprovalService` (never `None`; M2
-      uses `NoopApprovalService` to keep the ABI stable while the M9 flow
-      is unfinished).
+    - `approval_service` — concrete `ApprovalService` (never `None`;
+      permanently injected as `NoopApprovalService`). The agent-surface
+      handler never triggers approval; the real approval gate belongs to the
+      Remediation subsystem.
     - `cancel` — `asyncio.Event` for cooperative cancellation propagation
       from the Agent loop / Ctrl-C.
     """

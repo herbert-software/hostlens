@@ -36,8 +36,9 @@ class Capability(enum.Enum):
       ``{SHELL, FILE_READ}`` and lazily probe the existing
       ``SYSTEMD`` / ``DOCKER_CLI`` (inspectors declare target-agnostic
       capabilities like ``SHELL``, never a ``K8S_EXEC``).
-    - M9 ``add-remediation`` will add ``FILE_WRITE`` and write-class
-      capabilities.
+    - M9 controlled remediation does NOT add ``FILE_WRITE`` or write-class
+      capabilities (the ``FILE_WRITE`` promise is withdrawn); writes go
+      through the existing ``SHELL`` (``target.exec``) + approval/audit/rollback.
 
     Adding a member here is a **breaking** change for the
     ``hostlens.tools.schemas.list_targets.CAPABILITY_ALLOWLIST``

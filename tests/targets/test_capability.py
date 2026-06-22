@@ -26,8 +26,9 @@ def test_capability_has_exactly_m1_minimum_set() -> None:
     and Inspector manifest schemas — it must go through its own proposal.
     M8 container targets (Docker / Kubernetes) deliberately add **no** new
     capability (they reuse ``{SHELL, FILE_READ}`` + lazily-probed
-    ``SYSTEMD`` / ``DOCKER_CLI``), so this set stays at 5; M9
-    ``FILE_WRITE`` etc. would each go through its own proposal.
+    ``SYSTEMD`` / ``DOCKER_CLI``), so this set stays at 5; write-class
+    capabilities are NOT added (the M9 FILE_WRITE promise is withdrawn);
+    any future write capability would go through its own proposal.
     """
 
     assert set(Capability.__members__.keys()) == {
