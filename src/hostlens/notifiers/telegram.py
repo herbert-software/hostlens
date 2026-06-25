@@ -22,6 +22,7 @@ from hostlens.notifiers._filters import (
     conf_label,
     coverage_line,
     dedup_findings,
+    failed_checks,
     fmt_time,
     group_by_target,
     section_severity,
@@ -99,6 +100,7 @@ def _build_environment() -> jinja2.Environment:
     env.filters["sev_label"] = sev_label
     env.filters["conf_label"] = conf_label
     env.filters["coverage"] = coverage_line
+    env.filters["failed_checks"] = failed_checks
     env.filters["fmt_time"] = fmt_time
     env.filters["dedup"] = dedup_findings
     env.filters["sort_sev"] = sort_sev

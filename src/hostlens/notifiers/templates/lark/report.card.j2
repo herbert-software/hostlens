@@ -29,6 +29,25 @@
         }
       },
       {% endif %}
+      {% set failed = report.inspector_results | failed_checks %}
+      {% if failed %}
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ "**失败检查**" | tojson }}
+        }
+      },
+      {% for target_name, label, inspectors in failed %}
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": {{ (target_name ~ " · " ~ label ~ "：" ~ (inspectors | join("、"))) | tojson }}
+        }
+      },
+      {% endfor %}
+      {% endif %}
       {% if report.findings %}
       {
         "tag": "div",

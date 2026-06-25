@@ -1014,3 +1014,323 @@ async def test_probe_capabilities_uses_passed_conn() -> None:
 
     assert fresh_conn.run.await_count >= 1
     stale_conn.run.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# cold-connect retry budget (spec change
+# improve-cold-connect-retry-and-failure-surfacing, tasks 4.1-4.6)
+# ---------------------------------------------------------------------------
+#
+# These cover the first-connect budget retry / negative-cache machinery
+# added on top of the legacy single-attempt path. Default budget (None)
+# regression anchors live in 4.1; the retry / exhaust / fast-fail / TTL
+# scenarios in 4.2-4.6. The legacy reconnect / reuse / idle / timeout
+# regression (4.7) is the existing suite above (all green) -- these new
+# tests only add the budget-specific behaviour.
+
+
+def _captured_connect_timeout(call: Any) -> float:
+    """Pull the ``connect_timeout`` kwarg an ``asyncssh.connect`` call saw."""
+
+    return float(call.kwargs["connect_timeout"])
+
+
+async def test_default_budget_none_single_connect_attempt() -> None:
+    """4.1: ``budget=None`` (default) keeps the legacy single-attempt path.
+
+    Spec scenario "默认无预算时首次 connect 单次尝试": the host never
+    responds, so first connect must raise ``ssh_connect_timeout`` after
+    exactly one ``asyncssh.connect`` -- no retry loop, no negative-cache
+    stamp.
+    """
+
+    target = SSHTarget("ssh-host")  # no cold_connect_retry_budget_seconds
+    _attach_entry(target, FakeEntry())
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=TimeoutError("dial timeout")),
+        ) as mock_connect,
+        patch("hostlens.targets.ssh.asyncio.sleep", new=_record_sleep),
+        pytest.raises(TargetError) as exc_info,
+    ):
+        await target.exec("echo a", timeout=5)
+
+    assert exc_info.value.kind == "ssh_connect_timeout"
+    assert mock_connect.call_count == 1
+    assert sleeps == []
+    # No retry path means no negative-cache stamp was written.
+    assert target._cold_connect_failed_at is None
+
+
+async def test_budget_retries_then_succeeds() -> None:
+    """4.2: with a budget, K timeouts then success -> exec succeeds.
+
+    Spec scenario "冷连接在预算内重试后成功": ``asyncssh.connect`` raises
+    ``TimeoutError`` K times then returns a live conn on attempt K+1.
+    ``connect`` is dialled K+1 times and the exec ultimately succeeds; a
+    subsequent exec reuses the cached connection (no further dial).
+    """
+
+    k = 3
+    target = SSHTarget("ssh-host", cold_connect_retry_budget_seconds=90.0)
+    _attach_entry(target, FakeEntry())
+    fake_conn = _make_fake_conn(run_result=_make_run_result(stdout="ok"))
+
+    connect_side_effects: list[Any] = [TimeoutError("cold") for _ in range(k)]
+    connect_side_effects.append(fake_conn)
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(delay: float) -> None:
+        # No real sleeping: keep monotonic from advancing so the budget
+        # never drains across the K retries (we test timing in 4.3).
+        sleeps.append(delay)
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=connect_side_effects),
+        ) as mock_connect,
+        patch("hostlens.targets.ssh.asyncio.sleep", new=_record_sleep),
+    ):
+        result = await target.exec("echo hi", timeout=5)
+        # Second exec must reuse the cached connection -- no new dial.
+        await target.exec("echo again", timeout=5)
+
+    assert result.exit_code == 0
+    assert result.stdout == "ok"
+    assert mock_connect.call_count == k + 1
+    # One 1s backoff per failed attempt (K) before the K+1 success.
+    assert sleeps == [_const_retry_delay()] * k
+    # Success cleared (never set) the negative-cache stamp.
+    assert target._cold_connect_failed_at is None
+
+
+def _const_retry_delay() -> float:
+    """Read the module's cold-connect backoff so the test tracks the constant."""
+
+    from hostlens.targets import ssh as ssh_mod
+
+    return ssh_mod._COLD_CONNECT_RETRY_DELAY
+
+
+async def test_budget_exhaust_raises_caps_and_stays_within_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """4.3: exhausting the budget raises, caps each attempt, and stamps.
+
+    Spec scenario "耗尽预算后 raise ssh_connect_timeout 且每次尝试 cap".
+    The host never responds. We monkeypatch the backoff delay and pass a
+    small budget so real elapsed time stays tiny. Assertions:
+
+    - raises ``ssh_connect_timeout`` and writes the negative-cache stamp;
+    - every attempt's ``connect_timeout`` was capped to <= the budget
+      (``min(connect_timeout, remaining)`` and remaining <= budget), and
+      the values shrink as the budget drains;
+    - total wall time <= budget + one capped attempt margin, proving the
+      ``min(delay, remaining)`` backoff + "no sleep once exhausted" fix
+      keeps the loop from overshooting the deadline.
+    """
+
+    budget = 0.3
+    monkeypatch.setattr("hostlens.targets.ssh._COLD_CONNECT_RETRY_DELAY", 0.05)
+
+    target = SSHTarget("ssh-host", cold_connect_retry_budget_seconds=budget)
+    _attach_entry(target, FakeEntry())
+
+    import time as _time
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=TimeoutError("never responds")),
+        ) as mock_connect,
+        pytest.raises(TargetError) as exc_info,
+    ):
+        t0 = _time.monotonic()
+        await target.exec("echo a", timeout=5)
+    elapsed = _time.monotonic() - t0
+
+    assert exc_info.value.kind == "ssh_connect_timeout"
+    assert exc_info.value.target == "ssh-host"
+    # Exhaust raise surfaces the endpoint host for the operator (spec
+    # requires host:port) but never credentials / key path.
+    rendered = str(exc_info.value)
+    assert "remote.example" in rendered  # host surfaced
+    assert "password" not in rendered.lower()
+
+    # Negative-cache stamp written exactly once on exhaustion.
+    assert target._cold_connect_failed_at is not None
+
+    # At least two attempts happened (budget covers more than one).
+    assert mock_connect.call_count >= 2
+    caps = [_captured_connect_timeout(c) for c in mock_connect.await_args_list]
+    # Every attempt capped to <= remaining budget, hence <= budget overall;
+    # since budget (0.3) < default connect_timeout (10), the cap always
+    # selected ``remaining``, so no attempt ever used the full 10s.
+    assert all(cap <= budget + 1e-6 for cap in caps)
+    assert all(cap < 10.0 for cap in caps)
+    # remaining shrinks across attempts -> caps are non-increasing.
+    assert caps == sorted(caps, reverse=True)
+
+    # Total time bounded by budget plus one capped attempt (the last dial
+    # may start just under the deadline). Without the min(delay, remaining)
+    # + exhausted-no-sleep fix the loop would overshoot by a full backoff.
+    assert elapsed <= budget + 0.25
+
+
+async def test_budget_auth_failure_raises_immediately_no_retry() -> None:
+    """4.4: ``PermissionDenied`` raises ``ssh_auth_failed`` on first dial.
+
+    Spec scenario "首次 connect 认证失败立即 raise 不重试": auth / host-key /
+    KEX are permanent errors -- the retry set is strictly
+    ``ssh_connect_timeout``. ``asyncssh.connect`` is called exactly once
+    and no negative-cache stamp is written.
+    """
+
+    target = SSHTarget("ssh-host", cold_connect_retry_budget_seconds=90.0)
+    _attach_entry(target, FakeEntry())
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=asyncssh.PermissionDenied("auth failed")),
+        ) as mock_connect,
+        patch("hostlens.targets.ssh.asyncio.sleep", new=_record_sleep),
+        pytest.raises(TargetError) as exc_info,
+    ):
+        await target.exec("echo a", timeout=5)
+
+    assert exc_info.value.kind == "ssh_auth_failed"
+    assert mock_connect.call_count == 1
+    assert sleeps == []
+    assert target._cold_connect_failed_at is None
+
+
+async def test_budget_connect_failed_fallback_no_retry() -> None:
+    """4.4 (cont.): ``ssh_connect_failed`` 兜底 is not retried either.
+
+    A generic asyncssh transport error classifies to ``ssh_connect_failed``
+    (may hide host-key drift), which the retry loop re-raises immediately
+    rather than retrying -- only ``ssh_connect_timeout`` is retryable.
+    """
+
+    target = SSHTarget("ssh-host", cold_connect_retry_budget_seconds=90.0)
+    _attach_entry(target, FakeEntry())
+
+    class WeirdAsyncsshError(asyncssh.Error):
+        pass
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=WeirdAsyncsshError(255, "protocol error")),
+        ) as mock_connect,
+        patch("hostlens.targets.ssh.asyncio.sleep", new=_record_sleep),
+        pytest.raises(TargetError) as exc_info,
+    ):
+        await target.exec("echo a", timeout=5)
+
+    assert exc_info.value.kind == "ssh_connect_failed"
+    assert mock_connect.call_count == 1
+    assert sleeps == []
+    assert target._cold_connect_failed_at is None
+
+
+async def test_negative_cache_fast_fails_sibling_exec_within_ttl() -> None:
+    """4.5: after budget exhaustion, a sibling exec fast-fails within TTL.
+
+    Spec scenario "冷连接失败后同批兄弟 exec 立即 fast-fail": the SAME target
+    instance exhausts its budget on exec #1 (stamp written), then exec #2
+    within the TTL raises ``ssh_connect_timeout`` immediately -- the
+    ``asyncssh.connect`` count must NOT increase relative to exec #1.
+    """
+
+    budget = 0.2
+    target = SSHTarget("ssh-host", cold_connect_retry_budget_seconds=budget)
+    _attach_entry(target, FakeEntry())
+
+    async def _instant_sleep(_delay: float) -> None:
+        return None
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=TimeoutError("never responds")),
+        ) as mock_connect,
+        patch("hostlens.targets.ssh.asyncio.sleep", new=_instant_sleep),
+    ):
+        with pytest.raises(TargetError) as first_exc:
+            await target.exec("echo first", timeout=5)
+        count_after_first = mock_connect.call_count
+        assert target._cold_connect_failed_at is not None
+
+        # Second exec on the same (cold-stamped) instance, well within TTL.
+        with pytest.raises(TargetError) as second_exc:
+            await target.exec("echo second", timeout=5)
+
+    assert first_exc.value.kind == "ssh_connect_timeout"
+    assert second_exc.value.kind == "ssh_connect_timeout"
+    # Fast-fail short-circuits BEFORE any dial -> count unchanged.
+    assert mock_connect.call_count == count_after_first
+
+
+async def test_negative_cache_expires_and_exec_retries_again() -> None:
+    """4.6: once the TTL elapses, a fresh exec re-enters the retry loop.
+
+    Spec scenario "负缓存 TTL 过期后重新重试": the negative cache is a
+    batch-level short-circuit, not a persistent health verdict. We
+    monkeypatch the stamp into the past (beyond TTL) so the next exec
+    re-runs the budget loop and dials ``asyncssh.connect`` again.
+    """
+
+    budget = 0.2
+    target = SSHTarget("ssh-host", cold_connect_retry_budget_seconds=budget)
+    _attach_entry(target, FakeEntry())
+
+    async def _instant_sleep(_delay: float) -> None:
+        return None
+
+    with (
+        patch(
+            "hostlens.targets.ssh.asyncssh.connect",
+            new=AsyncMock(side_effect=TimeoutError("never responds")),
+        ) as mock_connect,
+        patch("hostlens.targets.ssh.asyncio.sleep", new=_instant_sleep),
+    ):
+        with pytest.raises(TargetError):
+            await target.exec("echo first", timeout=5)
+        count_after_first = mock_connect.call_count
+
+        # Age the stamp past the TTL so the fast-fail check misses.
+        import time as _time
+
+        from hostlens.targets import ssh as ssh_mod
+
+        stamp = target._cold_connect_failed_at
+        assert stamp is not None
+        target._cold_connect_failed_at = _time.monotonic() - ssh_mod._COLD_CONNECT_NEG_TTL - 1.0
+
+        with pytest.raises(TargetError) as second_exc:
+            await target.exec("echo second", timeout=5)
+
+    assert second_exc.value.kind == "ssh_connect_timeout"
+    # TTL expired -> the loop dialled again (count strictly increased).
+    assert mock_connect.call_count > count_after_first

@@ -10,6 +10,14 @@
 {% if report.meta %}
 {{ report.meta.timestamp | fmt_time | mdv2_escape }} · {{ report.meta.inspectors_used | coverage | mdv2_escape }}
 {% endif %}
+{% set failed = report.inspector_results | failed_checks %}
+{% if failed %}
+
+*失败检查*
+{% for target_name, label, inspectors in failed %}
+{{ target_name | mdv2_escape }} · {{ label | mdv2_escape }}：{{ inspectors | join("、") | mdv2_escape }}
+{% endfor %}
+{% endif %}
 {% if report.findings %}
 {% set sections = report.findings | dedup | group_by_target(fleet=(report.meta is not none and report.meta.target_type == "fleet")) %}
 

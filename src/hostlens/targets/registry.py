@@ -147,6 +147,7 @@ class TargetRegistry:
 def build_registry_from_config(
     config: TargetsConfig,
     settings: Settings,
+    cold_connect_retry_budget_seconds: float | None = None,
 ) -> TargetRegistry:
     """Instantiate ``LocalTarget`` / ``SSHTarget`` instances and register them.
 
@@ -158,6 +159,13 @@ def build_registry_from_config(
     keeps that wiring honest and lets future SSH settings (keepalive,
     channel limits) land without re-plumbing the
     factory signature.
+
+    ``cold_connect_retry_budget_seconds`` (default ``None`` = single
+    first-connect attempt = legacy behaviour) is opt-in per call path
+    intent, not per-target config — only the schedule (fleet) and probe
+    (onboarding) paths pass a non-None budget; doctor / target test /
+    inspect / mcp / fix keep ``None`` for fast-fail responsiveness (spec
+    决策 1).
     """
 
     # Import lazily to keep top-level imports cheap and to avoid the
@@ -189,7 +197,14 @@ def build_registry_from_config(
         if entry.type == "local":
             target = cast("ExecutionTarget", LocalTarget(name=entry.name))
         elif entry.type == "ssh":
-            target = cast("ExecutionTarget", SSHTarget(name=entry.name, _settings=settings))
+            target = cast(
+                "ExecutionTarget",
+                SSHTarget(
+                    name=entry.name,
+                    cold_connect_retry_budget_seconds=cold_connect_retry_budget_seconds,
+                    _settings=settings,
+                ),
+            )
         elif entry.type == "replay":
             # Read-only replay target (incident-pack). No secrets, no write
             # path → not subject to the EUID==0 write guard.
@@ -212,7 +227,11 @@ def build_registry_from_config(
     return registry
 
 
-def build_one_target(entry: TargetEntry, settings: Settings) -> ExecutionTarget:
+def build_one_target(
+    entry: TargetEntry,
+    settings: Settings,
+    cold_connect_retry_budget_seconds: float | None = None,
+) -> ExecutionTarget:
     """Construct + register a single ``TargetEntry`` and return its target.
 
     The probe path (``hostlens target import``) needs a single live target
@@ -234,4 +253,8 @@ def build_one_target(entry: TargetEntry, settings: Settings) -> ExecutionTarget:
     from hostlens.targets.config import TargetsConfig
 
     config = TargetsConfig(version="1", targets=[entry])
-    return build_registry_from_config(config, settings).get(entry.name)
+    return build_registry_from_config(
+        config,
+        settings,
+        cold_connect_retry_budget_seconds=cold_connect_retry_budget_seconds,
+    ).get(entry.name)

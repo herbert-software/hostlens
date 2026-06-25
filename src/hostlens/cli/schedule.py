@@ -57,6 +57,7 @@ from hostlens.scheduler.runner import SchedulerRunner
 from hostlens.scheduler.store import RunStore
 from hostlens.targets.config import TargetsConfig, load_targets_config
 from hostlens.targets.registry import build_registry_from_config
+from hostlens.targets.ssh import _DEFAULT_COLD_CONNECT_RETRY_BUDGET_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -154,12 +155,24 @@ def _load_settings_or_exit() -> Settings:
 
 
 def _build_target_registry(settings: Settings) -> TargetRegistry:
+    # Schedule (fleet) path opts into the cold-connect retry budget so a
+    # daemon-driven巡检 tolerates Tailscale 冷路径 first-connect (spec 决策
+    # 1). Shared by list/trigger/daemon/status — list/status never
+    # ``target.exec`` so the budget is inert there (no split needed).
     if not settings.targets_config_path.exists():
         # Missing targets file is legitimate (empty registry), not an error.
-        return build_registry_from_config(TargetsConfig(version="1", targets=[]), settings)
+        return build_registry_from_config(
+            TargetsConfig(version="1", targets=[]),
+            settings,
+            cold_connect_retry_budget_seconds=_DEFAULT_COLD_CONNECT_RETRY_BUDGET_SECONDS,
+        )
     try:
         config = load_targets_config(settings.targets_config_path)
-        return build_registry_from_config(config, settings)
+        return build_registry_from_config(
+            config,
+            settings,
+            cold_connect_retry_budget_seconds=_DEFAULT_COLD_CONNECT_RETRY_BUDGET_SECONDS,
+        )
     except (ConfigError, ValidationError) as exc:
         _fail_config(f"failed to load targets config: {exc}")
 

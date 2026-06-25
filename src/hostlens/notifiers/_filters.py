@@ -37,12 +37,14 @@ from hostlens.core.timefmt import to_host_local
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from hostlens.inspectors.result import InspectorResult
     from hostlens.reporting.models import Finding, InspectorRun
 
 __all__ = [
     "conf_label",
     "coverage_line",
     "dedup_findings",
+    "failed_checks",
     "fmt_time",
     "group_by_target",
     "section_severity",
@@ -76,6 +78,29 @@ _SEV_RANK: dict[str, int] = {"info": 0, "warning": 1, "critical": 2}
 # ``InspectorStatus`` set. Listed explicitly (not "everything else") so a new
 # status value cannot silently fold into ``failed`` or ``skipped``.
 _FAILED_STATUSES: frozenset[str] = frozenset({"timeout", "target_unreachable", "exception"})
+
+# Bucket-level 中文 labels keyed on the **status** of a failed inspector run.
+# Every failed status (the closed three-value ``_FAILED_STATUSES`` set) always
+# maps here, so a reason label can always be derived without reading the
+# free-text ``error``. ``target_unreachable`` is the only status whose ``error``
+# is a structured ``TargetError.kind`` enum string (the other two carry a free
+# sentence), so only it is refined further via ``_FAIL_KIND_LABELS``.
+_FAIL_STATUS_LABELS: dict[str, str] = {
+    "timeout": "执行超时",
+    "target_unreachable": "不可达",
+    "exception": "采集异常",
+}
+
+# Kind-level refinement used **only** when ``status == "target_unreachable"``
+# (where ``error == TargetError.kind``, an enum string). An unknown kind
+# (``ssh_no_entry`` / ``target_disabled`` / docker·k8s kinds…) falls back to the
+# bucket-level 「不可达」 rather than rendering the raw English kind.
+_FAIL_KIND_LABELS: dict[str, str] = {
+    "ssh_connect_timeout": "连接超时",
+    "ssh_auth_failed": "认证失败",
+    "ssh_connect_failed": "连接失败",
+    "ssh_connection_lost": "连接中断",
+}
 
 
 def sev_label(severity: object) -> str:
@@ -125,6 +150,52 @@ def coverage_line(inspectors_used: list[InspectorRun]) -> str:
     if failed > 0:
         line += f" · {failed} 项失败"
     return line
+
+
+def _fail_label(status: str, error: str | None) -> str:
+    """Reason label for one failed inspector result — keyed on ``status`` first.
+
+    ``status`` is a closed five-value enum so it always maps to a bucket-level
+    中文 label. Only ``target_unreachable`` carries a structured
+    ``TargetError.kind`` in ``error`` (the other failed statuses carry a free
+    sentence — ``"collect.command exceeded N seconds"`` / ``"parse_failed: …"``);
+    so ``error`` refines the label **only** for ``target_unreachable``, with an
+    unknown kind falling back to the bucket label「不可达」. The free-text
+    ``error`` of ``timeout`` / ``exception`` is never used as a key — keying on
+    it would render raw English and split a host's exceptions into N groups.
+    """
+
+    bucket = _FAIL_STATUS_LABELS[status]
+    if status == "target_unreachable":
+        return _FAIL_KIND_LABELS.get(error or "", bucket)
+    return bucket
+
+
+def failed_checks(
+    inspector_results: list[InspectorResult],
+) -> list[tuple[str, str, list[str]]]:
+    """Group failed inspector results into ``(target_name, label, [name…])``.
+
+    Filters ``inspector_results`` to ``status in _FAILED_STATUSES`` (reusing the
+    closed ``coverage_line`` frozenset, **not** a ``status not in {ok,
+    requires_unmet}`` negative predicate) and groups by ``(target_name, label)``
+    preserving first-seen order, returning one tuple per group with its inspector
+    name list. The label is derived by ``_fail_label`` (status-first), so a
+    host's multiple ``exception`` results (whose free-text ``error`` differs)
+    collapse into one group rather than fanning out.
+    """
+
+    groups: dict[tuple[str, str], list[str]] = {}
+    order: list[tuple[str, str]] = []
+    for ir in inspector_results:
+        if ir.status not in _FAILED_STATUSES:
+            continue
+        key = (ir.target_name, _fail_label(ir.status, ir.error))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(ir.name)
+    return [(target, label, groups[(target, label)]) for target, label in order]
 
 
 def fmt_time(value: datetime) -> str:

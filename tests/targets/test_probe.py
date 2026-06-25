@@ -214,7 +214,7 @@ def _patch_build_one_target(monkeypatch: pytest.MonkeyPatch, target: _FakeTarget
 
     import hostlens.targets.probe as probe_mod
 
-    monkeypatch.setattr(probe_mod, "build_one_target", lambda entry, settings: target)
+    monkeypatch.setattr(probe_mod, "build_one_target", lambda entry, settings, **kwargs: target)
 
 
 async def test_probe_timed_out_is_not_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,7 +348,9 @@ async def test_probe_many_isolates_failures_and_preserves_order(
 
     import hostlens.targets.probe as probe_mod
 
-    monkeypatch.setattr(probe_mod, "build_one_target", lambda entry, settings: targets[entry.name])
+    monkeypatch.setattr(
+        probe_mod, "build_one_target", lambda entry, settings, **kwargs: targets[entry.name]
+    )
 
     probe = TargetProbe(Settings())
     entries: list[LocalEntry | SSHEntry] = [
@@ -396,7 +398,7 @@ async def test_probe_many_respects_concurrency_bound(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         probe_mod,
         "build_one_target",
-        lambda entry, settings: _SlowTarget(entry.name, result=res),
+        lambda entry, settings, **kwargs: _SlowTarget(entry.name, result=res),
     )
 
     probe = TargetProbe(Settings(), concurrency=2)
@@ -414,7 +416,7 @@ def test_probe_isolates_unexpected_construction_error(monkeypatch: pytest.Monkey
     """An unexpected error (e.g. OSError) is isolated to exec_failed, not raised."""
     import hostlens.targets.probe as probe_mod
 
-    def _boom(entry: object, settings: object) -> object:
+    def _boom(entry: object, settings: object, **kwargs: object) -> object:
         raise OSError("subprocess creation failed")
 
     monkeypatch.setattr(probe_mod, "build_one_target", _boom)
@@ -429,10 +431,10 @@ def test_probe_many_isolates_one_bad_host(monkeypatch: pytest.MonkeyPatch) -> No
 
     real = probe_mod.build_one_target
 
-    def _selective(entry: object, settings: object) -> object:
+    def _selective(entry: object, settings: object, **kwargs: object) -> object:
         if getattr(entry, "name", None) == "bad":
             raise OSError("boom")
-        return real(entry, settings)
+        return real(entry, settings, **kwargs)
 
     monkeypatch.setattr(probe_mod, "build_one_target", _selective)
     results = asyncio.run(

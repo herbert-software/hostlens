@@ -814,3 +814,218 @@ def test_lark_renders_valid_json_for_every_scenario() -> None:
     )
     card = _lark_card(report, "critical")  # raises if invalid JSON
     assert card["msg_type"] == "interactive"
+
+
+# --------------------------------------------------------------------------- #
+# 失败检查段(reason 先 key on status,仅 target_unreachable 用 error 细化)
+# --------------------------------------------------------------------------- #
+
+
+def _failed_fleet_report() -> Report:
+    """Fleet report exercising every failed-status reason path:
+
+    - cloudcone x 3 ``target_unreachable`` / ``error=ssh_connect_timeout``
+      -> one group「连接超时」 (kind-refined).
+    - vultr x 2 ``exception`` with **different** free-text ``error``
+      -> one group「采集异常」 (status-keyed, ``error`` ignored).
+    - sao-paulo x 1 ``timeout`` (free-text ``error``) -> 「执行超时」.
+    - tokyo x 1 ``target_unreachable`` / ``error=ssh_no_entry`` (unknown kind)
+      -> bucket fallback「不可达」.
+    - rome x 1 ``ok`` -> never appears in the failed-checks section.
+    """
+
+    results = [
+        _ir(
+            "linux.cpu",
+            target="cloudcone",
+            status="target_unreachable",
+            error="ssh_connect_timeout",
+        ),
+        _ir(
+            "linux.mem",
+            target="cloudcone",
+            status="target_unreachable",
+            error="ssh_connect_timeout",
+        ),
+        _ir(
+            "linux.disk",
+            target="cloudcone",
+            status="target_unreachable",
+            error="ssh_connect_timeout",
+        ),
+        _ir("linux.svc", target="vultr", status="exception", error="parse_failed: bad yaml"),
+        _ir("linux.net", target="vultr", status="exception", error="output_schema_mismatch: x"),
+        _ir(
+            "linux.load",
+            target="sao-paulo",
+            status="timeout",
+            error="collect.command exceeded 30 seconds",
+        ),
+        _ir("linux.proc", target="tokyo", status="target_unreachable", error="ssh_no_entry"),
+        _ir("linux.ok", target="rome", status="ok"),
+    ]
+    return _fleet_report(results)
+
+
+def test_telegram_failed_checks_groups_by_target_and_reason() -> None:
+    body = _tg_body(_failed_fleet_report(), "info")
+    assert "*失败检查*" in body
+    # target_unreachable refined to the ssh kind label.
+    assert "cloudcone · 连接超时" in body
+    # exception is status-keyed: the raw English free-text error must NOT leak.
+    assert "vultr · 采集异常" in body
+    assert "parse_failed" not in body
+    assert "output_schema_mismatch" not in body
+    # Two exceptions on one host (different error text) collapse into ONE group:
+    # one "vultr · 采集异常" line carrying both inspector names.
+    assert body.count("vultr · 采集异常") == 1
+    assert "linux\\.svc" in body
+    assert "linux\\.net" in body
+    # timeout is status-keyed (NOT the free-text sentence).
+    assert "sao\\-paulo · 执行超时" in body
+    assert "exceeded 30 seconds" not in body
+    # unknown kind falls back to the bucket label「不可达」.
+    assert "tokyo · 不可达" in body
+    # The clean (ok) host has no failed-checks line (it still appears in the
+    # fleet 抬头 target list, so scope the check to the section's own lines).
+    assert not any("rome ·" in line for line in body.splitlines())
+    # 段顺序:失败检查在抬头/覆盖之后(coverage failed count == 7).
+    assert "7 项失败" in body
+    assert body.index("项失败") < body.index("*失败检查*")
+
+
+def test_failed_checks_section_precedes_findings() -> None:
+    # Spec ordering 抬头 -> 覆盖 -> 失败检查 -> 发现 -> 根因: pin 失败检查 BEFORE
+    # 发现 with a report carrying BOTH a failed inspector_result and a finding.
+    report = _fleet_report(
+        [
+            _ir(
+                "linux.cpu",
+                target="cloudcone",
+                status="target_unreachable",
+                error="ssh_connect_timeout",
+            ),
+            _ir(
+                "linux.disk",
+                target="hostA",
+                findings=[Finding(severity="critical", message="磁盘满")],
+            ),
+        ]
+    )
+    body = _tg_body(report, "critical")
+    assert "*失败检查*" in body
+    assert "*发现*" in body
+    assert body.index("*失败检查*") < body.index("*发现*")
+
+
+def test_lark_failed_checks_groups_by_target_and_reason() -> None:
+    contents = _lark_contents(_lark_card(_failed_fleet_report(), "info"))  # asserts valid JSON
+    joined = "\n".join(contents)
+    assert "**失败检查**" in contents
+    # Lark does NOT MarkdownV2-escape — literal host names.
+    assert any("cloudcone · 连接超时" in c for c in contents)
+    vultr = [c for c in contents if "vultr · 采集异常" in c]
+    assert len(vultr) == 1
+    assert "linux.svc" in vultr[0]
+    assert "linux.net" in vultr[0]
+    assert "parse_failed" not in joined
+    assert "output_schema_mismatch" not in joined
+    assert any("sao-paulo · 执行超时" in c for c in contents)
+    assert "exceeded 30 seconds" not in joined
+    assert any("tokyo · 不可达" in c for c in contents)
+    # The clean (ok) host has no failed-checks line (it appears in the 抬头
+    # title's fleet target list, so scope the check to per-host section lines).
+    assert not any("rome · " in c for c in contents)
+
+
+def test_failed_checks_omitted_when_no_failures() -> None:
+    # failed == 0 → no 失败检查 section in either channel, card stays valid JSON.
+    report = _single_report([Finding(severity="info", message="ok")])
+    body = _tg_body(report, "info")
+    assert "失败检查" not in body
+    contents = _lark_contents(_lark_card(report, "info"))  # asserts valid JSON
+    assert not any("失败检查" in c for c in contents)
+
+
+def test_failed_checks_coverage_count_matches_section() -> None:
+    # Coverage line's failed count == number of failed inspector_results, and
+    # every failed host appears in the 失败检查 section (count parity).
+    report = _failed_fleet_report()
+    body = _tg_body(report, "info")
+    assert "7 项失败" in body  # 3 cloudcone + 2 vultr + 1 sao-paulo + 1 tokyo
+    # Distinct (target, label) groups = 4 lines under the section.
+    for host_reason in (
+        "cloudcone · 连接超时",
+        "vultr · 采集异常",
+        "sao\\-paulo · 执行超时",
+        "tokyo · 不可达",
+    ):
+        assert body.count(host_reason) == 1
+
+
+def test_lark_failed_checks_comma_permutations_all_valid_json() -> None:
+    # The 失败检查 section owns a trailing comma + no leading comma (mirroring the
+    # coverage block). Pin all four comma permutations as valid JSON.
+    fail = _ir(
+        "linux.cpu", target="cloudcone", status="target_unreachable", error="ssh_connect_timeout"
+    )
+
+    # ① failed>0 ∧ 无 finding (健康态).
+    health = _fleet_report([fail, _ir("linux.ok", target="rome", status="ok")])
+    health_contents = _lark_contents(_lark_card(health, "info"))  # asserts valid JSON
+    assert any("失败检查" in c for c in health_contents)
+    assert "✅ 未发现异常" in health_contents
+
+    # ② failed>0 ∧ 有 finding (失败检查节与发现节相邻).
+    rich = _fleet_report(
+        [
+            fail,
+            _ir(
+                "linux.disk",
+                target="rome",
+                findings=[Finding(severity="critical", message="磁盘满")],
+            ),
+        ]
+    )
+    rich_contents = _lark_contents(_lark_card(rich, "critical"))  # asserts valid JSON
+    assert any("失败检查" in c for c in rich_contents)
+    assert any("磁盘满" in c for c in rich_contents)
+
+    # ③ failed>0 ∧ meta is None (覆盖行省略、失败检查节紧随抬头).
+    meta_none = health.model_copy(update={"meta": None, "schema_version": "1.0"})
+    assert meta_none.meta is None
+    mn_contents = _lark_contents(_lark_card(meta_none, "info"))  # asserts valid JSON
+    assert any("失败检查" in c for c in mn_contents)
+
+    # ④ failed==0 (节省略).
+    clean = _fleet_report(
+        [
+            _ir(
+                "linux.disk",
+                target="rome",
+                findings=[Finding(severity="info", message="ok")],
+            )
+        ]
+    )
+    clean_contents = _lark_contents(_lark_card(clean, "info"))  # asserts valid JSON
+    assert not any("失败检查" in c for c in clean_contents)
+
+
+def test_telegram_failed_checks_meta_none_renders_after_header() -> None:
+    # meta is None ∧ failed > 0: coverage line omitted, but the 失败检查 section
+    # still renders directly after the 抬头 (data source is inspector_results,
+    # meta-independent). Format intact, no coverage line.
+    fail = _ir(
+        "linux.cpu", target="cloudcone", status="target_unreachable", error="ssh_connect_timeout"
+    )
+    report = _fleet_report([fail, _ir("linux.ok", target="rome", status="ok")]).model_copy(
+        update={"meta": None, "schema_version": "1.0"}
+    )
+    assert report.meta is None
+    body = _tg_body(report, "info")
+    assert "*失败检查*" in body
+    assert "cloudcone · 连接超时" in body
+    # Coverage line is omitted (meta is None) — no 项检查 clause.
+    assert "项检查" not in body
+    # 抬头 is the first line; the failed-checks header follows.
+    assert body.index("Hostlens 巡检") < body.index("*失败检查*")

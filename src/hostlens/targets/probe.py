@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from hostlens.core.exceptions import TargetError
 from hostlens.targets.inventory.models import contains_unsafe_display_chars
 from hostlens.targets.registry import build_one_target
+from hostlens.targets.ssh import _DEFAULT_COLD_CONNECT_RETRY_BUDGET_SECONDS
 
 if TYPE_CHECKING:
     from hostlens.core.config import Settings
@@ -327,7 +328,15 @@ class TargetProbe:
         """
 
         try:
-            target = build_one_target(entry, self._settings)
+            # Onboarding probe opts into the cold-connect retry budget —
+            # a freshly-imported Tailscale host may be 冷 on first dial
+            # (spec 决策 1). Probe builds + ``aclose``s a new SSHTarget
+            # per host, so the negative cache never crosses hosts.
+            target = build_one_target(
+                entry,
+                self._settings,
+                cold_connect_retry_budget_seconds=_DEFAULT_COLD_CONNECT_RETRY_BUDGET_SECONDS,
+            )
         except asyncio.CancelledError:
             raise
         except Exception:

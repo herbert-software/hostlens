@@ -91,6 +91,20 @@ _KEEPALIVE_INTERVAL: Final[int] = 60
 # Default connect_timeout when ``TargetEntry`` does not override.
 _DEFAULT_CONNECT_TIMEOUT: Final[int] = 10
 
+# Cold-connect retry budget (first-connect only). ``None`` budget = single
+# attempt = legacy behaviour; only the schedule (fleet) + probe (onboarding)
+# paths opt in to ``_DEFAULT_...`` (see ssh-execution-target spec 决策 1).
+# Tailscale cold paths converge gradually on first dial (measured ~70s on
+# cloudcone), which a single ``connect_timeout`` cannot cover; retry within
+# the total budget with a 1s backoff that aggressively re-probes the
+# handshake rather than busy-waiting.
+_DEFAULT_COLD_CONNECT_RETRY_BUDGET_SECONDS: Final[float] = 90.0
+_COLD_CONNECT_RETRY_DELAY: Final[float] = 1.0
+# Batch-level negative cache: TTL after a budget-exhaust stamp during which
+# sibling inspectors sharing the long-lived SSHTarget fast-fail instead of
+# each paying their own budget (N budgets collapse to ~one).
+_COLD_CONNECT_NEG_TTL: Final[float] = 120.0
+
 # Bare credential keyword scrub — covers "with password X" / "auth token
 # Y" / "passphrase Z" formats that ``scrub_exception_message`` (which is
 # tuned for ``key=value`` and well-known patterns) does not catch. The
@@ -136,6 +150,7 @@ class SSHTarget:
         self,
         name: str,
         *,
+        cold_connect_retry_budget_seconds: float | None = None,
         _settings: object | None = None,
         _insecure_skip_host_key_check: bool = False,
     ) -> None:
@@ -163,6 +178,13 @@ class SSHTarget:
         # initialised at the very top of ``__init__`` so ``__del__`` is
         # safe even if name-regex validation aborts construction.
         self._last_used_at: float = 0.0
+        # Cold-connect retry budget (construction param, not per-entry —
+        # see spec 决策 1). ``None`` keeps the legacy single-attempt path.
+        self._cold_connect_retry_budget_seconds: float | None = cold_connect_retry_budget_seconds
+        # Batch-level negative cache stamp. Written once on budget
+        # exhaustion (step ⑤), read once at lock entry under ``_conn is
+        # None`` (step ②), cleared on first-connect success (step ④).
+        self._cold_connect_failed_at: float | None = None
         # The lock is lazily materialised on first ``_get_lock`` call
         # from a coroutine. ``asyncio.Lock`` created in ``__init__``
         # (sync code, no running loop on Python 3.11 in some
@@ -242,12 +264,16 @@ class SSHTarget:
 
         return int(Settings().ssh.idle_timeout_seconds)
 
-    def _connect_kwargs(self) -> dict[str, Any]:
+    def _connect_kwargs(self, *, connect_timeout: float | None = None) -> dict[str, Any]:
         """Build the asyncssh.connect kwargs dict from ``self._entry``.
 
         Centralised here so the first-connect and reconnect paths share
         the exact same parameter set (including the explicit security
         toggles: agent_forwarding=False, x11_forwarding=False).
+
+        ``connect_timeout`` override is the **only** point where the
+        cold-connect budget caps a single attempt to the remaining
+        budget; ``None`` keeps the per-target default.
         """
 
         entry = self._entry
@@ -266,7 +292,9 @@ class SSHTarget:
             "agent_forwarding": False,
             "x11_forwarding": False,
             "keepalive_interval": _KEEPALIVE_INTERVAL,
-            "connect_timeout": self._connect_timeout(),
+            "connect_timeout": (
+                connect_timeout if connect_timeout is not None else self._connect_timeout()
+            ),
         }
         if entry.key_path is not None:
             kwargs["client_keys"] = [os.path.expanduser(entry.key_path)]
@@ -292,7 +320,11 @@ class SSHTarget:
             kwargs["known_hosts"] = None
         return kwargs
 
-    async def _open_connection(self) -> asyncssh.SSHClientConnection:
+    async def _open_connection(
+        self,
+        *,
+        connect_timeout: float | None = None,
+    ) -> asyncssh.SSHClientConnection:
         """Single ``asyncssh.connect`` call with the spec-mandated exception mapping.
 
         Raises ``TargetError`` with the appropriate ``kind`` for each
@@ -300,10 +332,14 @@ class SSHTarget:
         upward. The caller is responsible for choosing whether to enter
         the reconnect loop (only valid when ``self._conn`` was already
         set before the call).
+
+        ``connect_timeout`` (None → per-target default) is threaded to
+        ``_connect_kwargs`` so the cold-connect budget can cap each
+        attempt to the remaining budget.
         """
 
         try:
-            return await asyncssh.connect(**self._connect_kwargs())
+            return await asyncssh.connect(**self._connect_kwargs(connect_timeout=connect_timeout))
         except (
             TimeoutError,
             ConnectionRefusedError,
@@ -391,7 +427,14 @@ class SSHTarget:
         """
 
         async with self._get_lock():
-            # Idle-timeout sweep: if the previous user left the
+            # Lock-body order is pinned (spec §需求 "_ensure_connection
+            # 锁体精确顺序"; do not re-order):
+            #   ① idle sweep → ② negative-cache fast-fail (only when
+            #   _conn is None) → ③ budget retry / single open →
+            #   ④ success (assign + clear stamp) / ⑤ exhaust (stamp +
+            #   raise, inside the first-connect helper).
+
+            # ① Idle-timeout sweep: if the previous user left the
             # connection sitting around longer than the configured
             # ``ssh.idle_timeout_seconds``, close it before reuse. Using
             # ``time.monotonic`` (not ``time.time``) avoids wall-clock
@@ -402,8 +445,25 @@ class SSHTarget:
                     await self._close_conn_locked()
 
             if self._conn is None:
-                self._conn = await self._open_connection()
-                # Stamp the open time INSIDE the lock so a just-opened
+                # ② Negative-cache fast-fail — read the stamp once, only
+                # at lock entry under ``_conn is None``. A冷 host that
+                # already exhausted its budget short-circuits sibling
+                # inspectors within the TTL instead of each paying its
+                # own budget.
+                if (
+                    self._cold_connect_failed_at is not None
+                    and time.monotonic() - self._cold_connect_failed_at < _COLD_CONNECT_NEG_TTL
+                ):
+                    raise TargetError(
+                        kind="ssh_connect_timeout",
+                        target=self.name,
+                        host=self._entry.host if self._entry is not None else None,
+                    )
+
+                # ③ First connect (single open when no budget; budget
+                # retry loop otherwise). ④/⑤ are handled inside.
+                conn = await self._first_connect()
+                # ④ Stamp the open time INSIDE the lock so a just-opened
                 # connection is never seen as idle. Without this,
                 # ``_last_used_at`` stays at its 0.0 init until the first
                 # ``exec`` finishes its channel run (bumped at the post-run
@@ -413,8 +473,62 @@ class SSHTarget:
                 # ``idle = monotonic() - 0.0`` (≈ uptime, far over the
                 # timeout) and wrongly closes + reopens the fresh connection,
                 # dialling out once per racing caller instead of sharing one.
+                self._conn = conn
                 self._last_used_at = time.monotonic()
+                # ④ Clear the negative-cache stamp — the unique clear
+                # point (see ``_reconnect`` for why that path leaves it
+                # alone).
+                self._cold_connect_failed_at = None
             return self._conn
+
+    async def _first_connect(self) -> asyncssh.SSHClientConnection:
+        """Open the first control connection (single attempt or budget retry).
+
+        Called with ``self._lock`` held and ``self._conn is None``. When
+        no cold-connect budget is set, this is a single ``_open_connection``
+        — byte-identical to the legacy first-connect path. With a budget,
+        retries **only** ``ssh_connect_timeout`` within the total budget
+        (spec 决策 2): each attempt's ``connect_timeout`` and each backoff
+        are capped to the remaining budget so the last attempt never
+        overshoots the deadline. Auth / host-key / KEX (永久错) and the
+        ``ssh_connect_failed`` 兜底 (may hide host-key drift) re-raise
+        immediately — the retry set is strictly ``ssh_connect_timeout``.
+
+        On budget exhaustion stamps the negative cache once and raises
+        ``ssh_connect_timeout`` (kind unchanged for caller contract).
+        """
+
+        budget = self._cold_connect_retry_budget_seconds
+        if budget is None:
+            return await self._open_connection()
+
+        start = time.monotonic()
+        while True:
+            remaining = budget - (time.monotonic() - start)
+            if remaining <= 0:
+                break
+            try:
+                return await self._open_connection(
+                    connect_timeout=min(self._connect_timeout(), remaining),
+                )
+            except TargetError as exc:
+                if exc.kind != "ssh_connect_timeout":
+                    raise
+                # Re-check the deadline BEFORE the backoff so exhaustion
+                # is judged immediately rather than one backoff late
+                # (which would push total time to budget + 1s).
+                remaining = budget - (time.monotonic() - start)
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(_COLD_CONNECT_RETRY_DELAY, remaining))
+
+        # ⑤ Budget exhausted — stamp the negative cache once and raise.
+        self._cold_connect_failed_at = time.monotonic()
+        raise TargetError(
+            kind="ssh_connect_timeout",
+            target=self.name,
+            host=self._entry.host if self._entry is not None else None,
+        )
 
     async def _close_conn_locked(self) -> None:
         """Close the current control connection.
